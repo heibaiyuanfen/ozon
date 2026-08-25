@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { registerReportCache, clearReportCache } from "./reportCache";
 import "./analytics.css";
 import "./listing.css";
 import * as echarts from "echarts";
@@ -115,11 +116,10 @@ const cachedDetail = (range: DateRange) => {
   if (!detailCache.has(key)) detailCache.set(key, analyticsDetail(range));
   return detailCache.get(key)!;
 };
-export const clearReportCache = () => {
+registerReportCache(() => {
   reportCache.clear();
   detailCache.clear();
-};
-window.addEventListener("report-settings-changed", clearReportCache);
+});
 
 export function ListingPage() {
   const empty: ListingSettings = {

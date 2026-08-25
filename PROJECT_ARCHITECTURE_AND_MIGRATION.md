@@ -293,6 +293,15 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 保留原版 ROI 分段运费、佣金、广告、货损核价逻辑。
 - Rust 单元测试 9 项通过，前端和 Release 构建通过，EXE 实际启动验证通过。
 
+### 2026-08-25：首轮迁移校对与前端性能改进
+
+- 目的：开始处理“部分完成，仍需逐项校对”清单，并优先落地可验证的前端性能和图片展示改进。
+- 修改模块/文件：`desktop-next/src/App.tsx`、`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/vite.config.ts`、`desktop-next/src-tauri/src/secrets.rs`，新增 `desktop-next/src/reportCache.ts`、`desktop-next/src-tauri/icons/icon.png` 和 `tools/setup_dev_env.sh`。
+- 数据口径或数据库变化：本轮未改变数据库结构和业务计算口径；Seller 商品同步已有 `products.image_url` 保留与 `/v3/product/info/list` 补全逻辑。DPAPI 仅在 Windows 编译，非 Windows 测试使用 `plain:` 回退，不用于生产凭证保护。
+- 缓存与性能影响：Phase2、Operations、ProductInsights 页面改为 `React.lazy` 按需加载；报告缓存清理改为注册式机制，切换店铺或设置变化仍能清理实际缓存；订单图片增加 `alt`、`loading=lazy` 和 `decoding=async`；Vite 新增 React、图标库和 ECharts 手动 chunk。
+- 测试和构建结果：TypeScript 检查通过；Vite 生产构建通过并生成独立页面 chunk，主入口由约 1.36 MB 降至约 214 kB（gzip 约 68 kB），ECharts 独立为约 1.13 MB chunk。仍有 ECharts 大 chunk 警告，但不再阻塞首屏入口。Python 旧版 96 个测试通过、跳过 1 个；Rust 后端 9 个测试全部通过。新增 `tools/setup_dev_env.sh` 可在 Ubuntu 补齐 Cargo、GTK/WebKit、pnpm 等依赖。
+- 尚存风险/下一步：继续完成 ECharts 动态加载、Finance 归因 golden fixtures、库存字段对照样本、竞品验证页降级策略、WB 新版页面与其后端命令的模块化，以及跨版本口径回归。
+
 ### 更新记录模板
 
 ```markdown

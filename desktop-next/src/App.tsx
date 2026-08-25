@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   startTransition,
   useDeferredValue,
   useEffect,
@@ -46,26 +48,23 @@ import type {
   ProductRow,
   Shop,
 } from "./types";
-import {
-  InventoryPage,
-  ProductsPage,
-  SettingsPage,
-  ShopsPage,
-} from "./Phase2Pages";
-import {
-  AiPage,
-  clearReportCache,
-  CompetitorsPage,
-  FbsPage,
-  FeishuPage,
-  ListingPage,
-  MigrationPage,
-  ReportsPage,
-  SupplyPage,
-  SyncPage,
-  WbPage,
-} from "./OperationsPages";
-import { ProductInsights } from "./ProductInsights";
+import { clearReportCache } from "./reportCache";
+
+const InventoryPage = lazy(() => import("./Phase2Pages").then((m) => ({ default: m.InventoryPage })));
+const ProductsPage = lazy(() => import("./Phase2Pages").then((m) => ({ default: m.ProductsPage })));
+const SettingsPage = lazy(() => import("./Phase2Pages").then((m) => ({ default: m.SettingsPage })));
+const ShopsPage = lazy(() => import("./Phase2Pages").then((m) => ({ default: m.ShopsPage })));
+const AiPage = lazy(() => import("./OperationsPages").then((m) => ({ default: m.AiPage })));
+const CompetitorsPage = lazy(() => import("./OperationsPages").then((m) => ({ default: m.CompetitorsPage })));
+const FbsPage = lazy(() => import("./OperationsPages").then((m) => ({ default: m.FbsPage })));
+const FeishuPage = lazy(() => import("./OperationsPages").then((m) => ({ default: m.FeishuPage })));
+const ListingPage = lazy(() => import("./OperationsPages").then((m) => ({ default: m.ListingPage })));
+const MigrationPage = lazy(() => import("./OperationsPages").then((m) => ({ default: m.MigrationPage })));
+const ReportsPage = lazy(() => import("./OperationsPages").then((m) => ({ default: m.ReportsPage })));
+const SupplyPage = lazy(() => import("./OperationsPages").then((m) => ({ default: m.SupplyPage })));
+const SyncPage = lazy(() => import("./OperationsPages").then((m) => ({ default: m.SyncPage })));
+const WbPage = lazy(() => import("./OperationsPages").then((m) => ({ default: m.WbPage })));
+const ProductInsights = lazy(() => import("./ProductInsights").then((m) => ({ default: m.ProductInsights })));
 
 const emptyDashboard: DashboardData = {
   revenue: 0,
@@ -696,8 +695,9 @@ function Orders({
                     {row.imageUrl ? (
                       <img
                         src={row.imageUrl}
-                        alt=""
+                        alt={row.productName || row.offerId || row.sku || "商品图片"}
                         loading="lazy"
+                        decoding="async"
                         onError={(e) => {
                           e.currentTarget.style.display = "none";
                         }}
@@ -970,6 +970,10 @@ function Advertising({
   );
 }
 
+function LazyFallback() {
+  return <div className="card page-loading">正在加载模块…</div>;
+}
+
 export function App() {
   const [page, setPage] = useState<PageKey>("dashboard"),
     [workspace, setWorkspace] = useState<"ozon" | "wb">("ozon"),
@@ -1031,6 +1035,7 @@ export function App() {
         setWbPage={setWbPage}
       />
       <main>
+        <Suspense fallback={<LazyFallback />}>
         {workspace === "wb" && <WbPage range={range} section={wbPage} />}
         {workspace === "ozon" && (
           <>
@@ -1134,6 +1139,7 @@ export function App() {
             {page === "settings" && <SettingsPage status={connection} />}
           </>
         )}
+        </Suspense>
       </main>
     </div>
   );
