@@ -7,7 +7,7 @@ import {
 } from "react";
 import "./performance.css";
 import "./layout-fixes.css";
-import * as echarts from "echarts";
+import * as echarts from "./charts";
 import {
   BarChart3,
   Box,
@@ -1031,7 +1031,7 @@ export function App() {
         setWbPage={setWbPage}
       />
       <main>
-        {workspace === "wb" && <WbPage range={range} section={wbPage} />}
+        {workspace === "wb" && <WbPage range={range} section={wbPage} days={days} setDays={setDays} />}
         {workspace === "ozon" && (
           <>
             {page === "dashboard" && (
@@ -1119,7 +1119,7 @@ export function App() {
             {page === "supply" && <SupplyPage />}{" "}
             {page === "sync" && <SyncPage range={range} />}{" "}
             {page === "feishu" && <FeishuPage range={range} />}{" "}
-            {page === "wb" && <WbPage range={range} section="daily" />}{" "}
+            {page === "wb" && <WbPage range={range} section="daily" days={days} setDays={setDays} />}{" "}
             {page === "migration" && <MigrationPage range={range} />}{" "}
             {page === "listing" && <ListingPage />}{" "}
             {page === "competitors" && <CompetitorsPage />}{" "}

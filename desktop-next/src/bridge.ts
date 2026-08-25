@@ -33,6 +33,10 @@ import type {
   WarehouseMapping,
   WbCost,
   WbDaily,
+  WbOrderRow,
+  WbAdRow,
+  WbWarehouseRow,
+  WbStockRow,
   WbSettings,
 } from "./types";
 
@@ -245,6 +249,12 @@ export async function addCompetitor(productUrl: string): Promise<number> {
 export async function refreshCompetitor(id: number): Promise<void> {
   if (isTauri()) await invoke("refresh_competitor", { id });
 }
+export async function openCompetitorBrowser(id: number): Promise<void> {
+  await invoke("open_competitor_browser", { id });
+}
+export async function importCompetitorHtml(id: number, path: string): Promise<void> {
+  await invoke("import_competitor_html", { id, path });
+}
 export async function refreshCompetitorsDue(): Promise<number> {
   return invoke("refresh_competitors_due");
 }
@@ -418,6 +428,18 @@ export async function saveWbCost(input: WbCost): Promise<void> {
 export async function wbDaily(range: DateRange): Promise<WbDaily[]> {
   return invoke("wb_daily", { range });
 }
+export async function wbOrders(range: DateRange): Promise<WbOrderRow[]> {
+  return invoke("wb_orders", { range });
+}
+export async function wbAds(range: DateRange): Promise<WbAdRow[]> {
+  return invoke("wb_ads", { range });
+}
+export async function wbWarehouses(): Promise<WbWarehouseRow[]> {
+  return invoke("wb_warehouses");
+}
+export async function wbStocks(): Promise<WbStockRow[]> {
+  return invoke("wb_stocks");
+}
 export async function syncWb(range: DateRange): Promise<string> {
   return invoke("sync_wb", { range });
 }
@@ -479,6 +501,10 @@ export async function createListingDraft(reference:string):Promise<number>{retur
 export async function saveListingDraft(form:ListingDraftInput):Promise<number>{return invoke("save_listing_draft",{form});}
 export async function retryListingJob(id:number):Promise<void>{return invoke("retry_listing_job",{id});}
 export async function collectListingReference(id:number):Promise<number>{return invoke("collect_listing_reference",{id});}
+export async function openListingBrowser(id:number):Promise<void>{return invoke("open_listing_browser",{id});}
+export async function importListingHtml(id:number,path:string):Promise<number>{return invoke("import_listing_html",{id,path});}
+export async function refreshListingCategories():Promise<number>{return invoke("refresh_listing_categories");}
+export async function searchListingCategories(query:string,limit=60):Promise<import("./types").ListingCategory[]>{return invoke("search_listing_categories",{query,limit});}
 export async function syncListingCosts(): Promise<number> {
   return invoke("sync_listing_costs");
 }

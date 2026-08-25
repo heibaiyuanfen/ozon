@@ -43,12 +43,60 @@ pub struct WbDaily {
     pub profit_cny: Option<f64>,
     pub complete: bool,
 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WbOrderRow {
+    pub srid: String,
+    pub day: String,
+    pub changed_at: String,
+    pub nm_id: i64,
+    pub article: String,
+    pub warehouse_name: String,
+    pub revenue_cny: f64,
+    pub cancelled: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WbAdRow {
+    pub day: String,
+    pub nm_id: i64,
+    pub campaign_id: i64,
+    pub spend_cny: f64,
+    pub orders: i64,
+    pub sales_cny: f64,
+    pub views: i64,
+    pub clicks: i64,
+    pub ctr: Option<f64>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WbWarehouseRow {
+    pub warehouse_key: String,
+    pub name: String,
+    pub address: String,
+    pub city: String,
+    pub country: String,
+    pub mode: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WbStockRow {
+    pub nm_id: i64,
+    pub chrt_id: i64,
+    pub warehouse_id: i64,
+    pub warehouse_name: String,
+    pub region_name: String,
+    pub quantity: i64,
+    pub in_way_to_client: i64,
+    pub in_way_from_client: i64,
+    pub updated_at: String,
+}
 
 fn db(state: &AppState) -> Result<Connection, String> {
     let folder = state.data_dir.join("wb");
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let c = Connection::open(folder.join("wb_analytics.db")).map_err(|e| e.to_string())?;
-    c.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS orders(srid TEXT PRIMARY KEY,day TEXT NOT NULL,changed_at TEXT,nm_id INTEGER NOT NULL DEFAULT 0,article TEXT,warehouse_name TEXT,quantity INTEGER NOT NULL DEFAULT 1,revenue_rub REAL NOT NULL DEFAULT 0,is_cancelled INTEGER NOT NULL DEFAULT 0,raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS ad_daily(day TEXT NOT NULL,nm_id INTEGER NOT NULL,campaign_id INTEGER NOT NULL,spend_rub REAL NOT NULL DEFAULT 0,ad_orders INTEGER NOT NULL DEFAULT 0,ad_sales_rub REAL NOT NULL DEFAULT 0,views INTEGER NOT NULL DEFAULT 0,clicks INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(day,nm_id,campaign_id));CREATE TABLE IF NOT EXISTS product_costs(nm_id INTEGER PRIMARY KEY,article TEXT NOT NULL DEFAULT '',purchase_cost_cny REAL,length_cm REAL,width_cm REAL,height_cm REAL,weight_kg REAL,warehouse_mode TEXT NOT NULL DEFAULT 'auto');CREATE TABLE IF NOT EXISTS warehouses(warehouse_key TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',address TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',country TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL DEFAULT 'unknown',raw_json TEXT NOT NULL DEFAULT '{}');").map_err(|e|e.to_string())?;
+    c.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS orders(srid TEXT PRIMARY KEY,day TEXT NOT NULL,changed_at TEXT,nm_id INTEGER NOT NULL DEFAULT 0,article TEXT,warehouse_name TEXT,quantity INTEGER NOT NULL DEFAULT 1,revenue_rub REAL NOT NULL DEFAULT 0,is_cancelled INTEGER NOT NULL DEFAULT 0,raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS ad_daily(day TEXT NOT NULL,nm_id INTEGER NOT NULL,campaign_id INTEGER NOT NULL,spend_rub REAL NOT NULL DEFAULT 0,ad_orders INTEGER NOT NULL DEFAULT 0,ad_sales_rub REAL NOT NULL DEFAULT 0,views INTEGER NOT NULL DEFAULT 0,clicks INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(day,nm_id,campaign_id));CREATE TABLE IF NOT EXISTS product_costs(nm_id INTEGER PRIMARY KEY,article TEXT NOT NULL DEFAULT '',purchase_cost_cny REAL,length_cm REAL,width_cm REAL,height_cm REAL,weight_kg REAL,warehouse_mode TEXT NOT NULL DEFAULT 'auto');CREATE TABLE IF NOT EXISTS warehouses(warehouse_key TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',address TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',country TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL DEFAULT 'unknown',raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS stocks(nm_id INTEGER NOT NULL,chrt_id INTEGER NOT NULL,warehouse_id INTEGER NOT NULL,warehouse_name TEXT NOT NULL DEFAULT '',region_name TEXT NOT NULL DEFAULT '',quantity INTEGER NOT NULL DEFAULT 0,in_way_to_client INTEGER NOT NULL DEFAULT 0,in_way_from_client INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(nm_id,chrt_id,warehouse_id));").map_err(|e|e.to_string())?;
     Ok(c)
 }
 fn setting(c: &Connection, key: &str, default: &str) -> String {
@@ -264,7 +312,7 @@ pub fn wb_daily(range: DateRange, state: State<AppState>) -> Result<Vec<WbDaily>
         .parse::<f64>()
         .unwrap_or(15.0)
         .max(0.0);
-    let sql = "WITH o AS (SELECT day,nm_id,MAX(article) article,MAX(warehouse_name) warehouse_name,SUM(CASE WHEN is_cancelled=0 THEN quantity ELSE 0 END) quantity,SUM(CASE WHEN is_cancelled=0 THEN revenue_rub ELSE 0 END) revenue_rub FROM orders WHERE day BETWEEN ?1 AND ?2 GROUP BY day,nm_id),a AS (SELECT day,nm_id,SUM(spend_rub) spend_rub FROM ad_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY day,nm_id) SELECT o.day,o.nm_id,o.article,o.warehouse_name,o.quantity,o.revenue_rub,COALESCE(a.spend_rub,0),pc.purchase_cost_cny,pc.length_cm,pc.width_cm,pc.height_cm,pc.weight_kg,COALESCE(pc.warehouse_mode,'auto') FROM o LEFT JOIN a ON a.day=o.day AND a.nm_id=o.nm_id LEFT JOIN product_costs pc ON pc.nm_id=o.nm_id ORDER BY o.day DESC,o.revenue_rub DESC";
+    let sql = "WITH o AS (SELECT day,nm_id,MAX(article) article,MAX(warehouse_name) warehouse_name,SUM(CASE WHEN is_cancelled=0 THEN quantity ELSE 0 END) quantity,SUM(CASE WHEN is_cancelled=0 THEN revenue_rub ELSE 0 END) revenue_rub FROM orders WHERE day BETWEEN ?1 AND ?2 GROUP BY day,nm_id HAVING SUM(CASE WHEN is_cancelled=0 THEN quantity ELSE 0 END)>0),a AS (SELECT day,nm_id,SUM(spend_rub) spend_rub FROM ad_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY day,nm_id) SELECT o.day,o.nm_id,o.article,o.warehouse_name,o.quantity,o.revenue_rub,COALESCE(a.spend_rub,0),pc.purchase_cost_cny,pc.length_cm,pc.width_cm,pc.height_cm,pc.weight_kg,COALESCE(pc.warehouse_mode,'auto') FROM o LEFT JOIN a ON a.day=o.day AND a.nm_id=o.nm_id LEFT JOIN product_costs pc ON pc.nm_id=o.nm_id ORDER BY o.day DESC,o.revenue_rub DESC";
     let mut stmt = c.prepare(sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![range.from, range.to], |r| {
@@ -317,6 +365,121 @@ pub fn wb_daily(range: DateRange, state: State<AppState>) -> Result<Vec<WbDaily>
         .map_err(|e| e.to_string())?;
     Ok(rows)
 }
+fn wb_post(token: &str, url: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    if token.is_empty() {
+        return Err("请先填写 WB API Token".into());
+    }
+    let response = ureq::post(url)
+        .set("Authorization", token)
+        .set("Accept", "application/json")
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|e| format!("WB API 请求失败：{e}"))?;
+    let raw = response.into_string().map_err(|e| e.to_string())?;
+    serde_json::from_str(&raw).map_err(|e| format!("WB API 返回无法解析：{e}"))
+}
+
+#[tauri::command]
+pub fn wb_orders(range: DateRange, state: State<AppState>) -> Result<Vec<WbOrderRow>, String> {
+    let c = db(&state)?;
+    let rate = setting(&c, "rub_per_cny", "12")
+        .parse::<f64>()
+        .unwrap_or(12.0)
+        .max(0.0001);
+    let mut stmt = c.prepare("SELECT srid,day,COALESCE(changed_at,''),nm_id,COALESCE(article,''),COALESCE(warehouse_name,''),revenue_rub,is_cancelled FROM orders WHERE day BETWEEN ?1 AND ?2 ORDER BY day DESC,changed_at DESC LIMIT 5000").map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![range.from, range.to], |r| {
+            Ok(WbOrderRow {
+                srid: r.get(0)?,
+                day: r.get(1)?,
+                changed_at: r.get(2)?,
+                nm_id: r.get(3)?,
+                article: r.get(4)?,
+                warehouse_name: r.get(5)?,
+                revenue_cny: r.get::<_, f64>(6)? / rate,
+                cancelled: r.get::<_, i64>(7)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn wb_ads(range: DateRange, state: State<AppState>) -> Result<Vec<WbAdRow>, String> {
+    let c = db(&state)?;
+    let rate = setting(&c, "rub_per_cny", "12")
+        .parse::<f64>()
+        .unwrap_or(12.0)
+        .max(0.0001);
+    let mut stmt = c.prepare("SELECT day,nm_id,campaign_id,spend_rub,ad_orders,ad_sales_rub,views,clicks FROM ad_daily WHERE day BETWEEN ?1 AND ?2 ORDER BY day DESC,spend_rub DESC LIMIT 10000").map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![range.from, range.to], |r| {
+            let views: i64 = r.get(6)?;
+            let clicks: i64 = r.get(7)?;
+            Ok(WbAdRow {
+                day: r.get(0)?,
+                nm_id: r.get(1)?,
+                campaign_id: r.get(2)?,
+                spend_cny: r.get::<_, f64>(3)? / rate,
+                orders: r.get(4)?,
+                sales_cny: r.get::<_, f64>(5)? / rate,
+                views,
+                clicks,
+                ctr: (views > 0).then_some(clicks as f64 / views as f64 * 100.0),
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn wb_warehouses(state: State<AppState>) -> Result<Vec<WbWarehouseRow>, String> {
+    let c = db(&state)?;
+    let mut stmt = c.prepare("SELECT warehouse_key,name,address,city,country,mode FROM warehouses ORDER BY country,city,name").map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(WbWarehouseRow {
+                warehouse_key: r.get(0)?,
+                name: r.get(1)?,
+                address: r.get(2)?,
+                city: r.get(3)?,
+                country: r.get(4)?,
+                mode: r.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn wb_stocks(state: State<AppState>) -> Result<Vec<WbStockRow>, String> {
+    let c = db(&state)?;
+    let mut stmt = c.prepare("SELECT nm_id,chrt_id,warehouse_id,warehouse_name,region_name,quantity,in_way_to_client,in_way_from_client,updated_at FROM stocks ORDER BY quantity DESC,nm_id,warehouse_name LIMIT 250000").map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(WbStockRow {
+                nm_id: r.get(0)?,
+                chrt_id: r.get(1)?,
+                warehouse_id: r.get(2)?,
+                warehouse_name: r.get(3)?,
+                region_name: r.get(4)?,
+                quantity: r.get(5)?,
+                in_way_to_client: r.get(6)?,
+                in_way_from_client: r.get(7)?,
+                updated_at: r.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
 
 fn campaign_ids(value: &serde_json::Value, target: &mut BTreeSet<i64>) {
     match value {
@@ -331,8 +494,85 @@ fn campaign_ids(value: &serde_json::Value, target: &mut BTreeSet<i64>) {
                     target.insert(id);
                 }
             }
+            // Some WB campaign-list responses use `id` inside advert_list.
+            if o.contains_key("changeTime") || o.contains_key("change_time") {
+                if let Some(id) = o.get("id").and_then(|v| v.as_i64()) {
+                    target.insert(id);
+                }
+            }
             for v in o.values() {
                 campaign_ids(v, target)
+            }
+        }
+        _ => {}
+    }
+}
+
+fn integer(value: Option<&serde_json::Value>) -> i64 {
+    value
+        .and_then(|v| v.as_i64())
+        .or_else(|| value.and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+        .unwrap_or(0)
+}
+
+// WB has returned product statistics both as days[].apps[].nm[] and directly
+// below other grouping nodes. Walk the response by meaning instead of relying
+// on one fixed nesting layout, while carrying campaign/date from its parents.
+fn ad_products(
+    value: &serde_json::Value,
+    inherited_campaign: i64,
+    inherited_day: &str,
+    target: &mut Vec<(String, i64, i64, f64, i64, f64, i64, i64)>,
+) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                ad_products(item, inherited_campaign, inherited_day, target);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let campaign = integer(object.get("advertId").or_else(|| object.get("advert_id")))
+                .max(inherited_campaign);
+            let day = object
+                .get("date")
+                .or_else(|| object.get("day"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().take(10).collect::<String>())
+                .filter(|s| s.len() == 10)
+                .unwrap_or_else(|| inherited_day.to_string());
+            let nm_id = integer(
+                object
+                    .get("nmId")
+                    .or_else(|| object.get("nmID"))
+                    .or_else(|| object.get("nm_id"))
+                    .or_else(|| object.get("nm").filter(|v| !v.is_array())),
+            );
+            if nm_id > 0 && campaign > 0 && day.len() == 10 {
+                target.push((
+                    day,
+                    nm_id,
+                    campaign,
+                    number(
+                        object
+                            .get("sum")
+                            .or_else(|| object.get("spend"))
+                            .or_else(|| object.get("expense")),
+                    ),
+                    number(object.get("orders").or_else(|| object.get("orderCount"))) as i64,
+                    number(
+                        object
+                            .get("sum_price")
+                            .or_else(|| object.get("sumPrice"))
+                            .or_else(|| object.get("sales"))
+                            .or_else(|| object.get("revenue")),
+                    ),
+                    number(object.get("views").or_else(|| object.get("impressions"))) as i64,
+                    number(object.get("clicks")) as i64,
+                ));
+                return;
+            }
+            for child in object.values() {
+                ad_products(child, campaign, &day, target);
             }
         }
         _ => {}
@@ -373,7 +613,10 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
     )?;
     let mut ids = BTreeSet::new();
     campaign_ids(&campaigns, &mut ids);
+    let campaign_count = ids.len();
     let mut ad_count = 0;
+    let mut ad_payload_count = 0;
+    let mut ad_payload_keys = BTreeSet::new();
     for (chunk_index, chunk) in ids.into_iter().collect::<Vec<_>>().chunks(50).enumerate() {
         if chunk_index > 0 {
             std::thread::sleep(std::time::Duration::from_secs(20));
@@ -384,45 +627,17 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
             .collect::<Vec<_>>()
             .join(",");
         let payload=wb_get(&token,&format!("https://advert-api.wildberries.ru/adv/v3/fullstats?ids={list}&beginDate={}&endDate={}",range.from,range.to))?;
+        ad_payload_count += payload.as_array().map(|v| v.len()).unwrap_or(0);
         for campaign in payload.as_array().into_iter().flatten() {
-            let cid = campaign
-                .get("advertId")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            for day in campaign
-                .get("days")
-                .and_then(|v| v.as_array())
-                .into_iter()
-                .flatten()
-            {
-                let date = day
-                    .get("date")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .chars()
-                    .take(10)
-                    .collect::<String>();
-                for app in day
-                    .get("apps")
-                    .and_then(|v| v.as_array())
-                    .into_iter()
-                    .flatten()
-                {
-                    for product in app
-                        .get("nm")
-                        .and_then(|v| v.as_array())
-                        .into_iter()
-                        .flatten()
-                    {
-                        let nm = product.get("nmId").and_then(|v| v.as_i64()).unwrap_or(0);
-                        if nm == 0 {
-                            continue;
-                        }
-                        c.execute("INSERT INTO ad_daily(day,nm_id,campaign_id,spend_rub,ad_orders,ad_sales_rub,views,clicks)VALUES(?1,?2,?3,?4,?5,?6,?7,?8)ON CONFLICT(day,nm_id,campaign_id)DO UPDATE SET spend_rub=excluded.spend_rub,ad_orders=excluded.ad_orders,ad_sales_rub=excluded.ad_sales_rub,views=excluded.views,clicks=excluded.clicks",params![date,nm,cid,number(product.get("sum")),number(product.get("orders"))as i64,number(product.get("sum_price").or_else(||product.get("sumPrice"))),number(product.get("views"))as i64,number(product.get("clicks"))as i64]).map_err(|e|e.to_string())?;
-                        ad_count += 1;
-                    }
-                }
+            if let Some(object) = campaign.as_object() {
+                ad_payload_keys.extend(object.keys().cloned());
             }
+        }
+        let mut products = Vec::new();
+        ad_products(&payload, 0, "", &mut products);
+        for (date, nm, cid, spend, orders, sales, views, clicks) in products {
+            c.execute("INSERT INTO ad_daily(day,nm_id,campaign_id,spend_rub,ad_orders,ad_sales_rub,views,clicks)VALUES(?1,?2,?3,?4,?5,?6,?7,?8)ON CONFLICT(day,nm_id,campaign_id)DO UPDATE SET spend_rub=excluded.spend_rub,ad_orders=excluded.ad_orders,ad_sales_rub=excluded.ad_sales_rub,views=excluded.views,clicks=excluded.clicks",params![date,nm,cid,spend,orders,sales,views,clicks]).map_err(|e|e.to_string())?;
+            ad_count += 1;
         }
     }
     let offices = wb_get(
@@ -466,8 +681,69 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
             warehouse_count += 1;
         }
     }
+    // Current WB-warehouse inventory API (introduced in 2026). It is read-only,
+    // uses Analytics-token permission and replaces the removed supplier/stocks endpoint.
+    let stock_result = (|| -> Result<i64, String> {
+        let mut offset = 0_i64;
+        let page_size = 250_000_i64;
+        let mut stock_count = 0_i64;
+        loop {
+            if offset > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(20));
+            }
+            let payload = wb_post(&token, "https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses",
+            &serde_json::json!({"nmIds":[],"chrtIds":[],"limit":page_size,"offset":offset}))?;
+            let items = payload
+                .pointer("/data/items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if offset == 0 {
+                c.execute("DELETE FROM stocks", [])
+                    .map_err(|e| e.to_string())?;
+            }
+            let tx = c.transaction().map_err(|e| e.to_string())?;
+            for item in &items {
+                let nm = item
+                    .get("nmId")
+                    .or_else(|| item.get("nmID"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let chrt = item
+                    .get("chrtId")
+                    .or_else(|| item.get("chrtID"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let warehouse = item
+                    .get("warehouseId")
+                    .or_else(|| item.get("warehouseID"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                if nm == 0 || warehouse == 0 {
+                    continue;
+                }
+                tx.execute("INSERT INTO stocks(nm_id,chrt_id,warehouse_id,warehouse_name,region_name,quantity,in_way_to_client,in_way_from_client,updated_at)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,CURRENT_TIMESTAMP)ON CONFLICT(nm_id,chrt_id,warehouse_id)DO UPDATE SET warehouse_name=excluded.warehouse_name,region_name=excluded.region_name,quantity=excluded.quantity,in_way_to_client=excluded.in_way_to_client,in_way_from_client=excluded.in_way_from_client,updated_at=CURRENT_TIMESTAMP",
+                params![nm,chrt,warehouse,item.get("warehouseName").and_then(|v|v.as_str()).unwrap_or_default(),item.get("regionName").and_then(|v|v.as_str()).unwrap_or_default(),item.get("quantity").and_then(|v|v.as_i64()).unwrap_or(0),item.get("inWayToClient").and_then(|v|v.as_i64()).unwrap_or(0),item.get("inWayFromClient").and_then(|v|v.as_i64()).unwrap_or(0)]).map_err(|e|e.to_string())?;
+                stock_count += 1;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            if items.len() < page_size as usize {
+                break;
+            }
+            offset += page_size;
+        }
+        Ok(stock_count)
+    })();
+    let stock_text = match stock_result {
+        Ok(count) => format!("库存 {count}"),
+        Err(error) => format!("库存保留原缓存（新 Analytics 接口不可用：{error}）"),
+    };
     Ok(format!(
-        "WB 同步完成：订单 {order_count}，商品广告 {ad_count}，仓库 {warehouse_count}"
+        "WB 同步完成：订单 {order_count}，广告活动 {campaign_count}，统计活动 {ad_payload_count}，商品广告 {ad_count}，仓库 {warehouse_count}，{stock_text}{}",
+        if campaign_count == 0 { "；未读取到广告活动，请检查 Token 的“推广”权限或 WB 后台是否存在状态为 7/9/11 的活动".to_string() }
+        else if ad_payload_count == 0 { "；WB 统计接口未返回活动（只统计状态 7/9/11，请检查活动状态与所选日期）".to_string() }
+        else if ad_count == 0 { format!("；统计接口返回了活动但无商品层数据，顶层字段：{}", ad_payload_keys.into_iter().collect::<Vec<_>>().join(",")) }
+        else { String::new() }
     ))
 }
 

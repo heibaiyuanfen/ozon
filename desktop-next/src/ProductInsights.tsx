@@ -1,6 +1,6 @@
 import { useDeferredValue, useEffect, useState } from "react";
 import { Layers3, Plus, Search, Trash2 } from "lucide-react";
-import * as echarts from "echarts";
+import * as echarts from "./charts";
 import {
   deleteProductSeries,
   productDetail,

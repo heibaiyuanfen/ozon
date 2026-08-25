@@ -390,6 +390,13 @@ struct MissingCostRow {
     missing_first_mile: bool,
     missing_weight: bool,
     missing_dimensions: bool,
+    unit_cost: Option<f64>,
+    first_mile_cost: Option<f64>,
+    weight_kg: Option<f64>,
+    length_cm: Option<f64>,
+    width_cm: Option<f64>,
+    height_cm: Option<f64>,
+    note: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -659,7 +666,7 @@ fn secret_setting(c: &Connection, key: &str) -> Result<String, String> {
     })
 }
 
-fn seller_post(
+pub(crate) fn seller_post(
     c: &Connection,
     path: &str,
     body: &serde_json::Value,
@@ -721,11 +728,18 @@ fn performance_get(path_and_query: &str, token: &str) -> Result<serde_json::Valu
     let raw = response.into_string().map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| format!("Performance API 返回无法解析：{e}"))
 }
-fn performance_post(path: &str, token: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+fn performance_post(
+    path: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let url = format!("https://api-performance.ozon.ru{path}");
-    let response = ureq::post(&url).set("Authorization", &format!("Bearer {token}"))
-        .set("Accept", "application/json").set("Content-Type", "application/json")
-        .send_string(&body.to_string()).map_err(|e| format!("Performance API 请求失败（{path}）：{e}"))?;
+    let response = ureq::post(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Accept", "application/json")
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|e| format!("Performance API 请求失败（{path}）：{e}"))?;
     let raw = response.into_string().map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| format!("Performance API 返回无法解析：{e}"))
 }
@@ -1998,6 +2012,55 @@ fn canonical_ozon_product_url(value: &str) -> Result<(String, String), String> {
     }
     Ok((format!("https://www.ozon.ru/product/{code}/"), code))
 }
+fn save_competitor_html(c: &Connection, id: i64, html: &str, source: &str) -> Result<(), String> {
+    let url = c
+        .query_row(
+            "SELECT product_url FROM competitor_products WHERE id=?1",
+            [id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let (_, code) = canonical_ozon_product_url(&url)?;
+    let name = first_capture(
+        html,
+        &[
+            r#"<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)"#,
+            r#"<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']"#,
+            r#"\"name\"\s*:\s*\"([^\"]+)\""#,
+            r#"<title>([^<]+)</title>"#,
+        ],
+    );
+    let image = first_capture(
+        html,
+        &[
+            r#"<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)"#,
+            r#"<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']"#,
+            r#"\"image\"\s*:\s*\"([^\"]+)\""#,
+        ],
+    );
+    let price = capture_number(
+        html,
+        &[
+            r#"\"price\"\s*:\s*\"?([0-9]+(?:[.,][0-9]+)?)"#,
+            r#"\"cardPrice\"\s*:\s*\"?([0-9]+(?:[.,][0-9]+)?)"#,
+        ],
+    );
+    let sales = capture_number(
+        html,
+        &[
+            r#"\"soldQuantity\"\s*:\s*([0-9]+)"#,
+            r#"\"ordersCount\"\s*:\s*([0-9]+)"#,
+            r#"\"soldAmount\"\s*:\s*([0-9]+)"#,
+        ],
+    )
+    .map(|v| v as i64);
+    if name.is_empty() && image.is_empty() && price.is_none() {
+        return Err("页面未返回可识别的商品结构；请确认保存的是完成验证后的商品页 HTML".into());
+    }
+    c.execute("UPDATE competitor_products SET product_code=CASE WHEN ?2='' THEN product_code ELSE ?2 END,name=CASE WHEN ?3='' THEN name ELSE ?3 END,image_url=CASE WHEN ?4='' THEN image_url ELSE ?4 END,updated_at=CURRENT_TIMESTAMP WHERE id=?1",params![id,code,name,image]).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO competitor_snapshots(competitor_id,captured_at,price,sales_total,source) VALUES(?1,CURRENT_TIMESTAMP,?2,?3,?4)",params![id,price,sales,source]).map_err(|e|e.to_string())?;
+    Ok(())
+}
 fn refresh_competitor_inner(c: &Connection, id: i64) -> Result<(), String> {
     let url = c
         .query_row(
@@ -2016,46 +2079,32 @@ fn refresh_competitor_inner(c: &Connection, id: i64) -> Result<(), String> {
         .call()
         .map_err(|e| format!("竞品页面直连读取失败：{e}。已使用规范链接 {canonical_url}；Ozon 若要求验证，请在“跨境上品”打开专用浏览器完成验证后重试"))?;
     let html = response.into_string().map_err(|e| e.to_string())?;
-    let name = first_capture(
-        &html,
-        &[
-            r#"<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)"#,
-            r#"<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']"#,
-            r#"\"name\"\s*:\s*\"([^\"]+)\""#,
-            r#"<title>([^<]+)</title>"#,
-        ],
-    );
-    let image = first_capture(
-        &html,
-        &[
-            r#"<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)"#,
-            r#"<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']"#,
-            r#"\"image\"\s*:\s*\"([^\"]+)\""#,
-        ],
-    );
-    let code = canonical_code;
-    let price = capture_number(
-        &html,
-        &[
-            r#"\"price\"\s*:\s*\"?([0-9]+(?:[.,][0-9]+)?)"#,
-            r#"\"cardPrice\"\s*:\s*\"?([0-9]+(?:[.,][0-9]+)?)"#,
-        ],
-    );
-    let sales = capture_number(
-        &html,
-        &[
-            r#"\"soldQuantity\"\s*:\s*([0-9]+)"#,
-            r#"\"ordersCount\"\s*:\s*([0-9]+)"#,
-            r#"\"soldAmount\"\s*:\s*([0-9]+)"#,
-        ],
-    )
-    .map(|v| v as i64);
-    if name.is_empty() && image.is_empty() && price.is_none() {
-        return Err("页面未返回可识别的商品结构，可能需要登录或页面结构已变化".into());
+    let _ = canonical_code;
+    save_competitor_html(c, id, &html, "ozon_public_page")
+}
+
+#[tauri::command]
+fn open_competitor_browser(id: i64, state: State<AppState>) -> Result<(), String> {
+    let c = db(&state)?;
+    let url = c
+        .query_row(
+            "SELECT product_url FROM competitor_products WHERE id=?1 AND active=1",
+            [id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    open::that(&url).map_err(|e| format!("无法打开系统浏览器：{e}"))
+}
+
+#[tauri::command]
+fn import_competitor_html(id: i64, path: String, state: State<AppState>) -> Result<(), String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("请选择或粘贴验证后保存的 HTML 文件路径".into());
     }
-    c.execute("UPDATE competitor_products SET product_code=CASE WHEN ?2='' THEN product_code ELSE ?2 END,name=CASE WHEN ?3='' THEN name ELSE ?3 END,image_url=CASE WHEN ?4='' THEN image_url ELSE ?4 END,updated_at=CURRENT_TIMESTAMP WHERE id=?1",params![id,code,name,image]).map_err(|e|e.to_string())?;
-    c.execute("INSERT INTO competitor_snapshots(competitor_id,captured_at,price,sales_total,source) VALUES(?1,CURRENT_TIMESTAMP,?2,?3,'ozon_public_page')",params![id,price,sales]).map_err(|e|e.to_string())?;
-    Ok(())
+    let html = fs::read_to_string(path).map_err(|e| format!("无法读取竞品 HTML：{e}"))?;
+    let c = db(&state)?;
+    save_competitor_html(&c, id, &html, "verified_browser_html")
 }
 fn sales_delta(snapshots: &[CompetitorSnapshot], days: i64) -> Option<i64> {
     let latest = snapshots.last()?.sales_total?;
@@ -2460,21 +2509,31 @@ fn missing_cost_rows(
     state: State<AppState>,
 ) -> Result<Vec<MissingCostRow>, String> {
     let c = db(&state)?;
-    let mut stmt = c.prepare("SELECT s.sku,COALESCE(MAX(p.offer_id),''),COALESCE(MAX(NULLIF(p.name,'')),MAX(s.product_name),''),SUM(s.ordered_units),MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)),MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)),MAX(pc.weight_kg),MAX(pc.length_cm),MAX(pc.width_cm),MAX(pc.height_cm) FROM sales_daily s LEFT JOIN products p ON p.sku=s.sku LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2 AND s.ordered_units<>0 GROUP BY s.sku HAVING MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)) IS NULL OR MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)) IS NULL ORDER BY SUM(s.ordered_units) DESC,s.sku").map_err(|e|e.to_string())?;
+    let mut stmt = c.prepare("SELECT s.sku,COALESCE(MAX(p.offer_id),''),COALESCE(MAX(NULLIF(p.name,'')),MAX(s.product_name),''),SUM(s.ordered_units),MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)),MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)),MAX(pc.weight_kg),MAX(pc.length_cm),MAX(pc.width_cm),MAX(pc.height_cm),COALESCE(MAX(pc.note),'') FROM sales_daily s LEFT JOIN products p ON p.sku=s.sku LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2 AND s.ordered_units<>0 GROUP BY s.sku HAVING MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)) IS NULL OR MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)) IS NULL ORDER BY SUM(s.ordered_units) DESC,s.sku").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map(params![range.from, range.to], |r| {
             let length: Option<f64> = r.get(7)?;
             let width: Option<f64> = r.get(8)?;
             let height: Option<f64> = r.get(9)?;
+            let unit_cost: Option<f64> = r.get(4)?;
+            let first_mile_cost: Option<f64> = r.get(5)?;
+            let weight_kg: Option<f64> = r.get(6)?;
             Ok(MissingCostRow {
                 sku: r.get(0)?,
                 offer_id: r.get(1)?,
                 product_name: r.get(2)?,
                 units: r.get(3)?,
-                missing_purchase: r.get::<_, Option<f64>>(4)?.is_none(),
-                missing_first_mile: r.get::<_, Option<f64>>(5)?.is_none(),
-                missing_weight: r.get::<_, Option<f64>>(6)?.is_none(),
+                missing_purchase: unit_cost.is_none(),
+                missing_first_mile: first_mile_cost.is_none(),
+                missing_weight: weight_kg.is_none(),
                 missing_dimensions: length.is_none() || width.is_none() || height.is_none(),
+                unit_cost,
+                first_mile_cost,
+                weight_kg,
+                length_cm: length,
+                width_cm: width,
+                height_cm: height,
+                note: r.get(10)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -3299,8 +3358,12 @@ fn inventory_blocking(
                 r.get::<_, i64>(3)?,
                 r.get::<_, Option<i64>>(4)?,
                 r.get::<_, Option<i64>>(5)?,
-                r.get::<_, i64>(6)?, r.get::<_, i64>(7)?, r.get::<_, i64>(8)?,
-                r.get::<_, f64>(9)?, r.get::<_, i64>(10)?, r.get::<_, String>(11)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, f64>(9)?,
+                r.get::<_, i64>(10)?,
+                r.get::<_, String>(11)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -3353,10 +3416,15 @@ fn inventory_blocking(
 }
 
 #[tauri::command]
-async fn inventory(query:String,target_days:i64,state:State<'_,AppState>)->Result<Vec<InventoryRow>,String>{
-    let owned=background_state(&state)?;
-    tauri::async_runtime::spawn_blocking(move||inventory_blocking(query,target_days,&owned))
-        .await.map_err(|e|format!("库存读取后台任务失败：{e}"))?
+async fn inventory(
+    query: String,
+    target_days: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<InventoryRow>, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || inventory_blocking(query, target_days, &owned))
+        .await
+        .map_err(|e| format!("库存读取后台任务失败：{e}"))?
 }
 
 fn sync_inventory_blocking(state: &AppState) -> Result<i64, String> {
@@ -3397,33 +3465,59 @@ fn sync_inventory_blocking(state: &AppState) -> Result<i64, String> {
                     .unwrap_or_default(),
             );
         }
-        let mut offers = items.iter().filter_map(|v| v.as_object())
+        let mut offers = items
+            .iter()
+            .filter_map(|v| v.as_object())
             .map(|v| object_text(v, &["offer_id", "offerId"]))
-            .filter(|v| !v.is_empty()).collect::<Vec<_>>();
-        offers.sort(); offers.dedup();
-        let mut totals = Vec::<(String,String,i64,i64)>::new();
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<_>>();
+        offers.sort();
+        offers.dedup();
+        let mut totals = Vec::<(String, String, i64, i64)>::new();
         for batch in offers.chunks(100) {
-            let payload = seller_post(&c, "/v4/product/info/stocks",
-                &serde_json::json!({"filter":{"offer_id":batch,"product_id":[],"visibility":"ALL"},"limit":1000,"cursor":""}))?;
-            for value in payload.get("items").and_then(|v|v.as_array()).into_iter().flatten() {
-                let Some(item)=value.as_object() else { continue };
-                let sku=object_text(item,&["product_id","sku"]);
-                let offer=object_text(item,&["offer_id","offerId"]);
-                let mut present=0_i64; let mut reserved=0_i64;
-                for stock in item.get("stocks").and_then(|v|v.as_array()).into_iter().flatten() {
-                    let kind=stock.get("type").and_then(|v|v.as_str()).unwrap_or("").to_ascii_lowercase();
-                    if kind=="fbo" || kind.is_empty() {
-                        present += stock.get("present").and_then(|v|v.as_i64()).unwrap_or(0);
-                        reserved += stock.get("reserved").and_then(|v|v.as_i64()).unwrap_or(0);
+            let payload = seller_post(
+                &c,
+                "/v4/product/info/stocks",
+                &serde_json::json!({"filter":{"offer_id":batch,"product_id":[],"visibility":"ALL"},"limit":1000,"cursor":""}),
+            )?;
+            for value in payload
+                .get("items")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let Some(item) = value.as_object() else {
+                    continue;
+                };
+                let sku = object_text(item, &["product_id", "sku"]);
+                let offer = object_text(item, &["offer_id", "offerId"]);
+                let mut present = 0_i64;
+                let mut reserved = 0_i64;
+                for stock in item
+                    .get("stocks")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    let kind = stock
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if kind == "fbo" || kind.is_empty() {
+                        present += stock.get("present").and_then(|v| v.as_i64()).unwrap_or(0);
+                        reserved += stock.get("reserved").and_then(|v| v.as_i64()).unwrap_or(0);
                     }
                 }
-                if !sku.is_empty() { totals.push((sku,offer,present,reserved)); }
+                if !sku.is_empty() {
+                    totals.push((sku, offer, present, reserved));
+                }
             }
         }
         let tx = c.transaction().map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM inventory_stock", [])
             .map_err(|e| e.to_string())?;
-        for (sku,offer,present,reserved) in totals {
+        for (sku, offer, present, reserved) in totals {
             tx.execute("INSERT INTO inventory_totals(sku,offer_id,present_stock,reserved_stock,updated_at)VALUES(?1,?2,?3,?4,CURRENT_TIMESTAMP)ON CONFLICT(sku)DO UPDATE SET offer_id=excluded.offer_id,present_stock=excluded.present_stock,reserved_stock=excluded.reserved_stock,updated_at=CURRENT_TIMESTAMP",params![sku,offer,present,reserved]).map_err(|e|e.to_string())?;
         }
         let mut count = 0_i64;
@@ -3892,20 +3986,31 @@ fn sync_performance_ads_blocking(range: DateRange, state: &AppState) -> Result<i
         let today = chrono::Local::now().date_naive();
         for product_day in [today.pred_opt().unwrap_or(today), today] {
             let day = product_day.format("%Y-%m-%d").to_string();
-            if day < range.from || day > range.to { continue; }
+            if day < range.from || day > range.to {
+                continue;
+            }
             let ids = names.keys().cloned().collect::<Vec<_>>();
             for batch in ids.chunks(100) {
-                let detail = performance_post("/api/client/statistics/products/sku", &token,
-                    &serde_json::json!({"campaignIds":batch,"dateFrom":day,"dateTo":day}))?;
+                let detail = performance_post(
+                    "/api/client/statistics/products/sku",
+                    &token,
+                    &serde_json::json!({"campaignIds":batch,"dateFrom":day,"dateTo":day}),
+                )?;
                 let mut detail_objects = Vec::new();
                 collect_objects(&detail, &mut detail_objects);
                 let detail_tx = c.transaction().map_err(|e| e.to_string())?;
                 for o in detail_objects {
                     let campaign_id = object_text(&o, &["campaignId", "campaign_id"]);
                     let sku = object_text(&o, &["sku"]);
-                    if campaign_id.is_empty() || sku.is_empty() { continue; }
+                    if campaign_id.is_empty() || sku.is_empty() {
+                        continue;
+                    }
                     let returned_day = object_text(&o, &["date", "day"]);
-                    let row_day = if returned_day.is_empty() { day.clone() } else { returned_day.chars().take(10).collect() };
+                    let row_day = if returned_day.is_empty() {
+                        day.clone()
+                    } else {
+                        returned_day.chars().take(10).collect()
+                    };
                     detail_tx.execute("INSERT INTO ad_daily(day,campaign_id,campaign_name,sku,impressions,clicks,cart_adds,orders,revenue,spend,source)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'api_product_sku') ON CONFLICT(day,campaign_id,sku) DO UPDATE SET campaign_name=excluded.campaign_name,impressions=excluded.impressions,clicks=excluded.clicks,cart_adds=excluded.cart_adds,orders=excluded.orders,revenue=excluded.revenue,spend=excluded.spend,source=excluded.source,updated_at=CURRENT_TIMESTAMP",params![row_day,campaign_id,names.get(&campaign_id).cloned().unwrap_or_default(),sku,object_number(&o,&["views","impressions"])as i64,object_number(&o,&["clicks"])as i64,object_number(&o,&["toCart","cartAdds"])as i64,object_number(&o,&["modelOrders","orders"])as i64,object_number(&o,&["modelSales","sales","revenue"]),object_number(&o,&["expense","spend"])]).map_err(|e|e.to_string())?;
                     count += 1;
                 }
@@ -4055,10 +4160,15 @@ fn sync_finance_blocking(range: DateRange, state: &AppState) -> Result<i64, Stri
                     skus.insert(sku);
                 }
             }
+            // Only a single, explicit item SKU is safe to attribute. Multi-SKU
+            // and shop-level operations remain unallocated, matching Python's
+            // `_normalize_finance_operation` audit rule.
             let sku = if skus.len() == 1 {
                 skus.into_iter().next().unwrap_or_default()
-            } else {
+            } else if skus.is_empty() {
                 json_text(op.get("sku"))
+            } else {
+                String::new()
             };
             tx.execute("INSERT INTO finance_transactions(operation_id,operation_date,operation_type,posting_number,sku,amount,delivery_charge,return_delivery_charge,accruals_for_sale,sale_commission,raw_json)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(operation_id) DO UPDATE SET operation_date=excluded.operation_date,operation_type=excluded.operation_type,posting_number=excluded.posting_number,sku=excluded.sku,amount=excluded.amount,delivery_charge=excluded.delivery_charge,return_delivery_charge=excluded.return_delivery_charge,accruals_for_sale=excluded.accruals_for_sale,sale_commission=excluded.sale_commission,raw_json=excluded.raw_json",params![id,json_text(op.get("operation_date")),json_text(op.get("operation_type")),json_text(op.pointer("/posting/posting_number")),sku,op.get("amount").and_then(|v|v.as_f64()).unwrap_or(0.0),op.get("delivery_charge").and_then(|v|v.as_f64()).unwrap_or(0.0),op.get("return_delivery_charge").and_then(|v|v.as_f64()).unwrap_or(0.0),op.get("accruals_for_sale").and_then(|v|v.as_f64()).unwrap_or(0.0),op.get("sale_commission").and_then(|v|v.as_f64()).unwrap_or(0.0),op.to_string()]).map_err(|e|e.to_string())?;
         }
@@ -4315,10 +4425,14 @@ fn sync_feishu_products_blocking(direction: String, state: &AppState) -> Result<
 }
 
 #[tauri::command]
-async fn sync_feishu_products(direction: String, state: State<'_, AppState>) -> Result<String, String> {
-    let owned=background_state(&state)?;
-    tauri::async_runtime::spawn_blocking(move||sync_feishu_products_blocking(direction,&owned))
-        .await.map_err(|e|format!("飞书商品后台同步失败：{e}"))?
+async fn sync_feishu_products(
+    direction: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || sync_feishu_products_blocking(direction, &owned))
+        .await
+        .map_err(|e| format!("飞书商品后台同步失败：{e}"))?
 }
 
 #[tauri::command]
@@ -4464,9 +4578,10 @@ fn sync_feishu_shipments_blocking(state: &AppState) -> Result<i64, String> {
 
 #[tauri::command]
 async fn sync_feishu_shipments(state: State<'_, AppState>) -> Result<i64, String> {
-    let owned=background_state(&state)?;
-    tauri::async_runtime::spawn_blocking(move||sync_feishu_shipments_blocking(&owned))
-        .await.map_err(|e|format!("飞书发货后台同步失败：{e}"))?
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || sync_feishu_shipments_blocking(&owned))
+        .await
+        .map_err(|e| format!("飞书发货后台同步失败：{e}"))?
 }
 
 #[tauri::command]
@@ -4500,9 +4615,8 @@ fn notify_feishu_shipment(tracking_id: String, state: State<AppState>) -> Result
     })
 }
 
-#[tauri::command]
-fn supply_orders(state: State<AppState>) -> Result<Vec<SupplyOrderRow>, String> {
-    let c = db(&state)?;
+fn supply_orders_blocking(state: &AppState) -> Result<Vec<SupplyOrderRow>, String> {
+    let c = db(state)?;
     let mut order_ids = Vec::new();
     let mut last_id = String::new();
     for _ in 0..20 {
@@ -4598,16 +4712,23 @@ fn supply_orders(state: State<AppState>) -> Result<Vec<SupplyOrderRow>, String> 
 }
 
 #[tauri::command]
-fn supply_timeslots(
+async fn supply_orders(state: State<'_, AppState>) -> Result<Vec<SupplyOrderRow>, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || supply_orders_blocking(&owned))
+        .await
+        .map_err(|e| format!("读取供应单后台任务失败：{e}"))?
+}
+
+fn supply_timeslots_blocking(
     order_id: i64,
     date_from: String,
     date_to: String,
-    state: State<AppState>,
+    state: &AppState,
 ) -> Result<Vec<SupplyTimeslot>, String> {
     if date_from > date_to {
         return Err("时间窗开始日期不能晚于结束日期".into());
     }
-    let c = db(&state)?;
+    let c = db(state)?;
     let payload = seller_post(
         &c,
         "/v2/supply-order/timeslot/list",
@@ -4631,17 +4752,31 @@ fn supply_timeslots(
 }
 
 #[tauri::command]
-fn book_supply_timeslot(
+async fn supply_timeslots(
+    order_id: i64,
+    date_from: String,
+    date_to: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SupplyTimeslot>, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        supply_timeslots_blocking(order_id, date_from, date_to, &owned)
+    })
+    .await
+    .map_err(|e| format!("查询预约时段后台任务失败：{e}"))?
+}
+
+fn book_supply_timeslot_blocking(
     supply_order_id: i64,
     timeslot_from: String,
     timeslot_to: String,
     confirmation: String,
-    state: State<AppState>,
+    state: &AppState,
 ) -> Result<String, String> {
     if confirmation != "确认预约" {
         return Err("预约未确认；必须输入“确认预约”".into());
     }
-    let c = db(&state)?;
+    let c = db(state)?;
     let payload = seller_post(
         &c,
         "/v1/supply-order/timeslot/update",
@@ -4653,6 +4788,28 @@ fn book_supply_timeslot(
     } else {
         Ok(format!("Ozon 已接受预约请求，操作 ID：{operation}"))
     }
+}
+
+#[tauri::command]
+async fn book_supply_timeslot(
+    supply_order_id: i64,
+    timeslot_from: String,
+    timeslot_to: String,
+    confirmation: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        book_supply_timeslot_blocking(
+            supply_order_id,
+            timeslot_from,
+            timeslot_to,
+            confirmation,
+            &owned,
+        )
+    })
+    .await
+    .map_err(|e| format!("提交预约后台任务失败：{e}"))?
 }
 
 fn chat_endpoint(base: &str) -> String {
@@ -5056,6 +5213,8 @@ pub fn run() {
             add_competitor,
             refresh_competitor,
             refresh_competitors_due,
+            open_competitor_browser,
+            import_competitor_html,
             remove_competitor,
             business_report,
             analytics_detail,
@@ -5084,6 +5243,10 @@ pub fn run() {
             wb::wb_costs,
             wb::save_wb_cost,
             wb::wb_daily,
+            wb::wb_orders,
+            wb::wb_ads,
+            wb::wb_warehouses,
+            wb::wb_stocks,
             wb::sync_wb,
             wb::test_wb_feishu,
             wb::send_wb_weekly,
@@ -5097,6 +5260,10 @@ pub fn run() {
             listing::save_listing_draft,
             listing::retry_listing_job,
             listing::collect_listing_reference,
+            listing::open_listing_browser,
+            listing::import_listing_html,
+            listing::refresh_listing_categories,
+            listing::search_listing_categories,
             listing::launch_listing_tool,
             insights::product_insights,
             insights::series_insights,

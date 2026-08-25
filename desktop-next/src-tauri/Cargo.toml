@@ -20,6 +20,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 ureq = "2.12"
 regex = "1"
+open = "5"
 base64 = "0.22"
 calamine = "0.26"
+headless_chrome = "1.0.22"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

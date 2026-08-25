@@ -277,6 +277,13 @@ export interface MissingCostRow {
   missingFirstMile: boolean;
   missingWeight: boolean;
   missingDimensions: boolean;
+  unitCost: number | null;
+  firstMileCost: number | null;
+  weightKg: number | null;
+  lengthCm: number | null;
+  widthCm: number | null;
+  heightCm: number | null;
+  note: string;
 }
 export interface AnalyticsDetail {
   products: Array<{
@@ -435,6 +442,7 @@ export interface ListingRow {
   updatedAt: string;
 }
 export interface ListingJob { id:number; sourceUrl:string; article:string; offerId:string; title:string; categoryId:string; categoryDisplay:string; status:string; stage:number; error:string; payload:Record<string,unknown>; updatedAt:string; }
+export interface ListingCategory { descriptionCategoryId:number; typeId:number; name:string; display:string; score:number; }
 export interface ListingDraftInput { id:number; offerId:string; title:string; categoryId:string; categoryDisplay:string; typeId:string; price:string; weight:number; depth:number; width:number; height:number; description:string; images:string[]; attributes:unknown[]; complexAttributes:unknown[]; }
 export interface ListingPriceInput {
   purchaseCost: number;
@@ -572,4 +580,44 @@ export interface WbDaily {
   logisticsTotalCny: number | null;
   profitCny: number | null;
   complete: boolean;
+}
+export interface WbOrderRow {
+  srid: string;
+  day: string;
+  changedAt: string;
+  nmId: number;
+  article: string;
+  warehouseName: string;
+  revenueCny: number;
+  cancelled: boolean;
+}
+export interface WbAdRow {
+  day: string;
+  nmId: number;
+  campaignId: number;
+  spendCny: number;
+  orders: number;
+  salesCny: number;
+  views: number;
+  clicks: number;
+  ctr: number | null;
+}
+export interface WbWarehouseRow {
+  warehouseKey: string;
+  name: string;
+  address: string;
+  city: string;
+  country: string;
+  mode: string;
+}
+export interface WbStockRow {
+  nmId: number;
+  chrtId: number;
+  warehouseId: number;
+  warehouseName: string;
+  regionName: string;
+  quantity: number;
+  inWayToClient: number;
+  inWayFromClient: number;
+  updatedAt: string;
 }
