@@ -1,0 +1,33 @@
+.four-cols,
+.metric-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.stat {
+  overflow: hidden;
+}
+
+.stat strong {
+  display: block;
+  max-width: 100%;
+  font-size: clamp(15px, 1.25vw, 20px);
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.summary .stat strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.trend-card .chart {
+  min-height: 275px;
+}
+
+@media (max-width: 1300px) {
+  .four-cols {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

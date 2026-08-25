@@ -1,0 +1,3193 @@
+import { useEffect, useRef, useState } from "react";
+import "./analytics.css";
+import "./listing.css";
+import * as echarts from "echarts";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clock3,
+  Database,
+  MapPin,
+  Megaphone,
+  PackageSearch,
+  Plus,
+  RefreshCw,
+  Save,
+  Search,
+  Trash2,
+  TrendingUp,
+  Truck,
+} from "lucide-react";
+import {
+  addCompetitor,
+  aiAnalysis,
+  analyticsDetail,
+  bookSupplyTimeslot,
+  businessReport,
+  crossBorderReport,
+  calculateListingPrice,
+  createListingDraft,
+  saveListingDraft,
+  retryListingJob,
+  collectListingReference,
+  competitors,
+  dataCoverage,
+  exportDataset,
+  exportApiBundle,
+  exportWbApiBundle,
+  fbsOrders,
+  financeBreakdown,
+  importProductCostsCsv,
+  importApiBundle,
+  importWbApiBundle,
+  listingRows,
+  listingJobs,
+  listingSettings,
+  missingCostRows,
+  notifyShipment,
+  pruneCache,
+  refreshCompetitor,
+  refreshCompetitorsDue,
+  removeCompetitor,
+  saveFbsThreshold,
+  saveListingSettings,
+  saveWarehouseMapping,
+  saveWbCost,
+  saveWbSettings,
+  sendFeishuWeekly,
+  sendWbWeekly,
+  shipmentTracking,
+  supplyOrders,
+  supplyTimeslots,
+  syncFbsOrders,
+  syncFeishuProducts,
+  syncFeishuShipments,
+  syncFinance,
+  syncListingCosts,
+  syncLogs,
+  syncPerformance,
+  syncSeller,
+  syncWb,
+  testFeishu,
+  testWbFeishu,
+  warehouseMappings,
+  wbCosts,
+  wbDaily,
+  wbSettings,
+} from "./bridge";
+import type {
+  AnalyticsDetail,
+  BusinessReport,
+  CrossBorderReport,
+  CompetitorRow,
+  DataCoverageRow,
+  DateRange,
+  FbsOrderRow,
+  FinanceBreakdownRow,
+  ListingRow,
+  ListingJob,
+  ListingDraftInput,
+  ListingPriceBreakdown,
+  ListingPriceInput,
+  ListingSettings,
+  MissingCostRow,
+  ShipmentTracking,
+  SupplyOrder,
+  SupplyTimeslot,
+  SyncLog,
+  WarehouseMapping,
+  WbCost,
+  WbDaily,
+  WbSettings,
+} from "./types";
+
+const money = (v: number, currency: string) =>
+  `${currency === "CNY" ? "¥" : "₽"}${v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const reportCache = new Map<string, Promise<BusinessReport>>(),
+  detailCache = new Map<string, Promise<AnalyticsDetail>>();
+const cachedReport = (range: DateRange) => {
+  const key = `${range.from}|${range.to}`;
+  if (!reportCache.has(key)) reportCache.set(key, businessReport(range));
+  return reportCache.get(key)!;
+};
+const cachedDetail = (range: DateRange) => {
+  const key = `${range.from}|${range.to}`;
+  if (!detailCache.has(key)) detailCache.set(key, analyticsDetail(range));
+  return detailCache.get(key)!;
+};
+export const clearReportCache = () => {
+  reportCache.clear();
+  detailCache.clear();
+};
+window.addEventListener("report-settings-changed", clearReportCache);
+
+export function ListingPage() {
+  const empty: ListingSettings = {
+    ledgerPath: "",
+    ledgerShopName: "",
+    toolExecutable: "",
+    toolDataDir: "",
+  };
+  const [form, setForm] = useState<ListingSettings>(empty),
+    [priceForm, setPriceForm] = useState<ListingPriceInput>({
+      purchaseCost: 0,
+      labelFee: 0,
+      targetRoiPercent: 30,
+      weightKg: 0,
+      salesCommissionPercent: 15,
+      salesCommissionDiscountPercent: 0,
+      advertisingPercent: 15,
+      cargoLossPercent: 10,
+      minimumSalePrice: 0,
+    }),
+    [priceResult, setPriceResult] = useState<ListingPriceBreakdown | null>(
+      null,
+    ),
+    [rows, setRows] = useState<ListingRow[]>([]),
+    [jobs, setJobs] = useState<ListingJob[]>([]),
+    [draft, setDraft] = useState<ListingDraftInput | null>(null),
+    [attributesText, setAttributesText] = useState("[]"),
+    [complexAttributesText, setComplexAttributesText] = useState("[]"),
+    [imagesText, setImagesText] = useState(""),
+    [reference, setReference] = useState(""),
+    [query, setQuery] = useState(""),
+    [busy, setBusy] = useState(false),
+    [message, setMessage] = useState("");
+  const editJob = (job: ListingJob) => {
+    const p = job.payload || {};
+    const numberValue = (key: string) => Number(p[key] || 0);
+    setDraft({
+      id: job.id,
+      offerId: String(p.offer_id || job.offerId || ""),
+      title: String(p.title || job.title || ""),
+      categoryId: String(p.category_id || job.categoryId || ""),
+      categoryDisplay: String(p.category_display || job.categoryDisplay || ""),
+      typeId: String(p.type_id || ""), price: String(p.price || ""),
+      weight: numberValue("weight"), depth: numberValue("depth"),
+      width: numberValue("width"), height: numberValue("height"),
+      description: String(p.description || ""), images: [], attributes: [], complexAttributes: [],
+    });
+    setImagesText(Array.isArray(p.images) ? p.images.map(String).join("\n") : "");
+    setAttributesText(JSON.stringify(Array.isArray(p.attributes) ? p.attributes : [], null, 2));
+    setComplexAttributesText(JSON.stringify(Array.isArray(p.complex_attributes) ? p.complex_attributes : [], null, 2));
+  };
+  const load = async () => {
+    setBusy(true);
+    setMessage("");
+    try {
+      const settings = await listingSettings();
+      setForm(settings);
+      setRows(await listingRows(query));
+      setJobs(await listingJobs());
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => {
+    void load();
+  }, [query]);
+  const save = async () => {
+    setBusy(true);
+    try {
+      await saveListingSettings(form);
+      setMessage("上品工具与产品台账配置已保存。");
+      setRows(await listingRows(query));
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const sync = async () => {
+    setBusy(true);
+    try {
+      const count = await syncListingCosts();
+      setMessage(`成本、长宽高和重量已统一匹配到 ${count} 个 SKU。`);
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <span className="eyebrow">CROSS-BORDER LISTING</span>
+          <h1>跨境上品</h1>
+          <p>
+            RFBS 上品源码工作台：产品台账、原版 ROI 核价与后续上架任务均在 ERP
+            内完成
+          </p>
+        </div>
+        <div className="competitor-actions">
+          <button className="outline-button" disabled={busy} onClick={sync}>
+            <RefreshCw size={15} />
+            立即同步成本
+          </button>
+        </div>
+      </header>
+      <section className="card listing-config">
+        <div className="card-title">参考商品与上品草稿</div>
+        <div className="listing-fields">
+          <label>Ozon 商品链接或 Артикул<input value={reference} onChange={(e)=>setReference(e.target.value)} placeholder="支持链接、纯数字或 Артикул: 2379505289" /></label>
+        </div>
+        <button className="dark-button" disabled={busy||!reference.trim()} onClick={async()=>{setBusy(true);try{const id=await createListingDraft(reference);setMessage(`已创建上品草稿 #${id}，下一阶段将从参考商品采集标题、图片和属性。`);setReference("");setJobs(await listingJobs());}catch(e){setMessage(String(e));}finally{setBusy(false);}}}><Plus size={15}/>创建本地草稿</button>
+        {!!jobs.length&&<div className="table-card"><table><thead><tr><th>任务</th><th>Артикул / 货号</th><th>类目</th><th>阶段 / 状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{jobs.slice(0,10).map(job=><tr key={job.id}><td>#{job.id}</td><td><b>{job.article}</b><small>{job.offerId||job.sourceUrl}</small></td><td>{job.categoryDisplay||"待匹配"}<small>{job.categoryId}</small></td><td>{["待采集","参考信息","类目完成","属性完成"][Math.min(job.stage,3)]} / {job.status}<small>{job.error}</small></td><td>{job.updatedAt}</td><td><button className="outline-button" onClick={()=>editJob(job)}>编辑</button><button className="outline-button" disabled={busy||job.status==='collecting'} onClick={async()=>{setBusy(true);setMessage(`正在后台采集任务 #${job.id}…`);try{await collectListingReference(job.id);setMessage(`任务 #${job.id} 已采集标题、描述、图片和页面属性。`);}catch(e){setMessage(String(e));}finally{const next=await listingJobs();setJobs(next);const current=next.find(v=>v.id===job.id);if(current&&draft?.id===job.id)editJob(current);setBusy(false);}}}>采集</button>{job.error&&<button className="outline-button" onClick={async()=>{await retryListingJob(job.id);setJobs(await listingJobs());}}>重试</button>}</td></tr>)}</tbody></table></div>}
+        {draft&&<div className="listing-draft-editor">
+          <div className="card-title">编辑草稿 #{draft.id}</div>
+          <div className="listing-fields">
+            {([['offerId','货号 offer_id'],['title','俄文标题'],['categoryId','description_category_id'],['categoryDisplay','类目路径'],['typeId','type_id'],['price','售价 RUB']] as Array<[keyof ListingDraftInput,string]>).map(([key,label])=><label key={key}>{label}<input value={String(draft[key])} onChange={e=>setDraft({...draft,[key]:e.target.value})}/></label>)}
+            {([['weight','重量 g'],['depth','深度 mm'],['width','宽度 mm'],['height','高度 mm']] as Array<[keyof ListingDraftInput,string]>).map(([key,label])=><label key={key}>{label}<input type="number" min="0" value={Number(draft[key])} onChange={e=>setDraft({...draft,[key]:Number(e.target.value)})}/></label>)}
+          </div>
+          <label>俄文描述<textarea value={draft.description} onChange={e=>setDraft({...draft,description:e.target.value})}/></label>
+          <label>图片地址（每行一个）<textarea value={imagesText} onChange={e=>setImagesText(e.target.value)}/></label>
+          <div className="listing-fields">
+            <label>attributes JSON<textarea value={attributesText} onChange={e=>setAttributesText(e.target.value)}/></label>
+            <label>complex_attributes JSON<textarea value={complexAttributesText} onChange={e=>setComplexAttributesText(e.target.value)}/></label>
+          </div>
+          <div className="competitor-actions"><button className="dark-button" disabled={busy} onClick={async()=>{setBusy(true);try{const attributes=JSON.parse(attributesText),complexAttributes=JSON.parse(complexAttributesText);const stage=await saveListingDraft({...draft,images:imagesText.split(/\r?\n/).map(v=>v.trim()).filter(Boolean),attributes,complexAttributes});setMessage(`草稿 #${draft.id} 已保存，当前阶段 ${stage}。`);const next=await listingJobs();setJobs(next);const current=next.find(v=>v.id===draft.id);if(current)editJob(current);}catch(e){setMessage(`保存失败：${String(e)}`);}finally{setBusy(false);}}}><Save size={14}/>保存并校验阶段</button><button className="outline-button" onClick={()=>setDraft(null)}>关闭</button></div>
+        </div>}
+      </section>
+      <section className="card listing-config">
+        <div className="card-title">台账配置</div>
+        <div className="listing-fields">
+          <label>
+            产品台账.xlsx
+            <input
+              value={form.ledgerPath}
+              onChange={(e) => setForm({ ...form, ledgerPath: e.target.value })}
+              placeholder="完整文件路径"
+            />
+          </label>
+          <label>
+            台账内上品店铺
+            <input
+              value={form.ledgerShopName}
+              onChange={(e) =>
+                setForm({ ...form, ledgerShopName: e.target.value })
+              }
+              placeholder="必须指定，避免店铺成本混合"
+            />
+          </label>
+        </div>
+        <button className="outline-button" onClick={save} disabled={busy}>
+          <Save size={14} />
+          保存配置并读取
+        </button>
+        {message && <p className="listing-message">{message}</p>}
+      </section>
+      <section className="card listing-config">
+        <div className="card-title">RFBS 原版 ROI 核价</div>
+        <div className="listing-fields">
+          {(
+            [
+              ["purchaseCost", "采购成本 CNY"],
+              ["labelFee", "贴单费 CNY"],
+              ["weightKg", "实际重量 kg"],
+              ["targetRoiPercent", "目标 ROI %"],
+              ["salesCommissionPercent", "销售佣金 %"],
+              ["salesCommissionDiscountPercent", "佣金减免 %"],
+              ["advertisingPercent", "广告费率 %"],
+              ["cargoLossPercent", "货损率 %"],
+              ["minimumSalePrice", "最低售价 CNY"],
+            ] as Array<[keyof ListingPriceInput, string]>
+          ).map(([key, label]) => (
+            <label key={key}>
+              {label}
+              <input
+                type="number"
+                step="0.01"
+                value={priceForm[key]}
+                onChange={(e) =>
+                  setPriceForm({ ...priceForm, [key]: Number(e.target.value) })
+                }
+              />
+            </label>
+          ))}
+        </div>
+        <button
+          className="dark-button"
+          disabled={busy}
+          onClick={async () => {
+            try {
+              setPriceResult(await calculateListingPrice(priceForm));
+              setMessage(
+                "已按 RFBS 源码中的分段运费、2% 物流佣金、广告费和货损公式完成核价。",
+              );
+            } catch (e) {
+              setMessage(String(e));
+            }
+          }}
+        >
+          <PackageSearch size={15} />
+          计算建议售价
+        </button>
+        {priceResult && (
+          <div className="report-hero listing-price-result">
+            <div>
+              <span>建议售价</span>
+              <strong>¥{priceResult.price.toFixed(2)}</strong>
+            </div>
+            <div>
+              <span>分段运费</span>
+              <strong>¥{priceResult.shipping.toFixed(2)}</strong>
+            </div>
+            <div>
+              <span>预计利润</span>
+              <strong>¥{priceResult.profit.toFixed(2)}</strong>
+            </div>
+            <div>
+              <span>实际 ROI</span>
+              <strong>{priceResult.roiPercent.toFixed(2)}%</strong>
+            </div>
+          </div>
+        )}
+      </section>
+      <div className="orders-tools listing-tools">
+        <label className="search">
+          <Search size={15} />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索店铺、货号或商品 ID"
+          />
+        </label>
+        <span>当前显示 {rows.length} 条</span>
+      </div>
+      <section className="card table-card">
+        <table>
+          <thead>
+            <tr>
+              <th>上品店铺 / 平台</th>
+              <th>货号</th>
+              <th>Ozon 商品 ID</th>
+              <th>采购成本</th>
+              <th>包装重量</th>
+              <th>包装长×宽×高</th>
+              <th>模式 / 核价</th>
+              <th>售价 / 利润</th>
+              <th>类目 / 导入任务</th>
+              <th>状态 / 更新时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={`${row.offerId}-${i}`}>
+                <td>
+                  <b>{row.shopName}</b>
+                  <small>{row.platform || "Ozon"}</small>
+                </td>
+                <td>
+                  <b>{row.offerId}</b>
+                </td>
+                <td>{row.productId || "—"}</td>
+                <td>
+                  {row.unitCostCny == null
+                    ? "—"
+                    : `¥${row.unitCostCny.toFixed(2)}`}
+                </td>
+                <td>
+                  {row.weightKg == null ? "—" : `${row.weightKg.toFixed(3)} kg`}
+                </td>
+                <td>
+                  {[row.lengthCm, row.widthCm, row.heightCm].some(
+                    (x) => x == null,
+                  )
+                    ? "—"
+                    : `${row.lengthCm} × ${row.widthCm} × ${row.heightCm} cm`}
+                </td>
+                <td>{row.listingMode || "—"}<small>{row.pricingMode || "—"}</small></td>
+                <td>{row.price == null ? "—" : row.price.toFixed(2)}<small>{row.profit == null ? "—" : `利润 ${row.profit.toFixed(2)} · ROI ${row.roiPercent?.toFixed(1) ?? "—"}%`}</small></td>
+                <td>{row.category || "—"}<small>{row.importTaskId || "—"}</small></td>
+                <td>
+                  <b>{row.status || "—"}</b>
+                  <small>{row.updatedAt}</small>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows.length && !busy && (
+          <div className="empty">
+            配置产品台账路径和上品店铺后显示真实台账记录。
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+export function FbsPage({ currency }: { currency: string }) {
+  const [tab, setTab] = useState<"orders" | "mapping">("orders"),
+    [rows, setRows] = useState<FbsOrderRow[]>([]),
+    [mappings, setMappings] = useState<WarehouseMapping[]>([]),
+    [query, setQuery] = useState(""),
+    [hours, setHours] = useState(24),
+    [warning, setWarning] = useState(4),
+    [loading, setLoading] = useState(false);
+  const load = async () => {
+    setLoading(true);
+    try {
+      setRows(await fbsOrders(query));
+      setMappings(await warehouseMappings());
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    void load();
+  }, [query]);
+  const overdue = rows.filter((x) => x.alertLevel === "overdue").length,
+    due = rows.filter((x) => x.alertLevel === "warning").length,
+    pending = rows.filter((x) => x.alertLevel === "pending").length;
+  const saveThreshold = async () => {
+    await saveFbsThreshold(hours, warning);
+    await load();
+  };
+  const syncApi = async () => {
+    setLoading(true);
+    try {
+      const to = new Date(),
+        from = new Date();
+      from.setDate(to.getDate() - 29);
+      await syncFbsOrders({
+        from: from.toISOString().slice(0, 10),
+        to: to.toISOString().slice(0, 10),
+      });
+      await load();
+    } finally {
+      setLoading(false);
+    }
+  };
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <span className="eyebrow">FBS ORDER CONTROL</span>
+          <h1>FBS 订单管理</h1>
+          <p>独立获取和管理 FBS 订单、发货时效、超时预警与基础配送费估算</p>
+        </div>
+        <button className="dark-button" onClick={syncApi}>
+          <Truck size={16} />
+          {loading ? "同步中" : "从 Ozon 同步 FBS"}
+        </button>
+      </header>
+      <div className="mini-stats">
+        <div className={overdue ? "warn" : ""}>
+          <AlertTriangle />
+          <span>
+            已经超时<strong>{overdue}</strong>
+          </span>
+        </div>
+        <div className={due ? "warn" : ""}>
+          <Clock3 />
+          <span>
+            即将到期<strong>{due}</strong>
+          </span>
+        </div>
+        <div>
+          <Truck />
+          <span>
+            待发货<strong>{pending}</strong>
+          </span>
+        </div>
+        <div>
+          <CheckCircle2 />
+          <span>
+            已进入发货<strong>{rows.length - overdue - due - pending}</strong>
+          </span>
+        </div>
+      </div>
+      <div className="fbs-controls">
+        <div className="tabs">
+          <button
+            className={tab === "orders" ? "selected" : ""}
+            onClick={() => setTab("orders")}
+          >
+            FBS 订单
+          </button>
+          <button
+            className={tab === "mapping" ? "selected" : ""}
+            onClick={() => setTab("mapping")}
+          >
+            仓库集群映射
+          </button>
+        </div>
+        <div className="thresholds">
+          <label>
+            发货时效
+            <input
+              type="number"
+              value={hours}
+              onChange={(e) => setHours(Number(e.target.value))}
+            />
+            小时
+          </label>
+          <label>
+            提前预警
+            <input
+              type="number"
+              value={warning}
+              onChange={(e) => setWarning(Number(e.target.value))}
+            />
+            小时
+          </label>
+          <button className="outline-button" onClick={saveThreshold}>
+            <Save size={14} />
+            保存阈值
+          </button>
+        </div>
+        <label className="search">
+          <Search size={15} />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="订单、货号或 SKU"
+          />
+        </label>
+      </div>
+      {tab === "orders" ? (
+        <section className="card table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>订单 / 货号</th>
+                <th>货号 / SKU</th>
+                <th>下单时间</th>
+                <th>状态</th>
+                <th>发货截止</th>
+                <th>运输 / 配送</th>
+                <th>预估基础配送</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={`${row.postingNumber}-${i}`}>
+                  <td>
+                    <b>{row.postingNumber}</b>
+                    <small>{row.offerId || row.sku}</small>
+                  </td>
+                  <td>
+                    <b className="product">{row.offerId || "—"}</b>
+                    <small>{row.sku}</small>
+                  </td>
+                  <td>{row.orderedAt}</td>
+                  <td>
+                    <span className={`alert-tag ${row.alertLevel}`}>
+                      {row.alertLevel === "overdue"
+                        ? "已超时"
+                        : row.alertLevel === "warning"
+                          ? "即将到期"
+                          : row.alertLevel === "pending"
+                            ? "待发货"
+                            : "已发货"}
+                    </span>
+                    <small>{row.status}</small>
+                  </td>
+                  <td>{row.deadline || "—"}</td>
+                  <td>
+                    <b>{row.origin || "—"}</b>
+                    <small>{row.destination || "—"}</small>
+                  </td>
+                  <td>
+                    <b>
+                      {row.estimatedDelivery == null
+                        ? "—"
+                        : money(row.estimatedDelivery, currency)}
+                    </b>
+                    <small>{row.estimateBasis}</small>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!rows.length && (
+            <div className="empty">
+              当前店铺尚无 FBS 缓存订单；同步 FBS 后会自动显示。
+            </div>
+          )}
+        </section>
+      ) : (
+        <MappingTable rows={mappings} reload={load} />
+      )}
+    </>
+  );
+}
+
+function MappingTable({
+  rows,
+  reload,
+}: {
+  rows: WarehouseMapping[];
+  reload: () => void;
+}) {
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const save = async (row: WarehouseMapping) => {
+    await saveWarehouseMapping(
+      row.warehouseName,
+      draft[row.warehouseName] ?? row.clusterName,
+    );
+    await reload();
+  };
+  return (
+    <section className="card mapping-panel">
+      <div className="mapping-intro">
+        <MapPin />
+        <div>
+          <h3>仓库所属集群</h3>
+          <p>
+            把未标注集群的仓库映射到配送表集群。订单会优先精确计算；没有直接线路时按历史订单集群权重估算。
+          </p>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>仓库 / 地址</th>
+            <th>历史订单数</th>
+            <th>所属配送集群</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.warehouseName}>
+              <td>
+                <b>{row.warehouseName}</b>
+              </td>
+              <td>{row.orderCount}</td>
+              <td>
+                <input
+                  className="mapping-input"
+                  value={draft[row.warehouseName] ?? row.clusterName}
+                  onChange={(e) =>
+                    setDraft({ ...draft, [row.warehouseName]: e.target.value })
+                  }
+                  placeholder="输入配送表中的集群名称"
+                />
+              </td>
+              <td>
+                <button className="outline-button" onClick={() => save(row)}>
+                  <Save size={14} />
+                  保存
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!rows.length && (
+        <div className="empty">订单缓存中没有可映射的仓库。</div>
+      )}
+    </section>
+  );
+}
+
+export function CompetitorsPage() {
+  const [rows, setRows] = useState<CompetitorRow[]>([]),
+    [url, setUrl] = useState(""),
+    [selected, setSelected] = useState<number[]>([]),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const load = async () => {
+    const data = await competitors();
+    setRows(data);
+    setSelected((old) => (old.length ? old : data.map((x) => x.id)));
+  };
+  useEffect(() => {
+    const run = () =>
+      void refreshCompetitorsDue()
+        .catch((e) => {
+          setError(`自动采集失败：${String(e)}`);
+          return 0;
+        })
+        .then(load);
+    run();
+    const timer = window.setInterval(run, 60 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const add = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await addCompetitor(url);
+      setUrl("");
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const refresh = async (id: number) => {
+    setBusy(true);
+    setError("");
+    try {
+      await refreshCompetitor(id);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const refreshAll = async () => {
+    if (!rows.length) return;
+    setBusy(true);
+    setError("");
+    let success = 0;
+    const failures: string[] = [];
+    for (const row of rows) {
+      try {
+        await refreshCompetitor(row.id);
+        success++;
+      } catch (e) {
+        failures.push(`${row.name || row.productCode || row.id}: ${String(e)}`);
+      }
+    }
+    await load();
+    setBusy(false);
+    if (failures.length)
+      setError(
+        `已采集 ${success} 个，失败 ${failures.length} 个：${failures.slice(0, 3).join("；")}`,
+      );
+    else alert(`自动采集完成：${success} 个竞品`);
+  };
+  useEffect(() => {
+    const el = document.getElementById("competitor-chart");
+    if (!el) return;
+    const chart = echarts.init(el);
+    const chosen = rows.filter((x) => selected.includes(x.id));
+    const dates = [
+      ...new Set(
+        chosen.flatMap((x) =>
+          x.snapshots.map((s) => s.capturedAt.slice(0, 10)),
+        ),
+      ),
+    ].sort();
+    chart.setOption({
+      tooltip: { trigger: "axis" },
+      legend: { top: 0 },
+      grid: { left: 45, right: 25, top: 42, bottom: 35 },
+      xAxis: { type: "category", data: dates },
+      yAxis: [
+        { type: "value", name: "价格 ₽" },
+        { type: "value", name: "累计销量" },
+      ],
+      series: chosen.flatMap((row) => [
+        {
+          name: `${row.name || row.productCode} 价格`,
+          type: "line",
+          smooth: true,
+          data: dates.map(
+            (d) =>
+              row.snapshots.filter((s) => s.capturedAt.startsWith(d)).at(-1)
+                ?.price ?? null,
+          ),
+        },
+        {
+          name: `${row.name || row.productCode} 销量`,
+          type: "line",
+          smooth: true,
+          yAxisIndex: 1,
+          lineStyle: { type: "dashed" },
+          data: dates.map(
+            (d) =>
+              row.snapshots.filter((s) => s.capturedAt.startsWith(d)).at(-1)
+                ?.salesTotal ?? null,
+          ),
+        },
+      ]),
+    });
+    const resize = () => chart.resize();
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      chart.dispose();
+    };
+  }, [rows, selected]);
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <span className="eyebrow">COMPETITOR INTELLIGENCE</span>
+          <h1>竞品跟踪</h1>
+          <p>每日价格、可验证销量快照与多竞品动态对比</p>
+        </div>
+      </header>
+      <div className="competitor-add">
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="粘贴 Ozon 竞品商品完整链接"
+        />
+        <button className="dark-button" disabled={busy || !url} onClick={add}>
+          <Plus size={16} />
+          添加并自动采集
+        </button>
+      </div>
+      {error && (
+        <div className="error-banner">
+          <AlertTriangle />
+          {error}
+        </div>
+      )}
+      <section className="card competitor-chart-card">
+        <div className="card-title">
+          多竞品价格与销量趋势{" "}
+          <span>
+            <button
+              className="outline-button"
+              disabled={busy || !rows.length}
+              onClick={refreshAll}
+            >
+              {busy ? "采集中" : "自动采集全部"}
+            </button>{" "}
+            <span className="badge blue">{selected.length} 个已选择</span>
+          </span>
+        </div>
+        <div id="competitor-chart" className="competitor-chart" />
+      </section>
+      <div className="competitor-grid">
+        {rows.map((row) => (
+          <article
+            className={`competitor-card ${selected.includes(row.id) ? "selected" : ""}`}
+            key={row.id}
+          >
+            <label className="compare-check">
+              <input
+                type="checkbox"
+                checked={selected.includes(row.id)}
+                onChange={(e) =>
+                  setSelected(
+                    e.target.checked
+                      ? [...selected, row.id]
+                      : selected.filter((id) => id !== row.id),
+                  )
+                }
+              />
+              加入对比
+            </label>
+            <div className="competitor-image">
+              {row.imageUrl ? (
+                <img src={row.imageUrl} alt={row.name} />
+              ) : (
+                <TrendingUp />
+              )}
+            </div>
+            <h3>{row.name || `Ozon 商品 ${row.productCode}`}</h3>
+            <small>{row.productCode || "等待识别商品编号"}</small>
+            <div className="competitor-metrics">
+              <span>
+                当前售价
+                <b>
+                  {row.latestPrice == null
+                    ? "—"
+                    : `₽${row.latestPrice.toLocaleString()}`}
+                </b>
+              </span>
+              <span>
+                日销量<b>{row.dailySales ?? "—"}</b>
+              </span>
+              <span>
+                周销量<b>{row.weeklySales ?? "—"}</b>
+              </span>
+              <span>
+                月销量<b>{row.monthlySales ?? "—"}</b>
+              </span>
+            </div>
+            <div className="competitor-actions">
+              <button onClick={() => refresh(row.id)} disabled={busy}>
+                <RefreshCw size={14} />
+                采集快照
+              </button>
+              <button
+                className="remove"
+                onClick={async () => {
+                  await removeCompetitor(row.id);
+                  await load();
+                }}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+      {!rows.length && (
+        <div className="card empty">
+          尚未添加竞品。添加 Ozon 商品链接后，软件会自动获取公开价格与商品图片。
+        </div>
+      )}
+      <section className="card migration-note">
+        <AlertTriangle />
+        <div>
+          <h3>销量来源说明</h3>
+          <p>
+            日、周、月销量由公开页面累计销量快照之差计算。若 Ozon
+            页面不公开累计销量，软件显示“—”，不会使用 AI 猜测。
+          </p>
+        </div>
+      </section>
+    </>
+  );
+}
+
+export function ReportsPage({
+  range,
+  currency,
+  initialTab = "summary",
+}: {
+  range: DateRange;
+  currency: string;
+  initialTab?: "summary" | "daily" | "profit" | "series" | "weekly" | "cross";
+}) {
+  const latestSunday = (() => {
+      const d = new Date();
+      d.setDate(d.getDate() - d.getDay());
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    })(),
+    initialMonth = range.from.slice(0, 7),
+    [month, setMonth] = useState(initialMonth),
+    [weekEnd, setWeekEnd] = useState(latestSunday),
+    [crossRange, setCrossRange] = useState<DateRange>(range),
+    [data, setData] = useState<BusinessReport | null>(null),
+    [detail, setDetail] = useState<AnalyticsDetail | null>(null),
+    [crossData, setCrossData] = useState<CrossBorderReport | null>(null),
+    [breakdown, setBreakdown] = useState<FinanceBreakdownRow[]>([]),
+    [missingRows, setMissingRows] = useState<MissingCostRow[]>([]),
+    [detailFilter, setDetailFilter] = useState(""),
+    [busy, setBusy] = useState(""),
+    [message, setMessage] = useState(""),
+    [tab, setTab] = useState<
+      "summary" | "daily" | "profit" | "series" | "weekly" | "cross"
+    >(initialTab);
+  const monthRange = () => {
+      const [y, m] = month.split("-").map(Number),
+        from = `${month}-01`,
+        last = new Date(y, m, 0),
+        today = new Date(),
+        end = last > today ? today : last;
+      return {
+        from,
+        to: `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, "0")}-${String(end.getDate()).padStart(2, "0")}`,
+      };
+    },
+    weekRange = () => {
+      const end = new Date(`${weekEnd}T00:00:00`),
+        start = new Date(end);
+      start.setDate(end.getDate() - 13);
+      const f = (d: Date) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      return { from: f(start), to: f(end) };
+    },
+    effectiveRange =
+      initialTab === "summary"
+        ? monthRange()
+        : initialTab === "weekly"
+          ? weekRange()
+          : initialTab === "cross"
+            ? crossRange
+            : range;
+  useEffect(() => {
+    setMessage("");
+    if (tab === "summary") {
+      setData(null);
+      cachedReport(effectiveRange).then(setData);
+    } else if (tab === "cross") {
+      setCrossData(null);
+      crossBorderReport(effectiveRange)
+        .then(setCrossData)
+        .catch((e) => setMessage(String(e)));
+    } else {
+      setDetail(null);
+      cachedDetail(effectiveRange).then(setDetail);
+    }
+  }, [tab, effectiveRange.from, effectiveRange.to]);
+  const availableTabs =
+    initialTab === "daily"
+      ? [
+          ["daily", "每日产品"],
+          ["profit", "产品利润"],
+          ["series", "产品系列"],
+        ]
+      : initialTab === "summary"
+        ? [["summary", "月度盈亏"]]
+        : initialTab === "weekly"
+          ? [["weekly", "周报明细"]]
+          : [["cross", "跨境利润"]];
+  useEffect(() => {
+    if (!data) return;
+    const el = document.getElementById("report-chart");
+    if (!el) return;
+    const chart = echarts.init(el);
+    chart.setOption({
+      tooltip: { trigger: "axis" },
+      legend: { top: 0 },
+      grid: { left: 55, right: 25, top: 45, bottom: 30 },
+      xAxis: { type: "category", data: data.daily.map((x) => x.day) },
+      yAxis: [{ type: "value" }, { type: "value" }],
+      series: [
+        {
+          name: "销售额",
+          type: "bar",
+          data: data.daily.map((x) => x.revenue),
+          itemStyle: { color: "#4a82ef" },
+        },
+        {
+          name: "广告花费",
+          type: "line",
+          yAxisIndex: 1,
+          smooth: true,
+          data: data.daily.map((x) => x.adSpend),
+          lineStyle: { color: "#f29935" },
+        },
+      ],
+    });
+    const resize = () => chart.resize();
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      chart.dispose();
+    };
+  }, [data]);
+  if (tab === "summary" && !data)
+    return <div className="empty">正在读取月度缓存…</div>;
+  const m = (v: number) => money(v, currency);
+  const shiftMonth = (delta: number) => {
+    const [y, mo] = month.split("-").map(Number),
+      d = new Date(y, mo - 1 + delta, 1);
+    setMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  };
+  const openBreakdown = async (filter = "") => {
+    setDetailFilter(filter);
+    setBusy("detail");
+    try {
+      setBreakdown(await financeBreakdown(effectiveRange));
+    } finally {
+      setBusy("");
+    }
+  };
+  const openMissingCosts = async () => {
+    setBusy("missing-cost");
+    try {
+      setMissingRows(await missingCostRows(effectiveRange));
+    } finally {
+      setBusy("");
+    }
+  };
+  const syncMonth = async (kind: "seller" | "finance") => {
+    setBusy(kind);
+    setMessage("");
+    try {
+      const count =
+        kind === "seller"
+          ? await syncSeller(effectiveRange)
+          : await syncFinance(effectiveRange);
+      clearReportCache();
+      setData(await businessReport(effectiveRange));
+      setMessage(
+        `${kind === "seller" ? "本月销量" : "本月应计费用"}已同步，写入 ${count} 行。`,
+      );
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+  const visibleBreakdown = breakdown.filter(
+    (x) => !detailFilter || x.category === detailFilter,
+  );
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <span className="eyebrow">BUSINESS REPORTS</span>
+          <h1>
+            {initialTab === "summary"
+              ? "月度盈亏"
+              : initialTab === "weekly"
+                ? "经营周报"
+                : initialTab === "cross"
+                  ? "跨境店铺利润"
+                  : "产品数据报告"}
+          </h1>
+          <p>销售、广告、Finance 与成本缓存的经营预估</p>
+        </div>
+      </header>
+      {initialTab === "weekly" && (
+        <div className="month-toolbar">
+          <b>本期结束日（周日）</b>
+          <input
+            type="date"
+            value={weekEnd}
+            max={latestSunday}
+            onChange={(e) => {
+              const d = new Date(`${e.target.value}T00:00:00`);
+              d.setDate(d.getDate() + ((7 - d.getDay()) % 7));
+              setWeekEnd(d.toISOString().slice(0, 10));
+            }}
+          />
+          <button
+            onClick={() => {
+              const d = new Date(`${weekEnd}T00:00:00`);
+              d.setDate(d.getDate() - 7);
+              setWeekEnd(d.toISOString().slice(0, 10));
+            }}
+          >
+            上一周
+          </button>
+          <button
+            disabled={weekEnd >= latestSunday}
+            onClick={() => {
+              const d = new Date(`${weekEnd}T00:00:00`);
+              d.setDate(d.getDate() + 7);
+              setWeekEnd(d.toISOString().slice(0, 10));
+            }}
+          >
+            下一周
+          </button>
+          <button onClick={() => setWeekEnd(latestSunday)}>最新完整周</button>
+          <span>
+            对比范围：{effectiveRange.from} 至 {effectiveRange.to}
+          </span>
+        </div>
+      )}
+      {initialTab === "summary" && (
+        <div className="month-toolbar">
+          <b>核算月份</b>
+          <input
+            type="month"
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+          />
+          <button onClick={() => shiftMonth(-1)}>上月</button>
+          <button onClick={() => shiftMonth(1)}>下月</button>
+          <button disabled={!!busy} onClick={() => syncMonth("seller")}>
+            同步本月销量
+          </button>
+          <button disabled={!!busy} onClick={() => syncMonth("finance")}>
+            同步应计费用
+          </button>
+          <span>
+            {effectiveRange.from} 至 {effectiveRange.to}
+          </span>
+        </div>
+      )}
+      {initialTab === "cross" && (
+        <div className="month-toolbar sync-range-toolbar">
+          <b>利润日期</b>
+          <label>
+            开始
+            <input
+              type="date"
+              value={crossRange.from}
+              max={crossRange.to}
+              onChange={(e) =>
+                setCrossRange((x) => ({ ...x, from: e.target.value }))
+              }
+            />
+          </label>
+          <em>至</em>
+          <label>
+            结束
+            <input
+              type="date"
+              value={crossRange.to}
+              min={crossRange.from}
+              max={new Date().toISOString().slice(0, 10)}
+              onChange={(e) =>
+                setCrossRange((x) => ({ ...x, to: e.target.value }))
+              }
+            />
+          </label>
+          <button
+            onClick={() => {
+              const today = new Date().toISOString().slice(0, 10);
+              setCrossRange({ from: today, to: today });
+            }}
+          >
+            日利润
+          </button>
+          <button
+            onClick={() => {
+              const to = new Date(),
+                from = new Date();
+              from.setDate(to.getDate() - 6);
+              setCrossRange({
+                from: from.toISOString().slice(0, 10),
+                to: to.toISOString().slice(0, 10),
+              });
+            }}
+          >
+            周利润
+          </button>
+          <button onClick={() => setCrossRange(monthRange())}>月利润</button>
+        </div>
+      )}
+      {message && <div className="sync-message">{message}</div>}
+      {availableTabs.length > 1 && (
+        <div className="tabs report-tabs">
+          {availableTabs.map(([key, label]) => (
+            <button
+              key={key}
+              className={tab === key ? "selected" : ""}
+              onClick={() => setTab(key as typeof tab)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+      {tab === "summary" && data && (
+        <>
+          <div className="report-hero">
+            <div>
+              <span>Finance 结算口径利润</span>
+              <strong
+                className={
+                  (data.settledProfit ?? data.estimatedProfit) < 0
+                    ? "negative"
+                    : ""
+                }
+              >
+                {data.settledProfit == null
+                  ? "成本未完整"
+                  : m(data.settledProfit)}
+              </strong>
+              <small>平台净结算减采购与头程</small>
+            </div>
+            <div>
+              <span>Finance 已结算净额</span>
+              <strong>{m(data.financeNet)}</strong>
+              <small>用于与经营预估对账</small>
+            </div>
+            <div>
+              <span>税后利润</span>
+              <strong>
+                {data.afterTaxProfit == null ? "—" : m(data.afterTaxProfit)}
+              </strong>
+              <small>
+                税率 {data.taxRate}% · 提现费 {data.payoutFeeRate}%
+              </small>
+            </div>
+          </div>
+          <section className="card report-chart-card">
+            <div className="card-title">销售额与广告花费趋势</div>
+            <div id="report-chart" className="report-chart" />
+          </section>
+          <section className="card report-breakdown">
+            <h3>
+              期间构成 <small>点击 Finance 指标查看明细</small>
+            </h3>
+            <div>
+              <span>
+                销售额（下单口径）<b>{m(data.revenue)}</b>
+              </span>
+              <span>
+                订单量<b>{data.orders}</b>
+              </span>
+              <span>
+                销售/退货应计<b>{m(data.salesReturns)}</b>
+              </span>
+              <span>
+                应计费用<b>{m(data.accrualFees)}</b>
+              </span>
+              <span>
+                其他收入/调整<b>{m(data.otherAdjustments)}</b>
+              </span>
+              <span>
+                Performance 广告<b>{m(data.adSpend)}</b>
+              </span>
+              <button onClick={() => openBreakdown("advertising")}>
+                Finance 广告应计<b>{m(data.financeAdvertising)}</b>
+              </button>
+              <span className={data.missingCostSkus ? "missing-cost" : ""}>
+                采购成本
+                <b>
+                  {data.missingCostSkus
+                    ? `缺 ${data.missingCostSkus} 个 SKU`
+                    : m(data.purchaseCost)}
+                </b>
+              </span>
+              <span className={data.missingCostSkus ? "missing-cost" : ""}>
+                头程成本
+                <b>
+                  {data.missingCostSkus
+                    ? "成本资料未完整"
+                    : m(data.firstMileCost)}
+                </b>
+              </span>
+              <button onClick={() => openBreakdown("commission")}>
+                平台佣金<b>{m(data.commission)}</b>
+              </button>
+              <button onClick={() => openBreakdown("delivery")}>
+                配送费用<b>{m(data.deliveryFees)}</b>
+              </button>
+              <button onClick={() => openBreakdown("return_logistics")}>
+                退货物流<b>{m(data.returnFees)}</b>
+              </button>
+              <button onClick={() => openBreakdown("acquiring")}>
+                收单支付<b>{m(data.acquiring)}</b>
+              </button>
+              <button onClick={() => openBreakdown("storage")}>
+                仓储包装<b>{m(data.storagePackaging)}</b>
+              </button>
+              <button onClick={() => openBreakdown("penalties")}>
+                罚款与调整<b>{m(data.penaltiesAdjustments)}</b>
+              </button>
+              <button onClick={() => openBreakdown("other")}>
+                其他 Finance 项目<b>{m(data.otherFinanceFees)}</b>
+              </button>
+              <span>
+                税额<b>{m(data.taxAmount)}</b>
+              </span>
+              <span>
+                提现手续费<b>{m(data.payoutFee)}</b>
+              </span>
+              <button onClick={() => openBreakdown()}>
+                全部 Finance 明细<b>{data.financeOperations} 笔</b>
+              </button>
+              <span>
+                精确归属 SKU<b>{data.exactSkuOperations} 笔</b>
+              </span>
+              <span>
+                未分摊 Finance
+                <b>
+                  {data.unallocatedOperations} 笔 ·{" "}
+                  {m(data.unallocatedFinanceAmount)}
+                </b>
+              </span>
+              <span>
+                Cash Flow 对账差额
+                <b>
+                  {data.reconciliationDifference == null
+                    ? "无汇总缓存"
+                    : m(data.reconciliationDifference)}
+                </b>
+              </span>
+              <span>
+                已核算销量<b>{data.costedUnits} 件</b>
+              </span>
+              <button
+                onClick={openMissingCosts}
+                disabled={!data.missingCostSkus}
+              >
+                缺成本 SKU<b>{data.missingCostSkus}</b>
+              </button>
+            </div>
+            <p>
+              Finance 恒等式：已结算净额 = 销售/退货应计 + 应计费用 +
+              其他收入/调整。Performance 广告仅用于经营趋势；Finance
+              广告已包含在应计费用中，不会重复扣除。
+            </p>
+          </section>
+          {(busy === "detail" || breakdown.length > 0) && (
+            <section className="card table-card finance-detail">
+              <div className="card-title">
+                {detailFilter
+                  ? visibleBreakdown[0]?.categoryLabel || "费用"
+                  : "全部 Finance"}{" "}
+                明细{" "}
+                <button
+                  onClick={() => {
+                    setBreakdown([]);
+                    setDetailFilter("");
+                  }}
+                >
+                  关闭
+                </button>
+              </div>
+              {busy === "detail" ? (
+                <div className="empty">正在读取逐笔分类缓存…</div>
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>费用大类</th>
+                      <th>费用项目</th>
+                      <th>API 字段/服务名</th>
+                      <th>记录数</th>
+                      <th>金额</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleBreakdown.map((x) => (
+                      <tr key={`${x.category}-${x.apiName}-${x.name}`}>
+                        <td>{x.categoryLabel}</td>
+                        <td>{x.name}</td>
+                        <td>{x.apiName}</td>
+                        <td>{x.rowsCount}</td>
+                        <td>{m(x.amount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </section>
+          )}
+          {(busy === "missing-cost" || missingRows.length > 0) && (
+            <section className="card table-card finance-detail">
+              <div className="card-title">
+                缺成本 SKU 明细（{missingRows.length} 个）
+                <button onClick={() => setMissingRows([])}>关闭</button>
+              </div>
+              {busy === "missing-cost" ? (
+                <div className="empty">正在读取当前月份缺成本 SKU…</div>
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>货号 / Ozon SKU</th>
+                      <th>期间销量</th>
+                      <th>成本核算缺失项</th>
+                      <th>物流资料提示</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {missingRows.map((row) => (
+                      <tr key={row.sku}>
+                        <td>
+                          <b>{row.offerId || "—"}</b>
+                          <small>{row.sku}</small>
+                        </td>
+                        <td>{row.units} 件</td>
+                        <td className="missing-cost">
+                          {[
+                            row.missingPurchase && "采购成本",
+                            row.missingFirstMile && "头程成本",
+                          ]
+                            .filter(Boolean)
+                            .join("、") || "—"}
+                        </td>
+                        <td>
+                          {[
+                            row.missingWeight && "重量",
+                            row.missingDimensions && "尺寸",
+                          ]
+                            .filter(Boolean)
+                            .join("、") || "完整"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </section>
+          )}
+        </>
+      )}
+      {tab === "cross" && <CrossBorderView data={crossData} />}
+      {tab !== "summary" && tab !== "cross" && (
+        <AnalysisDetailView tab={tab} detail={detail} money={m} />
+      )}
+    </>
+  );
+}
+
+function CrossBorderView({ data }: { data: CrossBorderReport | null }) {
+  useEffect(() => {
+    if (!data) return;
+    const el = document.getElementById("cross-profit-trend");
+    if (!el) return;
+    const chart = echarts.init(el);
+    chart.setOption({
+      tooltip: { trigger: "axis" },
+      legend: { top: 0 },
+      grid: { left: 60, right: 45, top: 42, bottom: 30 },
+      xAxis: { type: "category", data: data.daily.map((x) => x.day) },
+      yAxis: { type: "value" },
+      series: [
+        {
+          name: "销售额",
+          type: "bar",
+          data: data.daily.map((x) => x.revenueCny),
+        },
+        {
+          name: "日利润",
+          type: "line",
+          smooth: true,
+          data: data.daily.map((x) => x.profitCny),
+        },
+        {
+          name: "广告费",
+          type: "line",
+          smooth: true,
+          data: data.daily.map((x) => x.adSpendCny),
+        },
+      ],
+    });
+    const resize = () => chart.resize();
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      chart.dispose();
+    };
+  }, [data]);
+  if (!data) return <div className="card empty">正在后台读取跨境利润缓存…</div>;
+  const cny = (v: number) =>
+    `¥${v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const rate = (v: number | null) =>
+    v == null ? "历史样本不足" : `${(v * 100).toFixed(2)}%`;
+  return (
+    <>
+      <div className="report-hero">
+        <div>
+          <span>销售额 CNY</span>
+          <strong>{cny(data.revenueCny)}</strong>
+          <small>{data.units} 件</small>
+        </div>
+        <div>
+          <span>全店广告</span>
+          <strong>{cny(data.adSpendCny)}</strong>
+          <small>仅汇总扣除，不分摊单品</small>
+        </div>
+        <div>
+          <span>预估佣金 + 收单</span>
+          <strong>{cny(data.estimatedPlatformFeesCny)}</strong>
+          <small>
+            佣金 {rate(data.commissionRate)} · 收单 {rate(data.acquiringRate)}
+          </small>
+        </div>
+        <div>
+          <span>采购 + 预估运费</span>
+          <strong>{cny(data.purchaseAndFreightCny)}</strong>
+          <small>缺 {data.missingCostSkus} 个 SKU</small>
+        </div>
+        <div>
+          <span>实时预估利润</span>
+          <strong>
+            {data.profitCny == null
+              ? "成本/历史费率未完整"
+              : cny(data.profitCny)}
+          </strong>
+          <small>下单销售额口径</small>
+        </div>
+        <div>
+          <span>Finance 已结算净额</span>
+          <strong>
+            {data.financeAvailable ? cny(data.settledFinanceNetCny) : "—"}
+          </strong>
+          <small>仅用于对账</small>
+        </div>
+      </div>
+      <div className="sync-message">
+        1 CNY = {Number(data.rubPerCny.toFixed(4))} RUB · 履约缓存 FBP{" "}
+        {data.fbpOrders} / FBS {data.rfbsOrders} / WHD {data.whdOrders} ·{" "}
+        {data.dateFrom} 至 {data.dateTo}
+      </div>
+      <section className="card report-chart-card">
+        <div className="card-title">跨境销售额、广告与日利润趋势</div>
+        <div id="cross-profit-trend" className="report-chart" />
+      </section>
+      <section className="card table-card report-detail">
+        <table>
+          <thead>
+            <tr>
+              <th>货号 / SKU</th>
+              <th>销量 / 履约</th>
+              <th>FBP / FBS / WHD</th>
+              <th>销售额 CNY</th>
+              <th>单件售价</th>
+              <th>采购 / 重量</th>
+              <th>定价跨境运费</th>
+              <th>采购合计</th>
+              <th>运费合计</th>
+              <th>预估佣金+收单</th>
+              <th>实时商品贡献</th>
+              <th>Finance 对账</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.rows.map((x) => (
+              <tr key={x.sku}>
+                <td>
+                  <b>{x.offerId || "—"}</b>
+                  <small>{x.sku}</small>
+                </td>
+                <td>
+                  <b>{x.units}</b>
+                  <small>履约单 {x.fulfillmentOrders}</small>
+                </td>
+                <td>
+                  {x.fbpOrders} / {x.rfbsOrders} / {x.whdOrders}
+                </td>
+                <td>{cny(x.revenueCny)}</td>
+                <td>{cny(x.sellingPriceCny)}</td>
+                <td>
+                  {x.purchaseCostCny == null ? "—" : cny(x.purchaseCostCny)}
+                  <small>
+                    {x.weightKg == null ? "重量未填" : `${x.weightKg} kg`}
+                  </small>
+                </td>
+                <td>
+                  {x.freightUnitCny == null
+                    ? "超出区间/缺重量"
+                    : cny(x.freightUnitCny)}
+                </td>
+                <td>
+                  {x.purchaseTotalCny == null ? "—" : cny(x.purchaseTotalCny)}
+                </td>
+                <td>
+                  {x.freightTotalCny == null ? "—" : cny(x.freightTotalCny)}
+                </td>
+                <td>
+                  {x.estimatedPlatformFeesCny == null
+                    ? "历史费率不足"
+                    : cny(x.estimatedPlatformFeesCny)}
+                </td>
+                <td>
+                  {x.contributionCny == null
+                    ? "数据不足"
+                    : cny(x.contributionCny)}
+                </td>
+                <td>
+                  {x.financeSettledCny == null ? "—" : cny(x.financeSettledCny)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!data.rows.length && (
+          <div className="empty">
+            当前日期范围没有出单数据。请先同步 Seller 销量；Finance
+            和广告分别用于费率、对账与全店广告。
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+function AnalysisDetailView({
+  tab,
+  detail,
+  money,
+}: {
+  tab: "daily" | "profit" | "series" | "weekly" | "cross";
+  detail: AnalyticsDetail | null;
+  money: (v: number) => string;
+}) {
+  const [page, setPage] = useState(0);
+  useEffect(() => setPage(0), [tab, detail]);
+  const rows =
+    tab === "daily"
+      ? (detail?.dailyProducts ?? []).map((x) => [
+          x.day,
+          x.offerId || "—",
+          x.sku,
+          x.units,
+          money(x.revenue),
+          money(x.adSpend),
+          x.adOrders,
+          x.adCostPerOrder == null ? "—" : money(x.adCostPerOrder),
+          x.tacos == null ? "—" : `${x.tacos.toFixed(2)}%`,
+          x.costComplete && x.estimatedProfit != null
+            ? money(x.estimatedProfit)
+            : "缺少成本",
+        ])
+      : tab === "profit"
+        ? (detail?.products ?? []).map((x) => [
+            x.offerId || "—",
+            x.sku,
+            x.units,
+            money(x.revenue),
+            money(x.adSpend),
+            x.costComplete ? money(x.estimatedProfit ?? 0) : "缺少成本",
+          ])
+        : tab === "series"
+          ? (detail?.series ?? []).map((x) => [
+              x.periodType,
+              x.period,
+              x.series,
+              x.skuCount,
+              x.units,
+              money(x.revenue),
+            ])
+          : tab === "weekly"
+            ? (detail?.weekly ?? []).map((x, i, all) => [
+                x.period,
+                x.units,
+                money(x.revenue),
+                money(x.adSpend),
+                x.adOrders,
+                `${x.adOrderShare.toFixed(2)}%`,
+                `${x.acots.toFixed(2)}%`,
+                x.returns,
+                x.cancellations,
+                all[i + 1]?.revenue
+                  ? `${((x.revenue / all[i + 1].revenue - 1) * 100).toFixed(2)}%`
+                  : "—",
+                all[i + 1]?.units
+                  ? `${((x.units / all[i + 1].units - 1) * 100).toFixed(2)}%`
+                  : "—",
+              ])
+            : (detail?.products ?? []).map((x) => [
+                x.offerId || "—",
+                x.sku,
+                x.units,
+                money(x.revenue),
+                x.crossBorderFreight == null
+                  ? "缺少重量/不适用"
+                  : money(x.crossBorderFreight),
+                x.estimatedProfit == null || x.crossBorderFreight == null
+                  ? "—"
+                  : money(x.estimatedProfit - x.crossBorderFreight),
+              ]);
+  const headers =
+    tab === "daily"
+      ? [
+          "日期",
+          "货号",
+          "Ozon SKU",
+          "销量",
+          "销售额",
+          "广告费",
+          "广告订单",
+          "每单广告费",
+          "TACOS",
+          "当天预估利润",
+        ]
+      : tab === "profit"
+        ? ["商品", "SKU / 货号", "销量", "销售额", "广告", "预估利润"]
+        : tab === "series"
+          ? ["粒度", "周期", "产品系列", "SKU 数", "销量", "销售额"]
+          : tab === "weekly"
+            ? [
+                "周",
+                "销量",
+                "销售额",
+                "广告花费",
+                "广告订单",
+                "广告单占比",
+                "ACoTS",
+                "退货",
+                "取消",
+                "销售额环比",
+                "销量环比",
+              ]
+            : [
+                "商品",
+                "SKU / 货号",
+                "销量",
+                "销售额",
+                "跨境运费",
+                "扣运费后贡献",
+              ];
+  const pages = Math.max(1, Math.ceil(rows.length / 100)),
+    visible = rows.slice(page * 100, page * 100 + 100);
+  return (
+    <>
+      <section className="card table-card report-detail">
+        <table>
+          <thead>
+            <tr>
+              {headers.map((x) => (
+                <th key={x}>{x}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((row, i) => (
+              <tr key={i}>
+                {row.map((value, j) => (
+                  <td key={j}>
+                    <b>{value}</b>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows.length && (
+          <div className="empty">
+            {detail
+              ? "当前日期范围没有可汇总的真实数据。"
+              : "正在从本地持久缓存读取明细…"}
+          </div>
+        )}
+      </section>
+      {tab === "weekly" && (detail?.weeklyDaily?.length ?? 0) > 0 && (
+        <section className="card table-card report-detail">
+          <div className="card-title">本周每日数据</div>
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>销量</th>
+                <th>销售额</th>
+                <th>广告花费</th>
+                <th>广告订单</th>
+                <th>广告单占比</th>
+                <th>ACoTS</th>
+                <th>退货</th>
+                <th>取消</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detail!.weeklyDaily.map((x) => (
+                <tr key={x.day}>
+                  <td>
+                    <b>{x.day}</b>
+                  </td>
+                  <td>{x.units}</td>
+                  <td>{money(x.revenue)}</td>
+                  <td>{money(x.adSpend)}</td>
+                  <td>{x.adOrders}</td>
+                  <td>{x.adOrderShare.toFixed(2)}%</td>
+                  <td>{x.acots.toFixed(2)}%</td>
+                  <td>{x.returns}</td>
+                  <td>{x.cancellations}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+      {rows.length > 100 && (
+        <div className="table-pagination">
+          <button disabled={page === 0} onClick={() => setPage(page - 1)}>
+            上一页
+          </button>
+          <span>
+            第 {page + 1} / {pages} 页 · 共 {rows.length} 条
+          </span>
+          <button
+            disabled={page + 1 >= pages}
+            onClick={() => setPage(page + 1)}
+          >
+            下一页
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+export function AiPage({ range }: { range: DateRange }) {
+  const [question, setQuestion] = useState(
+      "请分析当前经营健康度、利润风险、广告效率，并给出按优先级排序的行动建议。",
+    ),
+    [answer, setAnswer] = useState(""),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const run = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setAnswer(await aiAnalysis(range, question));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <span className="eyebrow">LOCAL-FIRST AI ANALYST</span>
+          <h1>AI 经营分析</h1>
+          <p>基于当前店铺、日期范围和本地真实汇总生成经营建议</p>
+        </div>
+        <button
+          className="dark-button"
+          disabled={busy || !question.trim()}
+          onClick={run}
+        >
+          <TrendingUp size={16} />
+          {busy ? "分析中" : "开始分析"}
+        </button>
+      </header>
+      <section className="card ai-panel">
+        <div className="card-title">
+          分析目标{" "}
+          <span className="badge blue">
+            {range.from} 至 {range.to}
+          </span>
+        </div>
+        <textarea
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          rows={5}
+        />
+        <p className="ai-privacy">
+          仅发送经营汇总和销量前 20 的商品摘要，不发送 API
+          密钥、订单号或买家信息。
+        </p>
+      </section>
+      {error && (
+        <div className="error-banner">
+          <AlertTriangle />
+          {error}
+        </div>
+      )}
+      <section className="card ai-answer">
+        <div className="card-title">分析结果</div>
+        {answer ? (
+          <div className="ai-copy">{answer}</div>
+        ) : (
+          <div className="empty">
+            配置 OpenAI 兼容的 AI
+            服务后，可在这里获得基于真实数据的诊断；系统不会用演示数据替代。
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+export function SupplyPage() {
+  const today = new Date().toISOString().slice(0, 10),
+    later = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+  const [rows, setRows] = useState<SupplyOrder[]>([]),
+    [selected, setSelected] = useState<SupplyOrder | null>(null),
+    [slots, setSlots] = useState<SupplyTimeslot[]>([]),
+    [from, setFrom] = useState(today),
+    [to, setTo] = useState(later),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const load = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setRows(await supplyOrders());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => {
+    void load();
+  }, []);
+  const findSlots = async (row: SupplyOrder) => {
+    setSelected(row);
+    setBusy(true);
+    setError("");
+    try {
+      setSlots(await supplyTimeslots(row.orderId, from, to));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const book = async (slot: SupplyTimeslot) => {
+    if (!selected) return;
+    const prompt = `确认预约供应单 ${selected.orderNumber || selected.orderId}\n${slot.from} 至 ${slot.to}\n\n该操作将真实写入 Ozon，且不会自动重试。请输入“确认预约”继续：`;
+    if (window.prompt(prompt) !== "确认预约") return;
+    setBusy(true);
+    try {
+      alert(
+        await bookSupplyTimeslot(
+          selected.orderId,
+          slot.from,
+          slot.to,
+          "确认预约",
+        ),
+      );
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <span className="eyebrow">FBO SUPPLY APPOINTMENTS</span>
+          <h1>约仓计划</h1>
+          <p>真实读取活动供应单、越库集群并查询或修改预约时段</p>
+        </div>
+        <button className="dark-button" onClick={load} disabled={busy}>
+          <RefreshCw size={16} />
+          {busy ? "请求中" : "读取供应单"}
+        </button>
+      </header>
+      {error && (
+        <div className="error-banner">
+          <AlertTriangle />
+          {error}
+        </div>
+      )}
+      <div className="supply-layout">
+        <section className="card table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>供应单</th>
+                <th>类型 / 状态</th>
+                <th>发货点</th>
+                <th>集群 / 目的仓</th>
+                <th>当前时段</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr
+                  key={row.orderId}
+                  className={
+                    selected?.orderId === row.orderId ? "row-selected" : ""
+                  }
+                >
+                  <td>
+                    <b>{row.orderNumber || row.orderId}</b>
+                    <small>{row.createdDate}</small>
+                  </td>
+                  <td>
+                    <b>{row.supplyType}</b>
+                    <small>
+                      {row.state} · {row.supplyStates}
+                    </small>
+                  </td>
+                  <td>
+                    <b>{row.dropoffName || "—"}</b>
+                    <small>{row.dropoffAddress}</small>
+                  </td>
+                  <td>
+                    <b>{row.clusters || "—"}</b>
+                    <small>
+                      {row.storageWarehouses || `${row.suppliesCount} 个供应`}
+                    </small>
+                  </td>
+                  <td>
+                    <b>{row.timeslotFrom || "未预约"}</b>
+                    <small>{row.timeslotTo}</small>
+                  </td>
+                  <td>
+                    <button
+                      className="outline-button"
+                      onClick={() => findSlots(row)}
+                    >
+                      查询时段
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!rows.length && !busy && (
+            <div className="empty">
+              当前没有活动供应单，或尚未配置 Seller API 权限。
+            </div>
+          )}
+        </section>
+        <aside className="card supply-slots">
+          <h3>可用预约时段</h3>
+          <div className="supply-dates">
+            <label>
+              开始
+              <input
+                type="date"
+                value={from}
+                onChange={(e) => setFrom(e.target.value)}
+              />
+            </label>
+            <label>
+              结束
+              <input
+                type="date"
+                value={to}
+                onChange={(e) => setTo(e.target.value)}
+              />
+            </label>
+          </div>
+          {selected && (
+            <p>
+              供应单：<b>{selected.orderNumber || selected.orderId}</b>
+            </p>
+          )}
+          {slots.map((slot) => (
+            <button key={slot.from} onClick={() => book(slot)}>
+              <span>{slot.from}</span>
+              <small>至 {slot.to}</small>
+              <b>预约</b>
+            </button>
+          ))}
+          {!slots.length && (
+            <div className="empty">选择供应单查询未来 60 天内的可用时段。</div>
+          )}
+          <p className="write-warning">
+            预约是远程写操作，提交前必须手工输入“确认预约”；网络响应不明确时不会重复提交。
+          </p>
+        </aside>
+      </div>
+    </>
+  );
+}
+
+export function SyncPage({ range }: { range: DateRange }) {
+  const [logs, setLogs] = useState<SyncLog[]>([]),
+    [coverage, setCoverage] = useState<DataCoverageRow[]>([]),
+    [syncRange, setSyncRange] = useState<DateRange>(range),
+    [pruneBefore, setPruneBefore] = useState(() => {
+      const d = new Date();
+      d.setDate(d.getDate() - 90);
+      return d.toISOString().slice(0, 10);
+    }),
+    [busy, setBusy] = useState(""),
+    [message, setMessage] = useState("");
+  const today = new Date().toISOString().slice(0, 10),
+    recentFrom = (days: number) =>
+      new Date(Date.parse(`${today}T00:00:00Z`) - days * 86400000)
+        .toISOString()
+        .slice(0, 10),
+    rangeValid =
+      !!syncRange.from &&
+      !!syncRange.to &&
+      syncRange.from <= syncRange.to &&
+      syncRange.to <= today;
+  const load = async () => {
+    const [l, c] = await Promise.all([syncLogs(), dataCoverage()]);
+    setLogs(l);
+    setCoverage(c);
+  };
+  useEffect(() => {
+    void load();
+  }, []);
+  const seller = async () => {
+    setBusy("seller");
+    setMessage("");
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve()),
+    );
+    try {
+      if (!rangeValid)
+        throw new Error(
+          "请选择有效的同步日期，结束日期不能早于开始日期或晚于今天。",
+        );
+      const count = await syncSeller(syncRange);
+      clearReportCache();
+      setMessage(`Seller 销量同步完成，写入 ${count} 行真实数据。`);
+      await load();
+    } catch (e) {
+      setMessage(String(e));
+      await load();
+    } finally {
+      setBusy("");
+    }
+  };
+  const run = async (kind: "performance" | "finance") => {
+    setBusy(kind);
+    setMessage("");
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve()),
+    );
+    try {
+      const count =
+        kind === "performance"
+          ? await syncPerformance(syncRange)
+          : await syncFinance(syncRange);
+      clearReportCache();
+      setMessage(
+        `${kind === "performance" ? "Performance 广告" : "Finance 结算"}同步完成，写入 ${count} 行。`,
+      );
+      await load();
+    } catch (e) {
+      setMessage(String(e));
+      await load();
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <span className="eyebrow">DATA SYNC CENTER</span>
+          <h1>数据同步</h1>
+          <p>API 数据写入当前店铺独立数据库，关闭软件后仍会保留</p>
+        </div>
+        <button className="dark-button" onClick={load}>
+          <RefreshCw size={16} />
+          刷新状态
+        </button>
+      </header>
+      <div className="month-toolbar sync-range-toolbar">
+        <b>同步日期</b>
+        <label>
+          开始
+          <input
+            type="date"
+            value={syncRange.from}
+            max={syncRange.to || today}
+            onChange={(e) =>
+              setSyncRange((current) => ({ ...current, from: e.target.value }))
+            }
+          />
+        </label>
+        <em>至</em>
+        <label>
+          结束
+          <input
+            type="date"
+            value={syncRange.to}
+            min={syncRange.from}
+            max={today}
+            onChange={(e) =>
+              setSyncRange((current) => ({ ...current, to: e.target.value }))
+            }
+          />
+        </label>
+        <button
+          disabled={!!busy}
+          onClick={() => setSyncRange({ from: recentFrom(6), to: today })}
+        >
+          最近 7 天
+        </button>
+        <button
+          disabled={!!busy}
+          onClick={() => setSyncRange({ from: recentFrom(29), to: today })}
+        >
+          最近 30 天
+        </button>
+        <button
+          disabled={!!busy}
+          onClick={() =>
+            setSyncRange({ from: `${today.slice(0, 7)}-01`, to: today })
+          }
+        >
+          本月
+        </button>
+      </div>
+      {!rangeValid && (
+        <div className="sync-message">
+          请选择有效日期：结束日期不能早于开始日期，也不能晚于今天。
+        </div>
+      )}
+      <div className="coverage-grid">
+        {coverage.map((x) => (
+          <section className="card" key={x.source}>
+            <span>{x.source}</span>
+            <b>{x.rowsCount.toLocaleString()} 行已缓存</b>
+            <small>
+              {x.dateFrom && x.dateTo
+                ? `${x.dateFrom} 至 ${x.dateTo}`
+                : "尚无本地数据"}
+            </small>
+            <small>
+              {x.lastSuccess ? `最近成功：${x.lastSuccess}` : "尚无成功同步"}
+            </small>
+          </section>
+        ))}
+      </div>
+      <div className="sync-actions">
+        <section className="card">
+          <Database />
+          <div>
+            <h3>Seller 销量分析</h3>
+            <p>销售额、销量、妥投、退货、取消、浏览和加购</p>
+            <small>
+              本次请求：{syncRange.from} 至 {syncRange.to}
+            </small>
+          </div>
+          <button
+            className="dark-button"
+            disabled={!!busy || !rangeValid}
+            onClick={seller}
+          >
+            {busy === "seller" ? "同步中" : "立即同步"}
+          </button>
+        </section>
+        <section className="card">
+          <Megaphone />
+          <div>
+            <h3>Performance 广告</h3>
+            <p>活动日报、曝光、点击、订单和花费</p>
+            <small>
+              本次请求：{syncRange.from} 至 {syncRange.to}
+            </small>
+          </div>
+          <button
+            className="dark-button"
+            disabled={!!busy || !rangeValid}
+            onClick={() => run("performance")}
+          >
+            {busy === "performance" ? "同步中" : "立即同步"}
+          </button>
+        </section>
+        <section className="card">
+          <TrendingUp />
+          <div>
+            <h3>Finance 结算</h3>
+            <p>逐笔应计、佣金、配送和退货费用</p>
+            <small>
+              本次请求：{syncRange.from} 至 {syncRange.to}
+            </small>
+          </div>
+          <button
+            className="dark-button"
+            disabled={!!busy || !rangeValid}
+            onClick={() => run("finance")}
+          >
+            {busy === "finance" ? "同步中" : "立即同步"}
+          </button>
+        </section>
+      </div>
+      {message && <div className="sync-message">{message}</div>}
+      <div className="month-toolbar sync-range-toolbar">
+        <b>历史缓存维护</b>
+        <span>
+          默认至少保留最近三个月；可删除此日期之前的销售、广告和 Finance 缓存
+        </span>
+        <input
+          type="date"
+          value={pruneBefore}
+          max={new Date().toISOString().slice(0, 10)}
+          onChange={(e) => setPruneBefore(e.target.value)}
+        />
+        <button
+          disabled={!!busy}
+          onClick={async () => {
+            if (
+              !window.confirm(
+                `确认删除 ${pruneBefore} 之前的历史经营缓存？商品成本与配置不会删除。`,
+              )
+            )
+              return;
+            setBusy("prune");
+            try {
+              const count = await pruneCache(pruneBefore);
+              clearReportCache();
+              setMessage(
+                `已清理 ${count.toLocaleString()} 条旧缓存，保留 ${pruneBefore} 及之后的数据。`,
+              );
+              await load();
+            } catch (e) {
+              setMessage(String(e));
+            } finally {
+              setBusy("");
+            }
+          }}
+        >
+          {busy === "prune" ? "清理中" : "清理所选日期前缓存"}
+        </button>
+      </div>
+      <section className="card table-card">
+        <div className="card-title">最近同步记录</div>
+        <table>
+          <thead>
+            <tr>
+              <th>开始时间</th>
+              <th>来源</th>
+              <th>状态</th>
+              <th>行数</th>
+              <th>完成时间</th>
+              <th>消息</th>
+            </tr>
+          </thead>
+          <tbody>
+            {logs.map((log) => (
+              <tr key={log.id}>
+                <td>{log.startedAt}</td>
+                <td>
+                  <b>{log.source}</b>
+                </td>
+                <td>
+                  <span className={`sync-status ${log.status}`}>
+                    {log.status}
+                  </span>
+                </td>
+                <td>{log.rowsCount}</td>
+                <td>{log.finishedAt || "—"}</td>
+                <td>{log.message}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </>
+  );
+}
+
+export function FeishuPage({ range }: { range: DateRange }) {
+  const [busy, setBusy] = useState(""),
+    [result, setResult] = useState(""),
+    [shipments, setShipments] = useState<ShipmentTracking[]>([]);
+  const loadShipments = async () => setShipments(await shipmentTracking());
+  useEffect(() => {
+    void loadShipments();
+  }, []);
+  const run = async (kind: string, action: () => Promise<string>) => {
+    setBusy(kind);
+    setResult("");
+    try {
+      setResult(await action());
+      await loadShipments();
+    } catch (e) {
+      setResult(String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <span className="eyebrow">FEISHU COLLABORATION</span>
+          <h1>飞书协作</h1>
+          <p>商品成本双向同步、经营周报与发货跟踪，配置沿用旧版本地密钥</p>
+        </div>
+        <button
+          className="dark-button"
+          disabled={!!busy}
+          onClick={() => run("test", testFeishu)}
+        >
+          <RefreshCw size={16} />
+          {busy === "test" ? "测试中" : "测试连接"}
+        </button>
+      </header>
+      <div className="feishu-grid">
+        <section className="card">
+          <Database />
+          <h3>商品多维表格</h3>
+          <p>
+            以 SKU
+            为唯一键同步货号、名称、采购成本、头程与备注。远程空值不会覆盖已有本地成本。
+          </p>
+          <div className="button-row">
+            <button
+              disabled={!!busy}
+              onClick={() => run("pull", () => syncFeishuProducts("pull"))}
+            >
+              从飞书读取
+            </button>
+            <button
+              disabled={!!busy}
+              onClick={() => run("push", () => syncFeishuProducts("push"))}
+            >
+              推送到飞书
+            </button>
+            <button
+              className="dark-button"
+              disabled={!!busy}
+              onClick={() => run("both", () => syncFeishuProducts("both"))}
+            >
+              双向同步
+            </button>
+          </div>
+        </section>
+        <section className="card">
+          <TrendingUp />
+          <h3>经营周报</h3>
+          <p>
+            使用当前店铺本地真实数据生成飞书互动卡片，包含销售、广告、退货取消与经营效率。
+          </p>
+          <small>
+            {range.from} 至 {range.to}
+          </small>
+          <button
+            className="dark-button"
+            disabled={!!busy}
+            onClick={() => run("weekly", () => sendFeishuWeekly(range))}
+          >
+            {busy === "weekly" ? "发送中" : "发送到群聊"}
+          </button>
+        </section>
+      </div>
+      {result && <div className="sync-message">{result}</div>}
+      <section className="card table-card shipment-card">
+        <div className="card-title">
+          发货跟踪{" "}
+          <button
+            className="outline-button"
+            disabled={!!busy}
+            onClick={() =>
+              run(
+                "shipments",
+                async () =>
+                  `发货跟踪同步完成，共读取 ${await syncFeishuShipments()} 条记录`,
+              )
+            }
+          >
+            <RefreshCw size={14} />
+            从飞书同步
+          </button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>跟踪单号</th>
+              <th>品名 / 批次</th>
+              <th>店铺 / 数量</th>
+              <th>状态 / 渠道</th>
+              <th>国内到库</th>
+              <th>国外到库</th>
+              <th>通知</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shipments.map((row) => (
+              <tr key={row.trackingId}>
+                <td>
+                  <b>{row.trackingId}</b>
+                </td>
+                <td>
+                  {row.productName}
+                  <small>{row.batchNo}</small>
+                </td>
+                <td>
+                  {row.shopName}
+                  <small>{row.quantity} 件</small>
+                </td>
+                <td>
+                  {row.cargoStatus}
+                  <small>{row.channel}</small>
+                </td>
+                <td>{row.domesticArrival || "—"}</td>
+                <td>{row.foreignArrival || "—"}</td>
+                <td>
+                  {row.needsNotification ? (
+                    <button
+                      className="dark-button"
+                      disabled={!!busy}
+                      onClick={() =>
+                        run(`notify-${row.trackingId}`, () =>
+                          notifyShipment(row.trackingId),
+                        )
+                      }
+                    >
+                      发送到库通知
+                    </button>
+                  ) : (
+                    <span className="badge green">
+                      {row.notifiedForeignArrival ? "已通知" : "待到库"}
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!shipments.length && (
+          <div className="empty">
+            尚无发货跟踪记录；配置跟踪表 Table ID 后点击“从飞书同步”。
+          </div>
+        )}
+      </section>
+      <section className="card migration-note">
+        <AlertTriangle />
+        <div>
+          <h3>远程写入规则</h3>
+          <p>
+            以上按钮均由用户手动触发。商品同步按 SKU
+            增量新增或更新；周报和到库通知不会在页面中自动发送。飞书 App Secret
+            继续由 Windows DPAPI 加密保存。
+          </p>
+        </div>
+      </section>
+    </>
+  );
+}
+
+export function WbPage({
+  range,
+  section,
+}: {
+  range: DateRange;
+  section: "daily" | "costs" | "settings";
+}) {
+  const wbChartRef = useRef<HTMLDivElement | null>(null);
+  const [tab, setTab] = useState<"daily" | "costs" | "settings">(section),
+    [settings, setSettings] = useState<WbSettings | null>(null),
+    [rows, setRows] = useState<WbDaily[]>([]),
+    [costs, setCosts] = useState<WbCost[]>([]),
+    [busy, setBusy] = useState(false),
+    [message, setMessage] = useState(""),
+    [wbApiPath, setWbApiPath] = useState("");
+  const load = async () => {
+    const [s, d, c] = await Promise.all([
+      wbSettings(),
+      wbDaily(range),
+      wbCosts(),
+    ]);
+    setSettings(s);
+    setRows(d);
+    setCosts(c);
+  };
+  useEffect(() => {
+    void load();
+  }, [range.from, range.to]);
+  useEffect(() => setTab(section), [section]);
+  useEffect(() => {
+    if (tab !== "daily" || !wbChartRef.current) return;
+    const daily = new Map<
+      string,
+      { revenue: number; ads: number; profit: number }
+    >();
+    rows.forEach((row) => {
+      const item = daily.get(row.day) || { revenue: 0, ads: 0, profit: 0 };
+      item.revenue += row.revenueCny;
+      item.ads += row.adSpendCny;
+      item.profit += row.profitCny || 0;
+      daily.set(row.day, item);
+    });
+    const entries = [...daily.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const chart = echarts.init(wbChartRef.current);
+    chart.setOption({
+      tooltip: { trigger: "axis" },
+      legend: { data: ["销售额", "广告费", "暂估利润"] },
+      grid: { left: 56, right: 30, top: 48, bottom: 42 },
+      xAxis: { type: "category", data: entries.map(([day]) => day) },
+      yAxis: { type: "value", name: "CNY" },
+      series: [
+        {
+          name: "销售额",
+          type: "bar",
+          data: entries.map(([, value]) => value.revenue),
+          itemStyle: { color: "#4a7dea" },
+        },
+        {
+          name: "广告费",
+          type: "line",
+          smooth: true,
+          data: entries.map(([, value]) => value.ads),
+          itemStyle: { color: "#6b7280" },
+        },
+        {
+          name: "暂估利润",
+          type: "line",
+          smooth: true,
+          data: entries.map(([, value]) => value.profit),
+          itemStyle: { color: "#84cc16" },
+        },
+      ],
+    });
+    const resize = () => chart.resize();
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      chart.dispose();
+    };
+  }, [rows, tab]);
+  const total = (key: keyof WbDaily) =>
+    rows.reduce(
+      (n, r) => n + (typeof r[key] === "number" ? Number(r[key]) : 0),
+      0,
+    );
+  const sync = async () => {
+    setBusy(true);
+    setMessage(
+      "WB API 正在后台同步，当前页面仍可继续浏览；完成后会自动刷新缓存。",
+    );
+    try {
+      setMessage(await syncWb(range));
+      await load();
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <header className="page-header wb-header">
+        <div>
+          <span className="eyebrow">WILDBERRIES WORKSPACE</span>
+          <h1>WB 跨境独立工作台</h1>
+          <p>
+            独立 Token、独立数据库、精确商品广告与暂估利润，不混入 Ozon 数据
+          </p>
+        </div>
+        <button className="dark-button" disabled={busy} onClick={sync}>
+          <RefreshCw size={16} />
+          {busy ? "同步中" : "同步 WB API"}
+        </button>
+      </header>
+      <div className="tabs wb-tabs">
+        <button
+          className={tab === "daily" ? "selected" : ""}
+          onClick={() => setTab("daily")}
+        >
+          每日经营
+        </button>
+        <button
+          className={tab === "costs" ? "selected" : ""}
+          onClick={() => setTab("costs")}
+        >
+          产品成本与运费
+        </button>
+        <button
+          className={tab === "settings" ? "selected" : ""}
+          onClick={() => setTab("settings")}
+        >
+          WB API 设置
+        </button>
+      </div>
+      {message && <div className="sync-message">{message}</div>}
+      {tab === "daily" && (
+        <>
+          <div className="report-hero wb-summary">
+            <div>
+              <span>销量</span>
+              <strong>{total("quantity")} 件</strong>
+            </div>
+            <div>
+              <span>销售额</span>
+              <strong>
+                ¥
+                {total("revenueCny").toLocaleString(undefined, {
+                  maximumFractionDigits: 2,
+                })}
+              </strong>
+            </div>
+            <div>
+              <span>广告费</span>
+              <strong>
+                ¥
+                {total("adSpendCny").toLocaleString(undefined, {
+                  maximumFractionDigits: 2,
+                })}
+              </strong>
+            </div>
+            <div>
+              <span>暂估利润</span>
+              <strong>
+                ¥
+                {total("profitCny").toLocaleString(undefined, {
+                  maximumFractionDigits: 2,
+                })}
+              </strong>
+            </div>
+          </div>
+          <section className="card report-chart-card">
+            <div className="card-title">WB 销售额、广告与利润趋势</div>
+            <div ref={wbChartRef} className="report-chart" />
+          </section>
+          <div className="wb-weekly-action">
+            <button
+              className="outline-button"
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  setMessage(await sendWbWeekly(range));
+                } catch (e) {
+                  setMessage(String(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              发送 WB 周利润到飞书
+            </button>
+          </div>
+          <section className="card table-card">
+            <table>
+              <thead>
+                <tr>
+                  <th>日期 / nmId</th>
+                  <th>货号 / 仓库</th>
+                  <th>销量</th>
+                  <th>销售额 CNY</th>
+                  <th>广告</th>
+                  <th>平台费</th>
+                  <th>采购</th>
+                  <th>物流</th>
+                  <th>利润</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={`${row.day}-${row.nmId}`}>
+                    <td>
+                      {row.day}
+                      <small>{row.nmId}</small>
+                    </td>
+                    <td>
+                      <b>{row.article}</b>
+                      <small>{row.warehouseName}</small>
+                    </td>
+                    <td>{row.quantity}</td>
+                    <td>¥{row.revenueCny.toFixed(2)}</td>
+                    <td>¥{row.adSpendCny.toFixed(2)}</td>
+                    <td>¥{row.commissionCny.toFixed(2)}</td>
+                    <td>
+                      {row.purchaseTotalCny == null
+                        ? "—"
+                        : `¥${row.purchaseTotalCny.toFixed(2)}`}
+                    </td>
+                    <td>
+                      {row.logisticsTotalCny == null
+                        ? "—"
+                        : `¥${row.logisticsTotalCny.toFixed(2)}`}
+                    </td>
+                    <td className={!row.complete ? "incomplete" : ""}>
+                      {row.profitCny == null
+                        ? "缺成本/物流"
+                        : `¥${row.profitCny.toFixed(2)}`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        </>
+      )}
+      {tab === "costs" && (
+        <section className="card table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>nmId</th>
+                <th>货号</th>
+                <th>采购 CNY</th>
+                <th>长</th>
+                <th>宽</th>
+                <th>高</th>
+                <th>重量 kg</th>
+                <th>仓库模式</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {costs.map((row, i) => (
+                <tr key={row.nmId}>
+                  <td>{row.nmId}</td>
+                  <td>
+                    <input
+                      value={row.article}
+                      onChange={(e) =>
+                        setCosts((x) =>
+                          x.map((v, j) =>
+                            j === i ? { ...v, article: e.target.value } : v,
+                          ),
+                        )
+                      }
+                    />
+                  </td>
+                  {(
+                    [
+                      "purchaseCostCny",
+                      "lengthCm",
+                      "widthCm",
+                      "heightCm",
+                      "weightKg",
+                    ] as const
+                  ).map((key) => (
+                    <td key={key}>
+                      <input
+                        type="number"
+                        value={row[key] ?? ""}
+                        onChange={(e) =>
+                          setCosts((x) =>
+                            x.map((v, j) =>
+                              j === i
+                                ? {
+                                    ...v,
+                                    [key]:
+                                      e.target.value === ""
+                                        ? null
+                                        : Number(e.target.value),
+                                  }
+                                : v,
+                            ),
+                          )
+                        }
+                      />
+                    </td>
+                  ))}
+                  <td>
+                    <select
+                      value={row.warehouseMode}
+                      onChange={(e) =>
+                        setCosts((x) =>
+                          x.map((v, j) =>
+                            j === i
+                              ? { ...v, warehouseMode: e.target.value }
+                              : v,
+                          ),
+                        )
+                      }
+                    >
+                      <option value="auto">自动识别</option>
+                      <option value="dongguan">东莞跨境</option>
+                      <option value="overseas">俄罗斯海外仓</option>
+                      <option value="unknown">未知</option>
+                    </select>
+                  </td>
+                  <td>
+                    <button
+                      onClick={async () => {
+                        await saveWbCost(row);
+                        setMessage(`已保存 ${row.nmId}`);
+                        await load();
+                      }}
+                    >
+                      <Save size={14} />
+                      保存
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+      {tab === "settings" && settings && (
+        <section className="card wb-settings">
+          <label>
+            店铺名称
+            <input
+              value={settings.storeName}
+              onChange={(e) =>
+                setSettings({ ...settings, storeName: e.target.value })
+              }
+            />
+          </label>
+          <label>
+            WB API Token
+            <input
+              type="password"
+              value={settings.token}
+              onChange={(e) =>
+                setSettings({ ...settings, token: e.target.value })
+              }
+            />
+          </label>
+          <label>
+            1 CNY = RUB
+            <input
+              type="number"
+              value={settings.rubPerCny}
+              onChange={(e) =>
+                setSettings({ ...settings, rubPerCny: Number(e.target.value) })
+              }
+            />
+          </label>
+          <label>
+            暂估平台费率 %
+            <input
+              type="number"
+              value={settings.commissionPercent}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  commissionPercent: Number(e.target.value),
+                })
+              }
+            />
+          </label>
+          <label>
+            飞书 App ID
+            <input
+              value={settings.feishuAppId}
+              onChange={(e) =>
+                setSettings({ ...settings, feishuAppId: e.target.value })
+              }
+            />
+          </label>
+          <label>
+            飞书 App Secret
+            <input
+              type="password"
+              value={settings.feishuAppSecret}
+              onChange={(e) =>
+                setSettings({ ...settings, feishuAppSecret: e.target.value })
+              }
+            />
+          </label>
+          <label>
+            飞书群 Chat ID
+            <input
+              value={settings.feishuChatId}
+              onChange={(e) =>
+                setSettings({ ...settings, feishuChatId: e.target.value })
+              }
+            />
+          </label>
+          <div className="button-row">
+            <input
+              value={wbApiPath}
+              onChange={(e) => setWbApiPath(e.target.value)}
+              placeholder="粘贴 .wb-api.json 完整路径"
+            />
+            <button
+              onClick={async () =>
+                setMessage(`WB API 已导出：${await exportWbApiBundle()}`)
+              }
+            >
+              导出 WB API
+            </button>
+            <button
+              disabled={!wbApiPath}
+              onClick={async () => {
+                await importWbApiBundle(wbApiPath);
+                setMessage("WB API 配置已导入并用本机 DPAPI 重新加密");
+                await load();
+              }}
+            >
+              导入 WB API
+            </button>
+            <button onClick={async () => setMessage(await testWbFeishu())}>
+              测试飞书
+            </button>
+            <button
+              className="dark-button"
+              onClick={async () => {
+                await saveWbSettings(settings);
+                setMessage("WB 设置已加密保存到独立数据库");
+                await load();
+              }}
+            >
+              <Save size={15} />
+              保存 WB 设置
+            </button>
+          </div>
+        </section>
+      )}
+    </>
+  );
+}
+
+export function MigrationPage({ range }: { range: DateRange }) {
+  const [path, setPath] = useState(""),
+    [apiPath, setApiPath] = useState(""),
+    [message, setMessage] = useState(""),
+    [busy, setBusy] = useState("");
+  const exports = [
+    ...["sales", "销售日报"],
+    ["orders", "订单明细"],
+    ["advertising", "广告明细"],
+    ["inventory", "库存快照"],
+    ["finance", "Finance 流水"],
+    ["costs", "Ozon 成本全字段"],
+    ["products", "Ozon 产品与成本迁移包"],
+    ["warehouses", "仓库集群映射"],
+    ["shipments", "发货跟踪"],
+    ["competitors", "竞品快照"],
+    ["wb_costs", "WB 成本全字段"],
+  ] as Array<[string, string]>;
+  const run = async (kind: string) => {
+    setBusy(kind);
+    try {
+      setMessage(`已导出：${await exportDataset(kind, range)}`);
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <span className="eyebrow">DATA PORTABILITY</span>
+          <h1>数据迁移与导出</h1>
+          <p>
+            将本地真实数据导出为带 UTF-8 BOM 的 CSV，便于换机、审计与二次处理
+          </p>
+        </div>
+      </header>
+      {message && <div className="sync-message">{message}</div>}
+      <section className="migration-grid">
+        {exports.map(([kind, label]) => (
+          <button
+            className="card export-tile"
+            disabled={!!busy}
+            onClick={() => run(kind)}
+            key={kind}
+          >
+            <Database />
+            <span>
+              {label}
+              <small>
+                {kind === "costs" || kind === "wb_costs"
+                  ? "包含成本、长宽高和重量"
+                  : `${range.from} 至 ${range.to}`}
+              </small>
+            </span>
+            <b>{busy === kind ? "导出中" : "导出 CSV"}</b>
+          </button>
+        ))}
+      </section>
+      <section className="card import-panel">
+        <h3>API 配置导入与导出</h3>
+        <p>
+          与 Python 旧版 .ozon-api.json 完全兼容。导入时会在本机重新 DPAPI
+          加密；导出文件含明文密钥，请妥善保管并在迁移后删除。
+        </p>
+        <div>
+          <input
+            value={apiPath}
+            onChange={(e) => setApiPath(e.target.value)}
+            placeholder="粘贴 .ozon-api.json 完整路径"
+          />
+          <button
+            className="outline-button"
+            disabled={!!busy}
+            onClick={async () => {
+              setBusy("api-export");
+              try {
+                setMessage(`API 配置已导出：${await exportApiBundle()}`);
+              } catch (e) {
+                setMessage(String(e));
+              } finally {
+                setBusy("");
+              }
+            }}
+          >
+            导出当前 API
+          </button>
+          <button
+            className="dark-button"
+            disabled={!apiPath || !!busy}
+            onClick={async () => {
+              setBusy("api-import");
+              try {
+                setMessage(
+                  `成功导入 ${await importApiBundle(apiPath)} 组 API 配置`,
+                );
+              } catch (e) {
+                setMessage(String(e));
+              } finally {
+                setBusy("");
+              }
+            }}
+          >
+            导入 API
+          </button>
+        </div>
+      </section>
+      <section className="card import-panel">
+        <h3>导入 Ozon 产品 / 成本 CSV</h3>
+        <p>
+          兼容“成本全字段”和“产品与成本迁移包”：SKU、货号、商品
+          ID、名称、图片、采购成本、头程、尺寸、重量和备注。已有 SKU
+          按非空字段更新。
+        </p>
+        <div>
+          <input
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            placeholder="粘贴 CSV 文件完整路径，例如 D:\\迁移\\product_costs.csv"
+          />
+          <button
+            className="dark-button"
+            disabled={!path || !!busy}
+            onClick={async () => {
+              setBusy("import");
+              try {
+                setMessage(
+                  `成功导入 ${await importProductCostsCsv(path)} 条产品成本`,
+                );
+              } catch (e) {
+                setMessage(String(e));
+              } finally {
+                setBusy("");
+              }
+            }}
+          >
+            导入成本
+          </button>
+        </div>
+      </section>
+    </>
+  );
+}

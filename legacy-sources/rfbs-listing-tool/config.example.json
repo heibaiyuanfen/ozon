@@ -1,0 +1,39 @@
+{
+  "ozon": {
+    "selected_shop_id": "shop-1",
+    "shops": [
+      {
+        "id": "shop-1",
+        "name": "默认店铺",
+        "client_id": "",
+        "api_key": "",
+        "proxy_url": ""
+      }
+    ]
+  },
+  "image": {
+    "api_url": "https://www.micuapi.ai/v1/images/edits",
+    "api_key": "",
+    "model": "gpt-image-1"
+  },
+  "text": {
+    "api_url": "https://api.gpt.ge/v1/chat/completions",
+    "api_key": "",
+    "model": ""
+  },
+  "oss": {
+    "region": "cn-hangzhou",
+    "endpoint": "oss-cn-hangzhou.aliyuncs.com",
+    "bucket": "",
+    "public_base_url": "",
+    "access_key_id": "",
+    "access_key_secret": "",
+    "object_prefix": "rfbs-listing"
+  },
+  "wb": {
+    "token": "",
+    "sandbox": false,
+    "seller_name": "",
+    "seller_id": ""
+  }
+}

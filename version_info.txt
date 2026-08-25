@@ -1,0 +1,27 @@
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(0, 15, 3, 0),
+    prodvers=(0, 15, 3, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        u'080404B0',
+        [StringStruct(u'CompanyName', u'Ozon Seller Analytics'),
+         StringStruct(u'FileDescription', u'Ozon 广告与销量分析'),
+         StringStruct(u'FileVersion', u'0.15.3'),
+         StringStruct(u'InternalName', u'OzonAnalytics'),
+         StringStruct(u'LegalCopyright', u'Local analytics tool'),
+         StringStruct(u'OriginalFilename', u'OzonAnalytics.exe'),
+         StringStruct(u'ProductName', u'Ozon 广告与销量分析'),
+         StringStruct(u'ProductVersion', u'0.15.3')])
+    ]),
+    VarFileInfo([VarStruct(u'Translation', [2052, 1200])])
+  ]
+)

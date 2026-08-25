@@ -1,0 +1,25 @@
+[package]
+name = "ozon-analytics-next"
+version = "0.1.0"
+description = "Ozon Analytics modern desktop client"
+edition = "2021"
+
+[lib]
+name = "ozon_analytics_next_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+ureq = "2.12"
+regex = "1"
+base64 = "0.22"
+calamine = "0.26"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

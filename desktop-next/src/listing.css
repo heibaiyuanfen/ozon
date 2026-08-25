@@ -1,0 +1,11 @@
+.listing-config { padding: 20px; margin-bottom: 16px; }
+.listing-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 18px 0; }
+.listing-fields label { color: #718097; font-size: 11px; }
+.listing-fields input { display: block; width: 100%; margin-top: 7px; padding: 10px 12px; border: 1px solid #dfe6ef; border-radius: 9px; outline: none; }
+.listing-message { margin: 12px 0 0 !important; color: #1769e8 !important; }
+.listing-tools { grid-template-columns: 1fr auto; }
+.listing-draft-editor { margin-top: 18px; padding-top: 18px; border-top: 1px solid #e4eaf2; }
+.listing-draft-editor > label { display: block; margin: 12px 0; color: #718097; font-size: 11px; }
+.listing-draft-editor textarea { display: block; width: 100%; min-height: 92px; margin-top: 7px; padding: 10px 12px; resize: vertical; border: 1px solid #dfe6ef; border-radius: 9px; outline: none; font: 12px/1.5 Consolas, monospace; }
+.listing-draft-editor .competitor-actions { margin-top: 14px; }
+.listing-draft-editor td .outline-button { margin: 2px; }

@@ -1,0 +1,5 @@
+.report-tabs { display: inline-flex; margin: -6px 0 18px; }
+.report-detail { max-height: 650px; overflow: auto; }
+.report-detail td b { white-space: nowrap; }
+.report-detail table { min-width: 1500px; width: max-content; }
+.report-detail th, .report-detail td { white-space: nowrap; }
