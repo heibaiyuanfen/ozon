@@ -2,9 +2,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 node_modules/
+.pnpm-store/
 desktop-next/src-tauri/target/
 desktop-next/src-tauri/target-*/
 data/
+data-next/
 exports/
 dist/
 build/

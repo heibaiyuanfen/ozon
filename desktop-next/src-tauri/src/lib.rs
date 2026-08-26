@@ -15,7 +15,10 @@ mod insights;
 mod listing;
 mod secrets;
 mod wb;
-static API_SYNC_LOCK: Mutex<()> = Mutex::new(());
+static INVENTORY_SYNC_LOCK: Mutex<()> = Mutex::new(());
+static SELLER_SYNC_LOCK: Mutex<()> = Mutex::new(());
+static PERFORMANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
+static FINANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static COMPETITOR_COLLECTION_STOP: AtomicBool = AtomicBool::new(false);
 static COMPETITOR_TASK_STOPS: LazyLock<Mutex<HashSet<i64>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -75,12 +78,12 @@ pub(crate) struct AppState {
     active_shop_id: Mutex<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ShopFile {
     active_shop_id: String,
     shops: Vec<RawShop>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct RawShop {
     id: String,
     name: String,
@@ -128,6 +131,7 @@ struct DashboardData {
     tacos: Option<f64>,
     ctr: Option<f64>,
     return_units: i64,
+    return_rate: Option<f64>,
     cancellation_units: i64,
     cancellation_rate: Option<f64>,
     views: i64,
@@ -166,6 +170,14 @@ struct CampaignRow {
     spend: f64,
     revenue: f64,
     roas: Option<f64>,
+    ctr: Option<f64>,
+    cpc: Option<f64>,
+    conversion_rate: Option<f64>,
+    cpa: Option<f64>,
+    acos: Option<f64>,
+    diagnosis_level: String,
+    diagnosis_text: String,
+    recommended_action: String,
     budget: f64,
 }
 #[derive(Serialize)]
@@ -190,6 +202,14 @@ struct AdvertisingData {
     ctr: Option<f64>,
     cpc: Option<f64>,
     roas: Option<f64>,
+    conversion_rate: Option<f64>,
+    cpa: Option<f64>,
+    acos: Option<f64>,
+    break_even_roas: Option<f64>,
+    target_roas: Option<f64>,
+    max_cpa: Option<f64>,
+    known_cost_margin: Option<f64>,
+    margin_coverage_percent: f64,
     campaigns: Vec<CampaignRow>,
     trend: Vec<AdvertisingTrendRow>,
 }
@@ -275,11 +295,22 @@ struct InventoryRow {
     reserved_stock: Option<i64>,
     transit_stock: i64,
     requested_stock: i64,
+    domestic_production_stock: i64,
+    domestic_warehouse_stock: i64,
+    overseas_transit_stock: i64,
+    overseas_arrived_stock: i64,
     warehouse_count: i64,
     daily_sales: f64,
+    daily_sales_7d: f64,
+    demand_trend_percent: Option<f64>,
     estimated_days: Option<f64>,
+    health_status: String,
+    health_text: String,
     suggested_qty: i64,
     planned_qty: i64,
+    return_units_30d: i64,
+    return_rate_30d: Option<f64>,
+    return_logistics_cost_30d: f64,
     updated_at: String,
 }
 #[derive(Serialize)]
@@ -353,11 +384,22 @@ struct CompetitorSnapshot {
 #[serde(rename_all = "camelCase")]
 struct CompetitorRow {
     id: i64,
+    is_demo: bool,
     product_url: String,
     product_code: String,
     name: String,
     image_url: String,
     latest_price: Option<f64>,
+    previous_price: Option<f64>,
+    price_change: Option<f64>,
+    price_change_percent: Option<f64>,
+    price_min_30d: Option<f64>,
+    price_max_30d: Option<f64>,
+    price_avg_30d: Option<f64>,
+    price_alert_level: String,
+    price_alert_text: String,
+    price_changes_30d: i64,
+    promotion_suspected: bool,
     daily_sales: Option<i64>,
     weekly_sales: Option<i64>,
     monthly_sales: Option<i64>,
@@ -667,22 +709,127 @@ fn read_registry(data_dir: &Path) -> Result<ShopFile, String> {
     let text = fs::read_to_string(data_dir.join("shops.json")).map_err(|e| e.to_string())?;
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncAllResult {
+    seller_rows: Option<i64>,
+    performance_rows: Option<i64>,
+    finance_rows: Option<i64>,
+    seller_error: String,
+    performance_error: String,
+    finance_error: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompetitorAlertSettings {
+    warning_drop_percent: f64,
+    critical_drop_percent: f64,
+    opportunity_rise_percent: f64,
+}
+
+fn snapshot_database(source: &Path, target: &Path) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if target.exists() {
+        return Err(format!("新版数据库目标已存在，拒绝覆盖：{}", target.display()));
+    }
+    let source_db = Connection::open(source)
+        .map_err(|e| format!("无法读取旧数据库 {}：{e}", source.display()))?;
+    let _ = source_db.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
+    let target_text = target.to_string_lossy().to_string();
+    source_db
+        .execute("VACUUM INTO ?1", [&target_text])
+        .map_err(|e| format!("建立新版数据库快照失败：{e}"))?;
+    let destination = Connection::open(target).map_err(|e| e.to_string())?;
+    destination
+        .execute_batch(
+            "DELETE FROM business_report_cache;
+             DELETE FROM analytics_detail_cache;
+             DELETE FROM sync_progress;",
+        )
+        .or_else(|_| {
+            // Older source databases may not contain every derived cache.
+            for table in ["business_report_cache", "analytics_detail_cache", "sync_progress"] {
+                let _ = destination.execute(&format!("DELETE FROM {table}"), []);
+            }
+            Ok::<(), rusqlite::Error>(())
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn initialize_next_data_dir(legacy_dir: &Path, next_dir: &Path) -> Result<(), String> {
+    let legacy_registry = read_registry(legacy_dir)?;
+    fs::create_dir_all(next_dir.join("shops")).map_err(|e| e.to_string())?;
+    let mut next_registry = legacy_registry.clone();
+    for shop in &mut next_registry.shops {
+        let source = legacy_dir.join(&shop.database_file);
+        let safe_id: String = shop
+            .id
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .collect();
+        let relative = if shop.id == "default" {
+            "ozon_next_default.db".to_string()
+        } else {
+            format!("shops/shop_next_{}.db", if safe_id.is_empty() { "store" } else { &safe_id })
+        };
+        snapshot_database(&source, &next_dir.join(&relative))?;
+        shop.database_file = relative;
+    }
+    let legacy_wb = legacy_dir.join("wb").join("wb_analytics.db");
+    if legacy_wb.is_file() {
+        snapshot_database(&legacy_wb, &next_dir.join("wb").join("wb_analytics.db"))?;
+    }
+    write_registry(next_dir, &next_registry)?;
+    fs::write(
+        next_dir.join("database-generation.json"),
+        format!(
+            "{{\n  \"generation\": \"desktop-next-v2\",\n  \"created_at\": \"{}\",\n  \"legacy_runtime_reuse\": false\n}}\n",
+            chrono::Utc::now().to_rfc3339()
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn locate_data_dir(executable: &Path) -> Result<PathBuf, String> {
     let executable_dir = executable.parent().ok_or("无法确定程序目录")?;
     for root in executable_dir.ancestors() {
-        let candidate = root.join("data");
-        if candidate.join("shops.json").is_file() {
-            return Ok(candidate);
+        let next = root.join("data-next");
+        if next.join("shops.json").is_file()
+            && next.join("database-generation.json").is_file()
+        {
+            return Ok(next);
         }
     }
-    Err("找不到 data/shops.json；请将程序放回 Ozon Analytics 项目目录，或把 data 文件夹放在程序旁边".into())
+    for root in executable_dir.ancestors() {
+        let legacy = root.join("data");
+        if legacy.join("shops.json").is_file() {
+            let next = root.join("data-next");
+            initialize_next_data_dir(&legacy, &next)?;
+            return Ok(next);
+        }
+    }
+    Err("找不到新版 data-next/shops.json，也没有可用于一次性初始化的旧 data/shops.json".into())
 }
 fn initialize_extensions(c: &Connection) -> Result<(), String> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS warehouse_cluster_mappings(warehouse_name TEXT PRIMARY KEY,cluster_name TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS competitor_products(id INTEGER PRIMARY KEY AUTOINCREMENT,product_url TEXT NOT NULL UNIQUE,product_code TEXT NOT NULL DEFAULT '',name TEXT NOT NULL DEFAULT '',image_url TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS competitor_snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT,competitor_id INTEGER NOT NULL,captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,price REAL,sales_total INTEGER,source TEXT NOT NULL DEFAULT 'web',UNIQUE(competitor_id,captured_at),FOREIGN KEY(competitor_id) REFERENCES competitor_products(id));CREATE TABLE IF NOT EXISTS shipment_tracking(tracking_id TEXT PRIMARY KEY,product_name TEXT NOT NULL DEFAULT '',batch_no TEXT NOT NULL DEFAULT '',shop_name TEXT NOT NULL DEFAULT '',quantity INTEGER NOT NULL DEFAULT 0,cargo_status TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT '',domestic_arrival TEXT NOT NULL DEFAULT '',foreign_arrival TEXT NOT NULL DEFAULT '',notified_foreign_arrival TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT 'local',remote_record_id TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_posting_routes_day ON posting_routes(day);CREATE INDEX IF NOT EXISTS idx_posting_routes_sku_destination ON posting_routes(sku,destination);CREATE INDEX IF NOT EXISTS idx_sales_daily_day_sku ON sales_daily(day,sku);CREATE INDEX IF NOT EXISTS idx_ad_daily_day_sku ON ad_daily(day,sku);CREATE INDEX IF NOT EXISTS idx_finance_operation_date ON finance_transactions(operation_date);").map_err(|e|e.to_string())?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS product_cluster_weights(sku TEXT NOT NULL,cluster_name TEXT NOT NULL,weight REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(sku,cluster_name));").map_err(|e|e.to_string())?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS inventory_totals(sku TEXT PRIMARY KEY,offer_id TEXT NOT NULL DEFAULT '',present_stock INTEGER NOT NULL DEFAULT 0,reserved_stock INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
+    for column in [
+        "sku TEXT NOT NULL DEFAULT ''",
+        "production_qty INTEGER NOT NULL DEFAULT 0",
+        "domestic_stock_qty INTEGER NOT NULL DEFAULT 0",
+        "overseas_transit_qty INTEGER NOT NULL DEFAULT 0",
+        "overseas_arrived_qty INTEGER NOT NULL DEFAULT 0",
+    ] {
+        let _ = c.execute(&format!("ALTER TABLE shipment_tracking ADD COLUMN {column}"), []);
+    }
+    let _ = c.execute("CREATE INDEX IF NOT EXISTS idx_shipment_tracking_sku ON shipment_tracking(sku)", []);
     c.execute_batch("CREATE TABLE IF NOT EXISTS campaign_action_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL,action TEXT NOT NULL,requested_value TEXT NOT NULL DEFAULT '',before_state TEXT NOT NULL DEFAULT '',before_budget REAL NOT NULL DEFAULT 0,after_state TEXT NOT NULL DEFAULT '',after_budget REAL NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'pending',message TEXT NOT NULL DEFAULT '',before_from TEXT NOT NULL DEFAULT '',before_to TEXT NOT NULL DEFAULT '',before_spend REAL NOT NULL DEFAULT 0,before_revenue REAL NOT NULL DEFAULT 0,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_campaign_action_logs_campaign ON campaign_action_logs(campaign_id,created_at DESC);").map_err(|e|e.to_string())?;
-    c.execute_batch("CREATE TABLE IF NOT EXISTS competitor_collection_runs(run_id TEXT PRIMARY KEY,workflow TEXT NOT NULL DEFAULT 'product_snapshot',platform TEXT NOT NULL DEFAULT 'ozon',locale TEXT NOT NULL DEFAULT 'ru-RU',started_at TEXT NOT NULL,finished_at TEXT NOT NULL DEFAULT '',search_context TEXT NOT NULL DEFAULT '',requested_scope TEXT NOT NULL DEFAULT '',completed_scope TEXT NOT NULL DEFAULT '',requested INTEGER NOT NULL DEFAULT 0,completed INTEGER NOT NULL DEFAULT 0,ok INTEGER NOT NULL DEFAULT 0,blocked INTEGER NOT NULL DEFAULT 0,changed_layout INTEGER NOT NULL DEFAULT 0,inaccessible INTEGER NOT NULL DEFAULT 0,ambiguous_match INTEGER NOT NULL DEFAULT 0,incomplete INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'running',notes TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS competitor_observations(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,competitor_id INTEGER NOT NULL,observed_at TEXT NOT NULL,status TEXT NOT NULL,retry_count INTEGER NOT NULL DEFAULT 0,source_url TEXT NOT NULL DEFAULT '',final_url TEXT NOT NULL DEFAULT '',locale TEXT NOT NULL DEFAULT 'ru-RU',search_context TEXT NOT NULL DEFAULT '',price_raw TEXT NOT NULL DEFAULT '',sales_raw TEXT NOT NULL DEFAULT '',evidence TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',FOREIGN KEY(run_id) REFERENCES competitor_collection_runs(run_id),FOREIGN KEY(competitor_id) REFERENCES competitor_products(id),UNIQUE(run_id,competitor_id));CREATE INDEX IF NOT EXISTS idx_competitor_observations_competitor ON competitor_observations(competitor_id,observed_at DESC);").map_err(|e|e.to_string())?;
+    c.execute_batch("CREATE TABLE IF NOT EXISTS competitor_collection_runs(run_id TEXT PRIMARY KEY,workflow TEXT NOT NULL DEFAULT 'product_snapshot',platform TEXT NOT NULL DEFAULT 'ozon',locale TEXT NOT NULL DEFAULT 'ru-RU',started_at TEXT NOT NULL,finished_at TEXT NOT NULL DEFAULT '',search_context TEXT NOT NULL DEFAULT '',requested_scope TEXT NOT NULL DEFAULT '',completed_scope TEXT NOT NULL DEFAULT '',requested INTEGER NOT NULL DEFAULT 0,completed INTEGER NOT NULL DEFAULT 0,ok INTEGER NOT NULL DEFAULT 0,blocked INTEGER NOT NULL DEFAULT 0,changed_layout INTEGER NOT NULL DEFAULT 0,inaccessible INTEGER NOT NULL DEFAULT 0,ambiguous_match INTEGER NOT NULL DEFAULT 0,incomplete INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'running',notes TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS competitor_observations(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,competitor_id INTEGER NOT NULL,observed_at TEXT NOT NULL,status TEXT NOT NULL,retry_count INTEGER NOT NULL DEFAULT 0,source_url TEXT NOT NULL DEFAULT '',final_url TEXT NOT NULL DEFAULT '',locale TEXT NOT NULL DEFAULT 'ru-RU',search_context TEXT NOT NULL DEFAULT '',price_raw TEXT NOT NULL DEFAULT '',sales_raw TEXT NOT NULL DEFAULT '',evidence TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',FOREIGN KEY(run_id) REFERENCES competitor_collection_runs(run_id),FOREIGN KEY(competitor_id) REFERENCES competitor_products(id),UNIQUE(run_id,competitor_id));CREATE TABLE IF NOT EXISTS competitor_manual_metrics(competitor_id INTEGER PRIMARY KEY,daily_sales INTEGER,weekly_sales INTEGER,monthly_sales INTEGER,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(competitor_id) REFERENCES competitor_products(id));CREATE INDEX IF NOT EXISTS idx_competitor_observations_competitor ON competitor_observations(competitor_id,observed_at DESC);").map_err(|e|e.to_string())?;
     let _ = c.execute(
         "ALTER TABLE campaigns ADD COLUMN budget_known INTEGER NOT NULL DEFAULT 0",
         [],
@@ -715,7 +862,7 @@ fn initialize_extensions(c: &Connection) -> Result<(), String> {
     }
     Ok(())
 }
-pub(crate) fn db(state: &AppState) -> Result<Connection, String> {
+fn active_shop_database_path(state: &AppState) -> Result<PathBuf, String> {
     let registry = read_registry(&state.data_dir)?;
     let id = state
         .active_shop_id
@@ -728,8 +875,13 @@ pub(crate) fn db(state: &AppState) -> Result<Connection, String> {
         .find(|x| x.id == id)
         .or_else(|| registry.shops.first())
         .ok_or("未配置店铺")?;
-    let c =
-        Connection::open(state.data_dir.join(&shop.database_file)).map_err(|e| e.to_string())?;
+    Ok(state.data_dir.join(&shop.database_file))
+}
+
+pub(crate) fn db(state: &AppState) -> Result<Connection, String> {
+    let c = Connection::open(active_shop_database_path(state)?).map_err(|e| e.to_string())?;
+    c.busy_timeout(std::time::Duration::from_secs(30))
+        .map_err(|e| e.to_string())?;
     initialize_extensions(&c)?;
     Ok(c)
 }
@@ -766,6 +918,21 @@ fn active_shop_kind(state: &AppState) -> Result<String, String> {
         .or_else(|| registry.shops.first())
         .map(|x| x.kind.clone())
         .unwrap_or_else(|| "local".into()))
+}
+
+fn active_shop_identity(state: &AppState) -> Result<(String, String), String> {
+    let registry = read_registry(&state.data_dir)?;
+    let id = state
+        .active_shop_id
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let shop = registry
+        .shops
+        .iter()
+        .find(|x| x.id == id)
+        .ok_or("当前店铺不存在")?;
+    Ok((shop.id.clone(), shop.name.clone()))
 }
 
 fn rub_per_cny_for(state: &AppState, c: &Connection) -> Result<f64, String> {
@@ -1219,7 +1386,9 @@ fn delete_shop(
 #[tauri::command]
 fn dashboard(range: DateRange, state: State<AppState>) -> Result<DashboardData, String> {
     let c = db(&state)?;
-    let (revenue,orders,return_units,cancellation_units,views):(f64,i64,i64,i64,i64)=c.query_row("SELECT COALESCE(SUM(revenue),0),COALESCE(SUM(ordered_units),0),CASE WHEN EXISTS(SELECT 1 FROM return_events WHERE day BETWEEN ?1 AND ?2) THEN COALESCE((SELECT SUM(quantity) FROM return_events WHERE day BETWEEN ?1 AND ?2),0) ELSE COALESCE(SUM(returns),0) END,CASE WHEN EXISTS(SELECT 1 FROM cancellation_events WHERE day BETWEEN ?1 AND ?2) THEN COALESCE((SELECT SUM(quantity) FROM cancellation_events WHERE day BETWEEN ?1 AND ?2),0) ELSE COALESCE(SUM(cancellations),0) END,COALESCE(SUM(views),0) FROM sales_daily WHERE day BETWEEN ?1 AND ?2",params![range.from,range.to],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(|e|e.to_string())?;
+    let (revenue,orders,views):(f64,i64,i64)=c.query_row("SELECT COALESCE(SUM(revenue),0),COALESCE(SUM(ordered_units),0),COALESCE(SUM(views),0) FROM sales_daily WHERE day BETWEEN ?1 AND ?2",params![range.from,range.to],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|e.to_string())?;
+    let return_units: i64 = c.query_row("SELECT CASE WHEN EXISTS(SELECT 1 FROM return_events WHERE day BETWEEN ?1 AND ?2) THEN COALESCE((SELECT SUM(quantity) FROM return_events WHERE day BETWEEN ?1 AND ?2),0) ELSE COALESCE((SELECT SUM(returns) FROM sales_daily WHERE day BETWEEN ?1 AND ?2),0) END",params![range.from,range.to],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let cancellation_units: i64 = c.query_row("SELECT CASE WHEN EXISTS(SELECT 1 FROM cancellation_events WHERE day BETWEEN ?1 AND ?2) THEN COALESCE((SELECT SUM(quantity) FROM cancellation_events WHERE day BETWEEN ?1 AND ?2),0) ELSE COALESCE((SELECT SUM(cancellations) FROM sales_daily WHERE day BETWEEN ?1 AND ?2),0) END",params![range.from,range.to],|r|r.get(0)).map_err(|e|e.to_string())?;
     let sold_units = orders;
     let active_products: i64 = c
         .query_row("SELECT COUNT(*) FROM products", [], |r| r.get(0))
@@ -1276,6 +1445,11 @@ fn dashboard(range: DateRange, state: State<AppState>) -> Result<DashboardData, 
             None
         },
         return_units,
+        return_rate: if orders > 0 {
+            Some(return_units as f64 / orders as f64 * 100.0)
+        } else {
+            None
+        },
         cancellation_units,
         cancellation_rate: if orders > 0 {
             Some(cancellation_units as f64 / orders as f64 * 100.0)
@@ -1392,26 +1566,51 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
         .unwrap_or(to_date)
         .format("%Y-%m-%d")
         .to_string();
-    let mut stmt=c.prepare("WITH x AS(SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT a.campaign_id,COALESCE(NULLIF(MAX(a.campaign_name),''),MAX(c.name),a.campaign_id),COALESCE(MAX(c.state),''),COALESCE(MAX(c.payment_type),''),SUM(a.impressions),SUM(a.clicks),SUM(a.orders),SUM(a.spend),SUM(a.revenue),COALESCE(MAX(c.budget),0) FROM x a CROSS JOIN m LEFT JOIN campaigns c ON c.campaign_id=a.campaign_id WHERE (m.store=1 AND a.sku='')OR(m.store=0 AND a.sku<>'')GROUP BY a.campaign_id HAVING SUM(a.spend)>0 ORDER BY SUM(a.spend)DESC").map_err(|e|e.to_string())?;
+    let rate = rub_per_cny_for(&state, &c)?;
+    let (costed_revenue,total_revenue,known_cost):(f64,f64,f64)=c.query_row("SELECT COALESCE(SUM(CASE WHEN pc.sku IS NOT NULL THEN s.revenue ELSE 0 END),0),COALESCE(SUM(s.revenue),0),COALESCE(SUM(CASE WHEN pc.sku IS NOT NULL THEN s.ordered_units*(COALESCE(pc.unit_cost,pc.unit_cost_cny*?3,0)+COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny*?3,0)) ELSE 0 END),0) FROM sales_daily s LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2",params![range.from,range.to,rate],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|e.to_string())?;
+    let margin_coverage_percent = if total_revenue > 0.0 { costed_revenue / total_revenue * 100.0 } else { 0.0 };
+    let known_cost_margin = (costed_revenue > 0.0 && margin_coverage_percent >= 80.0).then_some(((costed_revenue-known_cost)/costed_revenue).clamp(0.0,1.0));
+    let break_even_roas = known_cost_margin.filter(|m|*m>0.0).map(|m|1.0/m);
+    let target_roas = break_even_roas.map(|v|v*1.5);
+    let average_order_value = (orders>0).then_some(revenue/orders as f64);
+    let max_cpa = average_order_value.zip(known_cost_margin).map(|(aov,margin)|aov*margin);
+    let mut stmt=c.prepare("WITH x AS(SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT a.campaign_id,COALESCE(NULLIF(MAX(a.campaign_name),''),MAX(c.name),a.campaign_id),COALESCE(MAX(c.state),''),COALESCE(MAX(c.payment_type),''),SUM(a.impressions),SUM(a.clicks),SUM(a.orders),SUM(a.spend),SUM(a.revenue),COALESCE(MAX(c.budget),0) FROM x a CROSS JOIN m LEFT JOIN campaigns c ON c.campaign_id=a.campaign_id WHERE (m.store=1 AND a.sku='')OR(m.store=0 AND a.sku<>'')GROUP BY a.campaign_id HAVING SUM(a.spend)>0 OR SUM(a.impressions)>0 ORDER BY SUM(a.spend)DESC").map_err(|e|e.to_string())?;
     let campaigns = stmt
         .query_map(params![active_from, range.to], |r| {
             let spend: f64 = r.get(7)?;
             let revenue: f64 = r.get(8)?;
+            let impressions: i64 = r.get(4)?;
+            let clicks: i64 = r.get(5)?;
+            let campaign_orders: i64 = r.get(6)?;
+            let campaign_roas = (spend>0.0).then_some(revenue/spend);
+            let campaign_acos = (revenue>0.0).then_some(spend/revenue*100.0);
+            let (diagnosis_level,diagnosis_text,recommended_action)=if impressions==0 {("pending","无曝光，计划尚未形成有效投放","检查计划状态、商品审核、预算和投放日期")}
+            else if clicks==0 {("critical","有曝光但没有点击","检查主图、标题、价格和活动竞争力")}
+            else if clicks>=20 && campaign_orders==0 {("critical","已有点击但没有归因订单","暂停扩量，检查商品页转化、价格、评价与库存")}
+            else if clicks as f64/impressions as f64*100.0<1.0 {("warning","点击率低于 1%","优先优化素材、商品卡和投放商品组合")}
+            else if campaign_orders>0 && campaign_orders as f64/clicks as f64*100.0<2.0 {("warning","点击到订单转化率低于 2%","检查落地商品、售价、配送时效和评论质量")}
+            else if break_even_roas.zip(campaign_roas).is_some_and(|(be,actual)|actual<be) {("critical","ROAS 低于已知成本盈亏线","降低预算或暂停低效商品，先修复转化")}
+            else if target_roas.zip(campaign_roas).is_some_and(|(target,actual)|actual>=target) {("good","ROAS 达到可持续目标","在库存和边际利润允许时分阶段增加 20% 预算")}
+            else {("observe","计划处于观察区间","保持预算，累计至少 7 天数据后再调整")};
             Ok(CampaignRow {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 state: r.get(2)?,
                 payment_type: r.get(3)?,
-                impressions: r.get(4)?,
-                clicks: r.get(5)?,
-                orders: r.get(6)?,
+                impressions,
+                clicks,
+                orders: campaign_orders,
                 spend,
                 revenue,
-                roas: if spend > 0.0 {
-                    Some(revenue / spend)
-                } else {
-                    None
-                },
+                roas: campaign_roas,
+                ctr: (impressions>0).then_some(clicks as f64/impressions as f64*100.0),
+                cpc: (clicks>0).then_some(spend/clicks as f64),
+                conversion_rate: (clicks>0).then_some(campaign_orders as f64/clicks as f64*100.0),
+                cpa: (campaign_orders>0).then_some(spend/campaign_orders as f64),
+                acos: campaign_acos,
+                diagnosis_level: diagnosis_level.into(),
+                diagnosis_text: diagnosis_text.into(),
+                recommended_action: recommended_action.into(),
                 budget: r.get(9)?,
             })
         })
@@ -1455,6 +1654,14 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
         } else {
             Some(0.0)
         },
+        conversion_rate: (clicks>0).then_some(orders as f64/clicks as f64*100.0),
+        cpa: (orders>0).then_some(spend/orders as f64),
+        acos: (revenue>0.0).then_some(spend/revenue*100.0),
+        break_even_roas,
+        target_roas,
+        max_cpa,
+        known_cost_margin,
+        margin_coverage_percent,
         campaigns,
         trend,
     })
@@ -2606,9 +2813,21 @@ fn collect_competitor_python_html(
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
-    let mut raw = String::new();
-    if let Some(mut stdout) = child.stdout.take() { stdout.read_to_string(&mut raw).map_err(|e| e.to_string())?; }
-    let value: serde_json::Value = serde_json::from_str(raw.trim())
+    let mut raw = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+    }
+    // New helpers emit ASCII-only JSON. Lossy decoding also lets upgraded ERP
+    // builds explain output from an older helper instead of failing at the
+    // process boundary with “stream did not contain valid UTF-8”.
+    let decoded = String::from_utf8_lossy(&raw);
+    let payload = decoded
+        .find('{')
+        .zip(decoded.rfind('}'))
+        .filter(|(start, end)| start <= end)
+        .map(|(start, end)| &decoded[start..=end])
+        .ok_or_else(|| "Python 采集器未返回 JSON 数据".to_string())?;
+    let value: serde_json::Value = serde_json::from_str(payload)
         .map_err(|e| format!("Python 采集器返回格式无效：{e}"))?;
     if !value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
         return Err(format!("blocked: {}", value.get("error").and_then(|v|v.as_str()).unwrap_or("Python 采集失败")));
@@ -2617,8 +2836,16 @@ fn collect_competitor_python_html(
     let name=value.get("name").and_then(|v|v.as_str()).unwrap_or("");
     let price=value.get("price").and_then(|v|v.as_f64()).map(|v|v.to_string()).unwrap_or_default();
     let image=value.get("image").and_then(|v|v.as_str()).unwrap_or("");
-    let evidence=serde_json::json!({"codexVisiblePrice":price,"codexMainImage":image});
-    let html=format!("<meta property=\"og:url\" content=\"{}\"><meta property=\"og:title\" content=\"{}\"><script type=\"application/json\">{}</script>",final_url.replace('"',"&quot;"),name.replace('"',"&quot;"),evidence);
+    let images=value.get("images").cloned().unwrap_or_else(|| serde_json::json!([]));
+    let evidence=serde_json::json!({
+        "codexVisiblePrice":price,
+        "codexMainImage":image,
+        "codexGalleryImages":images,
+        "codexGalleryMode":value.get("gallery_mode").cloned().unwrap_or(serde_json::Value::Null),
+        "codexCollectorSource":value.get("source").cloned().unwrap_or(serde_json::Value::Null)
+    });
+    let escape_attr=|input:&str| input.replace('&',"&amp;").replace('"',"&quot;").replace('<',"&lt;").replace('>',"&gt;");
+    let html=format!("<meta property=\"og:url\" content=\"{}\"><meta property=\"og:title\" content=\"{}\"><meta property=\"og:image\" content=\"{}\"><script type=\"application/json\">{}</script>",escape_attr(final_url),escape_attr(name),escape_attr(image),evidence);
     validate_competitor_identity(&html, expected_code)?;
     Ok(html)
 }
@@ -3297,6 +3524,7 @@ fn sales_delta(snapshots: &[CompetitorSnapshot], days: i64) -> Option<i64> {
 #[tauri::command]
 fn competitors(state: State<AppState>) -> Result<Vec<CompetitorRow>, String> {
     let c = db(&state)?;
+    let alert_settings = competitor_alert_settings_from(&c);
     let mut stmt=c.prepare("SELECT p.id,p.product_url,p.product_code,p.name,p.image_url,COALESCE((SELECT status FROM competitor_observations o WHERE o.competitor_id=p.id ORDER BY o.id DESC LIMIT 1),''),COALESCE((SELECT observed_at FROM competitor_observations o WHERE o.competitor_id=p.id ORDER BY o.id DESC LIMIT 1),''),COALESCE((SELECT retry_count FROM competitor_observations o WHERE o.competitor_id=p.id ORDER BY o.id DESC LIMIT 1),0),COALESCE((SELECT notes FROM competitor_observations o WHERE o.competitor_id=p.id ORDER BY o.id DESC LIMIT 1),'') FROM competitor_products p WHERE p.active=1 ORDER BY p.id").map_err(|e|e.to_string())?;
     let base = stmt
         .query_map([], |r| {
@@ -3341,16 +3569,82 @@ fn competitors(state: State<AppState>) -> Result<Vec<CompetitorRow>, String> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
         let latest = snaps.last().and_then(|x| x.price);
+        let previous = latest.and_then(|current| {
+            snaps
+                .iter()
+                .rev()
+                .filter_map(|snapshot| snapshot.price)
+                .find(|price| (*price - current).abs() > f64::EPSILON)
+        });
+        let price_change = latest.zip(previous).map(|(current, old)| current - old);
+        let price_change_percent = latest.zip(previous).and_then(|(current, old)| {
+            (old > 0.0).then_some((current - old) / old * 100.0)
+        });
+        let cutoff = chrono::Local::now().naive_local() - chrono::Duration::days(30);
+        let prices_30d = snaps
+            .iter()
+            .filter(|snapshot| {
+                chrono::NaiveDateTime::parse_from_str(&snapshot.captured_at, "%Y-%m-%d %H:%M:%S")
+                    .map(|captured| captured >= cutoff)
+                    .unwrap_or(false)
+            })
+            .filter_map(|snapshot| snapshot.price)
+            .collect::<Vec<_>>();
+        let price_min_30d = prices_30d.iter().copied().reduce(f64::min);
+        let price_max_30d = prices_30d.iter().copied().reduce(f64::max);
+        let price_avg_30d = (!prices_30d.is_empty())
+            .then(|| prices_30d.iter().sum::<f64>() / prices_30d.len() as f64);
+        let price_changes_30d = prices_30d
+            .windows(2)
+            .filter(|pair| (pair[1] - pair[0]).abs() > f64::EPSILON)
+            .count() as i64;
+        let promotion_suspected = latest
+            .zip(price_avg_30d)
+            .is_some_and(|(current, average)| average > 0.0 && current <= average * 0.95);
+        let (price_alert_level, price_alert_text) = match price_change_percent {
+            Some(change) if change <= -alert_settings.critical_drop_percent => (
+                "critical".to_string(),
+                format!("竞品大幅降价 {change:.1}%，请检查利润底线与跟价风险"),
+            ),
+            Some(change) if change <= -alert_settings.warning_drop_percent => (
+                "warning".to_string(),
+                format!("竞品降价 {change:.1}%，建议关注转化和价格差"),
+            ),
+            Some(change) if change >= alert_settings.opportunity_rise_percent => (
+                "opportunity".to_string(),
+                format!("竞品涨价 {change:.1}%，可能出现价格空间"),
+            ),
+            Some(change) => ("stable".to_string(), format!("最近价格变化 {change:+.1}%")),
+            None => ("pending".to_string(), "等待更多价格快照".to_string()),
+        };
+        let manual = c
+            .query_row(
+                "SELECT daily_sales,weekly_sales,monthly_sales FROM competitor_manual_metrics WHERE competitor_id=?1",
+                [id],
+                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?)),
+            )
+            .ok();
         out.push(CompetitorRow {
             id,
+            is_demo: url.starts_with("demo://") || c.query_row("SELECT EXISTS(SELECT 1 FROM competitor_snapshots WHERE competitor_id=?1 AND source='demo_seed')", [id], |r| r.get::<_, i64>(0)).unwrap_or(0) == 1,
             product_url: url,
             product_code: code,
             name,
             image_url: image,
             latest_price: latest,
-            daily_sales: sales_delta(&snaps, 1),
-            weekly_sales: sales_delta(&snaps, 7),
-            monthly_sales: sales_delta(&snaps, 30),
+            previous_price: previous,
+            price_change,
+            price_change_percent,
+            price_min_30d,
+            price_max_30d,
+            price_avg_30d,
+            price_alert_level,
+            price_alert_text,
+            price_changes_30d,
+            promotion_suspected,
+            daily_sales: manual.and_then(|x| x.0).or_else(|| sales_delta(&snaps, 1)),
+            weekly_sales: manual.and_then(|x| x.1).or_else(|| sales_delta(&snaps, 7)),
+            monthly_sales: manual.and_then(|x| x.2).or_else(|| sales_delta(&snaps, 30)),
             latest_status,
             latest_observed_at,
             latest_retry_count,
@@ -3476,7 +3770,11 @@ fn refresh_competitors_due_blocking(state: &AppState) -> Result<i64, String> {
     }
     let mut count = 0;
     let mut first_error = None;
-    let run_id = begin_competitor_run(&c, ids.len() as i64, "daily_due_competitors")?;
+    let requested_scope = format!(
+        "daily_due_competitors|ids={}",
+        ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+    );
+    let run_id = begin_competitor_run(&c, ids.len() as i64, &requested_scope)?;
     if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
         progress.run_id = run_id.clone();
     }
@@ -3572,16 +3870,15 @@ fn refresh_competitors_due_blocking(state: &AppState) -> Result<i64, String> {
     }
     Ok(count)
 }
-fn refresh_competitors_all_blocking(state: &AppState) -> Result<i64, String> {
+fn refresh_competitor_ids_blocking(
+    state: &AppState,
+    ids: Vec<i64>,
+    workflow: &str,
+) -> Result<i64, String> {
     let c = db(state)?;
-    let mut stmt = c
-        .prepare("SELECT id FROM competitor_products WHERE active=1 ORDER BY id")
-        .map_err(|e| e.to_string())?;
-    let ids = stmt
-        .query_map([], |r| r.get::<_, i64>(0))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+    if ids.is_empty() {
+        return Err("没有可重新运行的竞品任务".into());
+    }
     if let Ok(mut stops) = COMPETITOR_TASK_STOPS.lock() {
         stops.clear();
     }
@@ -3600,7 +3897,11 @@ fn refresh_competitors_all_blocking(state: &AppState) -> Result<i64, String> {
         };
     }
     COMPETITOR_COLLECTION_STOP.store(false, Ordering::SeqCst);
-    let run_id = begin_competitor_run(&c, ids.len() as i64, "manual_all_competitors")?;
+    let requested_scope = format!(
+        "{workflow}|ids={}",
+        ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+    );
+    let run_id = begin_competitor_run(&c, ids.len() as i64, &requested_scope)?;
     if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
         progress.run_id = run_id.clone();
     }
@@ -3709,6 +4010,141 @@ fn refresh_competitors_all_blocking(state: &AppState) -> Result<i64, String> {
     }
     Ok(ok)
 }
+
+fn rebuild_cancellation_events(range: &DateRange, state: &AppState) -> Result<i64, String> {
+    let mut c = db(state)?;
+    let tx = c.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM cancellation_events WHERE day BETWEEN ?1 AND ?2", params![range.from, range.to]).map_err(|e| e.to_string())?;
+    let written = tx.execute("INSERT INTO cancellation_events(event_id,day,sku,offer_id,product_name,quantity,scheme,source,updated_at) SELECT 'posting:'||event_id,day,sku,offer_id,product_name,quantity,scheme,'posting_status',CURRENT_TIMESTAMP FROM posting_routes WHERE day BETWEEN ?1 AND ?2 AND lower(status) LIKE '%cancel%'", params![range.from, range.to]).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(written as i64)
+}
+
+fn sync_customer_returns_blocking(range: &DateRange, state: &AppState) -> Result<i64, String> {
+    let mut c = db(state)?;
+    let mut last_id = serde_json::Value::Number(0.into());
+    let mut rows: Vec<(String,String,String,String,String,i64)> = Vec::new();
+    loop {
+        let response = seller_post(&c, "/v1/returns/list", &serde_json::json!({
+            "filter":{"logistic_return_date":{"time_from":format!("{}T00:00:00Z",range.from),"time_to":format!("{}T23:59:59Z",range.to)}},
+            "limit":500,"last_id":last_id
+        }))?;
+        let items = response.get("returns").and_then(|v|v.as_array()).cloned().unwrap_or_default();
+        for item in &items {
+            let return_type = json_text(item.get("type")).or_else_empty(|| json_text(item.get("return_type")));
+            if !return_type.eq_ignore_ascii_case("ClientReturn") { continue; }
+            let product = item.get("product").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let logistic = item.get("logistic").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let visual = item.get("visual").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let raw_day = json_text(logistic.get("return_date")).or_else_empty(|| json_text(logistic.get("final_moment"))).or_else_empty(|| json_text(visual.get("change_moment")));
+            let day = raw_day.get(0..10).unwrap_or(&range.to).to_string();
+            let sku = product.get("sku").map(|v|v.as_i64().map(|x|x.to_string()).unwrap_or_else(||json_text(Some(v)))).unwrap_or_default();
+            let quantity = product.get("quantity").and_then(|v|v.as_i64()).unwrap_or(1).max(1);
+            let return_id = item.get("id").or_else(||item.get("return_id")).map(|v|v.as_str().map(str::to_string).unwrap_or_else(||v.to_string())).unwrap_or_else(||format!("{}:{}:{}",json_text(item.get("posting_number")),sku,day));
+            rows.push((return_id,day,sku,json_text(product.get("offer_id")),json_text(product.get("name")),quantity));
+        }
+        if !response.get("has_next").and_then(|v|v.as_bool()).unwrap_or(false) || items.is_empty() { break; }
+        let next = items.last().and_then(|v|v.get("id").or_else(||v.get("return_id"))).cloned().unwrap_or_else(||last_id.clone());
+        if next == last_id { break; }
+        last_id = next;
+    }
+    let tx = c.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM return_events WHERE day BETWEEN ?1 AND ?2", params![range.from,range.to]).map_err(|e|e.to_string())?;
+    for row in &rows {
+        tx.execute("INSERT INTO return_events(return_id,day,sku,offer_id,product_name,quantity,source,updated_at)VALUES(?1,?2,?3,?4,?5,?6,'returns_api',CURRENT_TIMESTAMP)ON CONFLICT(return_id)DO UPDATE SET day=excluded.day,sku=excluded.sku,offer_id=excluded.offer_id,product_name=excluded.product_name,quantity=excluded.quantity,source='returns_api',updated_at=CURRENT_TIMESTAMP",params![row.0,row.1,row.2,row.3,row.4,row.5]).map_err(|e|e.to_string())?;
+    }
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(rows.len() as i64)
+}
+
+#[tauri::command]
+fn seed_competitor_demo_data(state: State<AppState>) -> Result<i64, String> {
+    let mut c = db(&state)?;
+    let tx = c.transaction().map_err(|e| e.to_string())?;
+    let demos = [
+        ("DEMO-TOOLS-01", "防水工具收纳包 34cm", 649.0, 5_i64),
+        ("DEMO-TOOLS-02", "加厚多功能维修工具袋", 719.0, 7_i64),
+        ("DEMO-TOOLS-03", "便携式电工工具收纳箱", 899.0, 4_i64),
+        ("DEMO-TOOLS-04", "大容量牛津布工具包", 579.0, 9_i64),
+        ("DEMO-TOOLS-05", "专业级硬底工具提包", 1099.0, 3_i64),
+        ("DEMO-TOOLS-06", "折叠式家用工具整理袋", 499.0, 11_i64),
+    ];
+    let today = chrono::Local::now().date_naive();
+    for (index, (code, name, base_price, base_sales)) in demos.iter().enumerate() {
+        let url = format!("demo://competitor/{code}");
+        tx.execute(
+            "INSERT INTO competitor_products(product_url,product_code,name,active,updated_at) VALUES(?1,?2,?3,1,CURRENT_TIMESTAMP) ON CONFLICT(product_url) DO UPDATE SET product_code=excluded.product_code,name=excluded.name,active=1,updated_at=CURRENT_TIMESTAMP",
+            params![url, code, name],
+        ).map_err(|e| e.to_string())?;
+        let id: i64 = tx.query_row("SELECT id FROM competitor_products WHERE product_url=?1", [url], |r| r.get(0)).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM competitor_snapshots WHERE competitor_id=?1 AND source='demo_seed'", [id]).map_err(|e| e.to_string())?;
+        let mut cumulative = 120 + index as i64 * 35;
+        let mut daily_values = Vec::new();
+        for day_offset in (0_i64..35).rev() {
+            let day = today - chrono::Duration::days(day_offset);
+            let wave = ((34 - day_offset + index as i64 * 2) % 7) - 3;
+            let daily = (*base_sales + wave / 2 + if day_offset % 9 == 0 { 3 } else { 0 }).max(1);
+            daily_values.push(daily);
+            cumulative += daily;
+            let promo = day_offset <= 5 && index % 2 == 1;
+            let trend = (34 - day_offset) as f64 * (index as f64 - 2.0) * 0.7;
+            let price = if promo { base_price * 0.88 } else { base_price + trend + ((day_offset % 6) as f64 - 3.0) * 2.0 };
+            tx.execute(
+                "INSERT INTO competitor_snapshots(competitor_id,captured_at,price,sales_total,source) VALUES(?1,?2,?3,?4,'demo_seed')",
+                params![id, format!("{} 12:00:00", day.format("%Y-%m-%d")), price.round(), cumulative],
+            ).map_err(|e| e.to_string())?;
+        }
+        let daily = *daily_values.last().unwrap_or(base_sales);
+        let weekly: i64 = daily_values.iter().rev().take(7).sum();
+        let monthly: i64 = daily_values.iter().rev().take(30).sum();
+        tx.execute(
+            "INSERT INTO competitor_manual_metrics(competitor_id,daily_sales,weekly_sales,monthly_sales,updated_at) VALUES(?1,?2,?3,?4,CURRENT_TIMESTAMP) ON CONFLICT(competitor_id) DO UPDATE SET daily_sales=excluded.daily_sales,weekly_sales=excluded.weekly_sales,monthly_sales=excluded.monthly_sales,updated_at=CURRENT_TIMESTAMP",
+            params![id, daily, weekly, monthly],
+        ).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(demos.len() as i64)
+}
+
+#[tauri::command]
+fn delete_competitor_demo_data(state: State<AppState>) -> Result<i64, String> {
+    let mut c = db(&state)?;
+    let tx = c.transaction().map_err(|e| e.to_string())?;
+    let ids = {
+        let mut stmt = tx.prepare("SELECT DISTINCT p.id FROM competitor_products p JOIN competitor_snapshots s ON s.competitor_id=p.id WHERE p.product_url LIKE 'demo://%' OR s.source='demo_seed'").map_err(|e| e.to_string())?;
+        let values = stmt.query_map([], |r| r.get::<_, i64>(0)).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        values
+    };
+    for id in &ids {
+        let has_real: i64 = tx.query_row("SELECT EXISTS(SELECT 1 FROM competitor_snapshots WHERE competitor_id=?1 AND source<>'demo_seed')", [id], |r| r.get(0)).unwrap_or(0);
+        tx.execute("DELETE FROM competitor_snapshots WHERE competitor_id=?1 AND source='demo_seed'", [id]).map_err(|e| e.to_string())?;
+        if has_real == 0 {
+            tx.execute("DELETE FROM competitor_manual_metrics WHERE competitor_id=?1", [id]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM competitor_observations WHERE competitor_id=?1", [id]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM competitor_products WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(ids.len() as i64)
+}
+
+fn active_competitor_ids(state: &AppState) -> Result<Vec<i64>, String> {
+    let c = db(state)?;
+    let mut stmt = c
+        .prepare("SELECT id FROM competitor_products WHERE active=1 ORDER BY id")
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(ids)
+}
+
+fn refresh_competitors_all_blocking(state: &AppState) -> Result<i64, String> {
+    let ids = active_competitor_ids(state)?;
+    refresh_competitor_ids_blocking(state, ids, "manual_all_competitors")
+}
 #[tauri::command]
 async fn refresh_competitors_all(state: State<'_, AppState>) -> Result<i64, String> {
     let owned = background_state(&state)?;
@@ -3719,6 +4155,22 @@ async fn refresh_competitors_all(state: State<'_, AppState>) -> Result<i64, Stri
 
 #[tauri::command]
 fn start_competitors_collection(state: State<AppState>) -> Result<(), String> {
+    let owned = background_state(&state)?;
+    let ids = active_competitor_ids(&owned)?;
+    start_competitor_ids_collection(
+        owned,
+        ids,
+        "manual_all_competitors",
+        "竞品采集任务已加入队列",
+    )
+}
+
+fn start_competitor_ids_collection(
+    owned: AppState,
+    ids: Vec<i64>,
+    workflow: &'static str,
+    queued_message: &str,
+) -> Result<(), String> {
     {
         let progress = COMPETITOR_COLLECTION_PROGRESS
             .lock()
@@ -3727,18 +4179,20 @@ fn start_competitors_collection(state: State<AppState>) -> Result<(), String> {
             return Err("竞品采集任务已在运行".into());
         }
     }
-    let owned = background_state(&state)?;
+    if ids.is_empty() {
+        return Err("没有可运行的竞品任务".into());
+    }
     COMPETITOR_COLLECTION_STOP.store(false, Ordering::SeqCst);
     if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
         *progress = CompetitorCollectionProgress {
             running: true,
             stage: "queued".into(),
-            message: "竞品采集任务已加入队列".into(),
+            message: queued_message.into(),
             ..Default::default()
         };
     }
     tauri::async_runtime::spawn_blocking(move || {
-        if let Err(error) = refresh_competitors_all_blocking(&owned) {
+        if let Err(error) = refresh_competitor_ids_blocking(&owned, ids, workflow) {
             if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
                 progress.running = false;
                 progress.stage = "failed".into();
@@ -3747,6 +4201,132 @@ fn start_competitors_collection(state: State<AppState>) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+fn competitor_alert_settings_from(c: &Connection) -> CompetitorAlertSettings {
+    let number = |key: &str, fallback: f64| {
+        setting(c, key)
+            .parse::<f64>()
+            .ok()
+            .filter(|value| *value > 0.0 && *value <= 100.0)
+            .unwrap_or(fallback)
+    };
+    CompetitorAlertSettings {
+        warning_drop_percent: number("competitor_warning_drop_percent", 5.0),
+        critical_drop_percent: number("competitor_critical_drop_percent", 10.0),
+        opportunity_rise_percent: number("competitor_opportunity_rise_percent", 5.0),
+    }
+}
+
+#[tauri::command]
+fn competitor_alert_settings(state: State<AppState>) -> Result<CompetitorAlertSettings, String> {
+    Ok(competitor_alert_settings_from(&db(&state)?))
+}
+
+#[tauri::command]
+fn save_competitor_alert_settings(
+    input: CompetitorAlertSettings,
+    state: State<AppState>,
+) -> Result<(), String> {
+    if input.warning_drop_percent <= 0.0
+        || input.critical_drop_percent <= input.warning_drop_percent
+        || input.opportunity_rise_percent <= 0.0
+        || input.critical_drop_percent > 100.0
+        || input.opportunity_rise_percent > 100.0
+    {
+        return Err("预警阈值无效：严重降价必须大于普通降价，所有阈值需在 0–100% 之间".into());
+    }
+    let mut c = db(&state)?;
+    let tx = c.transaction().map_err(|e| e.to_string())?;
+    save_setting(&tx, "competitor_warning_drop_percent", &input.warning_drop_percent.to_string())?;
+    save_setting(&tx, "competitor_critical_drop_percent", &input.critical_drop_percent.to_string())?;
+    save_setting(&tx, "competitor_opportunity_rise_percent", &input.opportunity_rise_percent.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_competitor_manual_metrics(
+    id: i64,
+    daily_sales: Option<i64>,
+    weekly_sales: Option<i64>,
+    monthly_sales: Option<i64>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    if [daily_sales, weekly_sales, monthly_sales]
+        .into_iter()
+        .flatten()
+        .any(|value| value < 0)
+    {
+        return Err("日、周、月销量不能小于 0".into());
+    }
+    let c = db(&state)?;
+    c.execute(
+        "INSERT INTO competitor_manual_metrics(competitor_id,daily_sales,weekly_sales,monthly_sales,updated_at)VALUES(?1,?2,?3,?4,CURRENT_TIMESTAMP)ON CONFLICT(competitor_id)DO UPDATE SET daily_sales=excluded.daily_sales,weekly_sales=excluded.weekly_sales,monthly_sales=excluded.monthly_sales,updated_at=CURRENT_TIMESTAMP",
+        params![id, daily_sales, weekly_sales, monthly_sales],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn latest_competitor_batch_ids(state: &AppState, failed_only: bool) -> Result<Vec<i64>, String> {
+    let c = db(state)?;
+    let (run_id, requested_scope): (String, String) = c
+        .query_row(
+            "SELECT run_id,requested_scope FROM competitor_collection_runs ORDER BY started_at DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => "尚无可重新运行的竞品批次".into(),
+            _ => e.to_string(),
+        })?;
+    if !failed_only {
+        if let Some(raw_ids) = requested_scope.split("|ids=").nth(1) {
+            let ids = raw_ids
+                .split(',')
+                .filter_map(|value| value.parse::<i64>().ok())
+                .collect::<Vec<_>>();
+            if !ids.is_empty() {
+                return Ok(ids);
+            }
+        }
+    }
+    let sql = if failed_only {
+        "SELECT competitor_id FROM competitor_observations WHERE run_id=?1 AND status<>'ok' ORDER BY id"
+    } else {
+        "SELECT competitor_id FROM competitor_observations WHERE run_id=?1 ORDER BY id"
+    };
+    let mut stmt = c.prepare(sql).map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map([run_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(ids)
+}
+
+#[tauri::command]
+fn rerun_competitors_collection(state: State<AppState>) -> Result<(), String> {
+    let owned = background_state(&state)?;
+    let ids = latest_competitor_batch_ids(&owned, false)?;
+    start_competitor_ids_collection(
+        owned,
+        ids,
+        "rerun_competitor_batch",
+        "正在重新运行最近一批竞品任务",
+    )
+}
+
+#[tauri::command]
+fn retry_failed_competitors_collection(state: State<AppState>) -> Result<(), String> {
+    let owned = background_state(&state)?;
+    let ids = latest_competitor_batch_ids(&owned, true)?;
+    start_competitor_ids_collection(
+        owned,
+        ids,
+        "retry_failed_competitors",
+        "正在重试失败或数据不完整的竞品任务",
+    )
 }
 
 #[tauri::command]
@@ -3883,7 +4463,10 @@ fn finance_service_category(name: &str) -> (&'static str, &'static str) {
         .iter()
         .any(|x| n.contains(x))
     {
-        ("last_mile", "末公里配送")
+        // The monthly card has always defined 配送费用 as direct logistics
+        // plus last-mile/handover services. Keep one category key so its
+        // drill-down rows reconcile exactly to the card total.
+        ("delivery", "配送物流")
     } else if ["acquiring", "payment", "эквайр"]
         .iter()
         .any(|x| n.contains(x))
@@ -4086,7 +4669,10 @@ fn missing_cost_rows(
     state: State<AppState>,
 ) -> Result<Vec<MissingCostRow>, String> {
     let c = db(&state)?;
-    let mut stmt = c.prepare("SELECT s.sku,COALESCE(MAX(p.offer_id),''),COALESCE(MAX(NULLIF(p.name,'')),MAX(s.product_name),''),SUM(s.ordered_units),MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)),MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)),MAX(pc.weight_kg),MAX(pc.length_cm),MAX(pc.width_cm),MAX(pc.height_cm),COALESCE(MAX(pc.note),'') FROM sales_daily s LEFT JOIN products p ON p.sku=s.sku LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2 AND s.ordered_units<>0 GROUP BY s.sku HAVING MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)) IS NULL OR MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)) IS NULL ORDER BY SUM(s.ordered_units) DESC,s.sku").map_err(|e|e.to_string())?;
+    // Use the exact same fulfilled-unit base as monthly P&L. Previously this
+    // endpoint inspected ordered units while the report inspected delivered
+    // units, which could produce “missing units > 0 / missing SKU = 0”.
+    let mut stmt = c.prepare("WITH sales AS(SELECT sku,MAX(product_name) product_name FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) units FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) units FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),base AS(SELECT s.sku,s.product_name,COALESCE(d.units,fd.units,0) units FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku) SELECT b.sku,COALESCE(MAX(p.offer_id),''),COALESCE(MAX(NULLIF(p.name,'')),MAX(b.product_name),''),MAX(b.units),MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)),MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)),MAX(pc.weight_kg),MAX(pc.length_cm),MAX(pc.width_cm),MAX(pc.height_cm),COALESCE(MAX(pc.note),'') FROM base b LEFT JOIN products p ON p.sku=b.sku LEFT JOIN product_costs pc ON pc.sku=b.sku WHERE b.units>0 GROUP BY b.sku HAVING MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)) IS NULL OR MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)) IS NULL ORDER BY MAX(b.units) DESC,b.sku").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map(params![range.from, range.to], |r| {
             let length: Option<f64> = r.get(7)?;
@@ -4124,7 +4710,7 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
     let c = db(&state)?;
     let rate = rub_per_cny_for(&state, &c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS business_report_cache(range_key TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
-    let fingerprint:String=c.query_row("SELECT 'finance-v3-delivered-cost-units|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let fingerprint:String=c.query_row("SELECT 'finance-v5-consistent-missing-cost|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     let cache_key = format!("{}|{}", range.from, range.to);
     if let Ok(payload) = c.query_row(
         "SELECT payload FROM business_report_cache WHERE range_key=?1 AND fingerprint=?2",
@@ -4135,11 +4721,11 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
             return Ok(report);
         }
     }
-    // Match the audited legacy P&L: cost only fulfilled units when a delivery
-    // record exists for that SKU; fall back to ordered units when fulfillment
-    // data is unavailable. Charging every ordered unit overstates COGS when
-    // orders are cancelled, returned, or not yet delivered.
-    let(revenue,orders,purchase,first_mile,missing,costed_units):(f64,i64,f64,f64,i64,i64)=c.query_row("WITH sales AS(SELECT sku,SUM(revenue) revenue,SUM(ordered_units) ordered FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) delivered FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),cost_base AS(SELECT s.sku,s.revenue,s.ordered,COALESCE(d.delivered,s.ordered) cost_units,pc.unit_cost_cny,pc.unit_cost,pc.first_mile_cost,pc.first_mile_cost_cny FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN product_costs pc ON pc.sku=s.sku) SELECT COALESCE(SUM(revenue),0),COALESCE(SUM(ordered),0),COALESCE(SUM(cost_units*COALESCE(unit_cost_cny*?3,unit_cost,0)),0),COALESCE(SUM(cost_units*COALESCE(first_mile_cost,first_mile_cost_cny*?3,0)),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)THEN cost_units ELSE 0 END),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NOT NULL OR unit_cost IS NOT NULL)AND(first_mile_cost IS NOT NULL OR first_mile_cost_cny IS NOT NULL)THEN cost_units ELSE 0 END),0) FROM cost_base",params![range.from,range.to,rate],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(|e|e.to_string())?;
+    // Match the audited legacy P&L: COGS belongs to fulfilled units, never all
+    // orders. Prefer posting delivery events; older/newly migrated databases
+    // may not have those rows, so use the auditable Finance delivered operation
+    // count per SKU. A SKU without either source has zero settled cost units.
+    let(revenue,orders,purchase,first_mile,missing,costed_units,missing_cost_skus):(f64,i64,f64,f64,i64,i64,i64)=c.query_row("WITH sales AS(SELECT sku,SUM(revenue) revenue,SUM(ordered_units) ordered FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) delivered FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) delivered FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),cost_base AS(SELECT s.sku,s.revenue,s.ordered,COALESCE(d.delivered,fd.delivered,0) cost_units,pc.unit_cost_cny,pc.unit_cost,pc.first_mile_cost,pc.first_mile_cost_cny FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku LEFT JOIN product_costs pc ON pc.sku=s.sku) SELECT COALESCE(SUM(revenue),0),COALESCE(SUM(ordered),0),COALESCE(SUM(cost_units*COALESCE(unit_cost_cny*?3,unit_cost,0)),0),COALESCE(SUM(cost_units*COALESCE(first_mile_cost,first_mile_cost_cny*?3,0)),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)THEN cost_units ELSE 0 END),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NOT NULL OR unit_cost IS NOT NULL)AND(first_mile_cost IS NOT NULL OR first_mile_cost_cny IS NOT NULL)THEN cost_units ELSE 0 END),0),COALESCE(COUNT(DISTINCT CASE WHEN cost_units>0 AND ((unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)) THEN sku END),0) FROM cost_base",params![range.from,range.to,rate],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).map_err(|e|e.to_string())?;
     let ad_spend = c
         .query_row(
             "SELECT COALESCE(SUM(spend),0) FROM ad_daily WHERE day BETWEEN ?1 AND ?2 AND sku=''",
@@ -4316,7 +4902,6 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
         + storage
         + penalties
         + other;
-    let missing_cost_skus:i64=c.query_row("SELECT COUNT(DISTINCT s.sku)FROM sales_daily s LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2 AND s.ordered_units<>0 AND (pc.sku IS NULL OR (pc.unit_cost_cny IS NULL AND pc.unit_cost IS NULL)OR(pc.first_mile_cost IS NULL AND pc.first_mile_cost_cny IS NULL))",params![range.from,range.to],|r|r.get(0)).map_err(|e|e.to_string())?;
     let tax_rate = setting(&c, "local_tax_rate")
         .parse::<f64>()
         .unwrap_or(3.0)
@@ -4951,11 +5536,13 @@ async fn analytics_detail(
 fn inventory_blocking(
     query: String,
     target_days: i64,
+    lead_time_days: i64,
+    safety_days: i64,
     state: &AppState,
 ) -> Result<Vec<InventoryRow>, String> {
     let c = db(state)?;
     let needle = format!("%{}%", query.trim());
-    let mut stmt = c.prepare("WITH inv AS(SELECT sku,MAX(offer_id)offer_id,MAX(product_name)product_name,SUM(available_stock)available,SUM(transit_stock)transit,SUM(requested_stock)requested,COUNT(DISTINCT warehouse_id)warehouses,MAX(updated_at)updated FROM inventory_stock GROUP BY sku),sales AS(SELECT sku,SUM(ordered_units)/30.0 daily FROM sales_daily WHERE day>=date('now','-29 day') GROUP BY sku),plans AS(SELECT sku,SUM(planned_qty)planned FROM replenishment_plan GROUP BY sku) SELECT i.sku,i.offer_id,i.product_name,i.available,t.present_stock,t.reserved_stock,i.transit,i.requested,i.warehouses,COALESCE(s.daily,0),COALESCE(p.planned,0),i.updated FROM inv i LEFT JOIN inventory_totals t ON t.sku=i.sku LEFT JOIN sales s ON s.sku=i.sku LEFT JOIN plans p ON p.sku=i.sku WHERE ?1='%%' OR i.sku LIKE ?1 OR i.offer_id LIKE ?1 OR i.product_name LIKE ?1 ORDER BY i.available,i.offer_id LIMIT 2000").map_err(|e|e.to_string())?;
+    let mut stmt = c.prepare("WITH inv AS(SELECT sku,MAX(offer_id)offer_id,MAX(product_name)product_name,SUM(available_stock)available,SUM(transit_stock)transit,SUM(requested_stock)requested,COUNT(DISTINCT warehouse_id)warehouses,MAX(updated_at)updated FROM inventory_stock GROUP BY sku),feishu AS(SELECT sku,SUM(production_qty)production,SUM(domestic_stock_qty)domestic_stock,SUM(overseas_transit_qty)overseas_transit,SUM(overseas_arrived_qty)overseas_arrived FROM shipment_tracking WHERE sku<>'' GROUP BY sku),sales AS(SELECT sku,SUM(CASE WHEN day>=date('now','-29 day') THEN ordered_units ELSE 0 END)/30.0 daily30,SUM(CASE WHEN day>=date('now','-6 day') THEN ordered_units ELSE 0 END)/7.0 daily7,SUM(CASE WHEN day>=date('now','-29 day') THEN ordered_units ELSE 0 END) ordered30 FROM sales_daily WHERE day>=date('now','-29 day') GROUP BY sku),return_count AS(SELECT sku,SUM(quantity) returns30 FROM return_events WHERE day>=date('now','-29 day') GROUP BY sku),return_cost AS(SELECT sku,SUM(ABS(amount)) cost FROM finance_transactions WHERE substr(operation_date,1,10)>=date('now','-29 day') AND sku<>'' AND (lower(operation_type)LIKE'%return%' OR lower(operation_type)LIKE'%возврат%') GROUP BY sku),plans AS(SELECT sku,SUM(planned_qty)planned FROM replenishment_plan GROUP BY sku) SELECT i.sku,i.offer_id,i.product_name,i.available,t.present_stock,t.reserved_stock,i.transit,i.requested,COALESCE(f.production,0),COALESCE(f.domestic_stock,0),COALESCE(f.overseas_transit,0),COALESCE(f.overseas_arrived,0),i.warehouses,COALESCE(s.daily30,0),COALESCE(s.daily7,0),COALESCE(s.ordered30,0),COALESCE(rr.returns30,0),COALESCE(rc.cost,0),COALESCE(p.planned,0),i.updated FROM inv i LEFT JOIN inventory_totals t ON t.sku=i.sku LEFT JOIN feishu f ON f.sku=i.sku LEFT JOIN sales s ON s.sku=i.sku LEFT JOIN return_count rr ON rr.sku=i.sku LEFT JOIN return_cost rc ON rc.sku=i.sku LEFT JOIN plans p ON p.sku=i.sku WHERE ?1='%%' OR i.sku LIKE ?1 OR i.offer_id LIKE ?1 OR i.product_name LIKE ?1 ORDER BY i.available,i.offer_id LIMIT 2000").map_err(|e|e.to_string())?;
     let raw = stmt
         .query_map([needle], |r| {
             Ok((
@@ -4968,9 +5555,17 @@ fn inventory_blocking(
                 r.get::<_, i64>(6)?,
                 r.get::<_, i64>(7)?,
                 r.get::<_, i64>(8)?,
-                r.get::<_, f64>(9)?,
+                r.get::<_, i64>(9)?,
                 r.get::<_, i64>(10)?,
-                r.get::<_, String>(11)?,
+                r.get::<_, i64>(11)?,
+                r.get::<_, i64>(12)?,
+                r.get::<_, f64>(13)?,
+                r.get::<_, f64>(14)?,
+                r.get::<_, i64>(15)?,
+                r.get::<_, i64>(16)?,
+                r.get::<_, f64>(17)?,
+                r.get::<_, i64>(18)?,
+                r.get::<_, String>(19)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -4988,19 +5583,41 @@ fn inventory_blocking(
                 reserved,
                 transit,
                 requested,
+                production,
+                domestic_stock,
+                overseas_transit,
+                overseas_arrived,
                 warehouses,
                 daily,
+                daily7,
+                ordered30,
+                returns30,
+                return_cost,
                 planned,
                 updated,
             )| {
-                let estimated = if daily > 0.0 {
-                    Some(available as f64 / daily)
+                let forecast_daily = daily.max(daily7);
+                let estimated = if forecast_daily > 0.0 {
+                    Some(available as f64 / forecast_daily)
                 } else {
                     None
                 };
+                let required_days = target_days.max(lead_time_days + safety_days);
                 let suggested =
-                    ((daily * target_days as f64).ceil() as i64 - available - transit - requested)
+                    ((forecast_daily * required_days as f64).ceil() as i64
+                        - available - transit - requested - planned
+                        - production - domestic_stock - overseas_transit - overseas_arrived)
                         .max(0);
+                let (health_status, health_text) = match estimated {
+                    Some(_) if available == 0 => ("stockout", "已断货"),
+                    Some(days) if days <= 7.0 => ("critical", "7 天内断货"),
+                    Some(days) if days <= 14.0 => ("warning", "库存偏低"),
+                    Some(days) if days > 90.0 => ("overstock", "库存超过 90 天"),
+                    Some(days) if days > 60.0 => ("overstock", "库存超过 60 天"),
+                    Some(_) => ("healthy", "库存健康"),
+                    None if available > 0 => ("slow", "暂无销量/可能滞销"),
+                    None => ("empty", "无库存且暂无销量"),
+                };
                 InventoryRow {
                     sku,
                     offer_id,
@@ -5010,11 +5627,22 @@ fn inventory_blocking(
                     reserved_stock: reserved,
                     transit_stock: transit,
                     requested_stock: requested,
+                    domestic_production_stock: production,
+                    domestic_warehouse_stock: domestic_stock,
+                    overseas_transit_stock: overseas_transit,
+                    overseas_arrived_stock: overseas_arrived,
                     warehouse_count: warehouses,
                     daily_sales: daily,
+                    daily_sales_7d: daily7,
+                    demand_trend_percent: (daily > 0.0).then_some((daily7 - daily) / daily * 100.0),
                     estimated_days: estimated,
+                    health_status: health_status.into(),
+                    health_text: health_text.into(),
                     suggested_qty: suggested,
                     planned_qty: planned,
+                    return_units_30d: returns30,
+                    return_rate_30d: (ordered30 > 0).then_some(returns30 as f64 / ordered30 as f64 * 100.0),
+                    return_logistics_cost_30d: return_cost,
                     updated_at: updated,
                 }
             },
@@ -5026,16 +5654,18 @@ fn inventory_blocking(
 async fn inventory(
     query: String,
     target_days: i64,
+    lead_time_days: i64,
+    safety_days: i64,
     state: State<'_, AppState>,
 ) -> Result<Vec<InventoryRow>, String> {
     let owned = background_state(&state)?;
-    tauri::async_runtime::spawn_blocking(move || inventory_blocking(query, target_days, &owned))
+    tauri::async_runtime::spawn_blocking(move || inventory_blocking(query, target_days, lead_time_days, safety_days, &owned))
         .await
         .map_err(|e| format!("库存读取后台任务失败：{e}"))?
 }
 
 fn sync_inventory_blocking(state: &AppState) -> Result<i64, String> {
-    let _sync_guard = API_SYNC_LOCK
+    let _sync_guard = INVENTORY_SYNC_LOCK
         .try_lock()
         .map_err(|_| "已有数据同步任务正在后台运行，请等待完成后再同步库存。".to_string())?;
     let mut c = db(&state)?;
@@ -5277,7 +5907,7 @@ fn sales_dimensions(values: &[serde_json::Value], fallback_day: &str) -> (String
 }
 
 fn sync_seller_sales_blocking(range: DateRange, state: &AppState) -> Result<i64, String> {
-    let _sync_guard = API_SYNC_LOCK
+    let _sync_guard = SELLER_SYNC_LOCK
         .try_lock()
         .map_err(|_| "已有数据同步任务正在后台运行，请等待完成。".to_string())?;
     let mut c = db(state)?;
@@ -5530,7 +6160,9 @@ async fn sync_seller_sales(range: DateRange, state: State<'_, AppState>) -> Resu
         // Orders are a separate Seller endpoint. Cache them after analytics so
         // the order center is populated by the same user-visible sync action.
         let _ = sync_fbs_orders_blocking(range.clone(), &owned);
-        let _ = sync_fbo_orders_blocking(range, &owned);
+        let _ = sync_fbo_orders_blocking(range.clone(), &owned);
+        let _ = rebuild_cancellation_events(&range, &owned);
+        let _ = sync_customer_returns_blocking(&range, &owned);
         Ok(count)
     })
     .await
@@ -5538,7 +6170,7 @@ async fn sync_seller_sales(range: DateRange, state: State<'_, AppState>) -> Resu
 }
 
 fn sync_performance_ads_blocking(range: DateRange, state: &AppState) -> Result<i64, String> {
-    let _sync_guard = API_SYNC_LOCK
+    let _sync_guard = PERFORMANCE_SYNC_LOCK
         .try_lock()
         .map_err(|_| "已有数据同步任务正在后台运行，请等待完成。".to_string())?;
     let mut c = db(state)?;
@@ -5700,7 +6332,7 @@ fn finance_period(
 }
 
 fn sync_finance_blocking(range: DateRange, state: &AppState) -> Result<i64, String> {
-    let _sync_guard = API_SYNC_LOCK
+    let _sync_guard = FINANCE_SYNC_LOCK
         .try_lock()
         .map_err(|_| "已有数据同步任务正在后台运行，请等待完成。".to_string())?;
     let mut c = db(state)?;
@@ -5860,6 +6492,43 @@ async fn sync_finance(range: DateRange, state: State<'_, AppState>) -> Result<i6
 }
 
 #[tauri::command]
+async fn sync_all_data(
+    range: DateRange,
+    state: State<'_, AppState>,
+) -> Result<SyncAllResult, String> {
+    let seller_state = background_state(&state)?;
+    let performance_state = background_state(&state)?;
+    let finance_state = background_state(&state)?;
+    let seller_range = range.clone();
+    let performance_range = range.clone();
+    let seller = tauri::async_runtime::spawn_blocking(move || {
+        let count = sync_seller_sales_blocking(seller_range.clone(), &seller_state)?;
+        let _ = sync_fbs_orders_blocking(seller_range.clone(), &seller_state);
+        let _ = sync_fbo_orders_blocking(seller_range.clone(), &seller_state);
+        let _ = rebuild_cancellation_events(&seller_range, &seller_state);
+        let _ = sync_customer_returns_blocking(&seller_range, &seller_state);
+        Ok::<i64, String>(count)
+    });
+    let performance = tauri::async_runtime::spawn_blocking(move || {
+        sync_performance_ads_blocking(performance_range, &performance_state)
+    });
+    let finance = tauri::async_runtime::spawn_blocking(move || {
+        sync_finance_blocking(range, &finance_state)
+    });
+    let seller = seller.await.map_err(|e| e.to_string())?;
+    let performance = performance.await.map_err(|e| e.to_string())?;
+    let finance = finance.await.map_err(|e| e.to_string())?;
+    Ok(SyncAllResult {
+        seller_rows: seller.as_ref().ok().copied(),
+        performance_rows: performance.as_ref().ok().copied(),
+        finance_rows: finance.as_ref().ok().copied(),
+        seller_error: seller.err().unwrap_or_default(),
+        performance_error: performance.err().unwrap_or_default(),
+        finance_error: finance.err().unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
 fn test_feishu(state: State<AppState>) -> Result<String, String> {
     let c = db(&state)?;
     let token = feishu_token(&c)?;
@@ -5914,17 +6583,27 @@ fn feishu_records(token: &str, path: &str) -> Result<Vec<serde_json::Value>, Str
     Ok(rows)
 }
 
+fn feishu_product_record_belongs_to_shop(
+    record: &serde_json::Value,
+    active_shop_id: &str,
+) -> bool {
+    feishu_field_text(record.pointer("/fields/店铺ID")) == active_shop_id
+}
+
 fn sync_feishu_products_blocking(direction: String, state: &AppState) -> Result<String, String> {
     if !matches!(direction.as_str(), "pull" | "push" | "both") {
         return Err("飞书商品同步方向无效".into());
     }
     let mut c = db(&state)?;
+    let (active_shop_id, active_shop_name) = active_shop_identity(state)?;
     let token = feishu_token(&c)?;
     let path = feishu_table_path(&c)?;
     c.execute("INSERT INTO sync_logs(started_at,source,status) VALUES(CURRENT_TIMESTAMP,'Feishu Products','running')",[]).map_err(|e|e.to_string())?;
     let log_id = c.last_insert_rowid();
     let result = (|| -> Result<(i64, i64, i64), String> {
         let definitions = [
+            ("店铺ID", 1),
+            ("店铺名称", 1),
             ("SKU", 1),
             ("货号", 1),
             ("商品名称", 1),
@@ -5964,7 +6643,13 @@ fn sync_feishu_products_blocking(direction: String, state: &AppState) -> Result<
         let mut remote = std::collections::HashMap::new();
         for record in records {
             let sku = feishu_field_text(record.pointer("/fields/SKU"));
-            if !sku.is_empty() && !remote.contains_key(&sku) {
+            // Product costs are private to one shop. Legacy records without a
+            // shop id are deliberately ignored instead of being guessed from
+            // SKU, because the same SKU may have different purchase terms.
+            if feishu_product_record_belongs_to_shop(&record, &active_shop_id)
+                && !sku.is_empty()
+                && !remote.contains_key(&sku)
+            {
                 remote.insert(sku, record);
             }
         }
@@ -6014,6 +6699,8 @@ fn sync_feishu_products_blocking(direction: String, state: &AppState) -> Result<
             };
             for row in local {
                 let mut fields = serde_json::Map::new();
+                fields.insert("店铺ID".into(), active_shop_id.clone().into());
+                fields.insert("店铺名称".into(), active_shop_name.clone().into());
                 fields.insert("SKU".into(), row.0.clone().into());
                 fields.insert("货号".into(), row.1.into());
                 fields.insert("商品名称".into(), row.2.into());
@@ -6214,7 +6901,23 @@ fn sync_feishu_shipments_blocking(state: &AppState) -> Result<i64, String> {
                 .and_then(|v| v.get("国外到库"))
                 .or_else(|| fields.and_then(|v| v.get("国外到仓"))),
         );
-        tx.execute("INSERT INTO shipment_tracking(tracking_id,product_name,batch_no,shop_name,quantity,cargo_status,channel,domestic_arrival,foreign_arrival,source,remote_record_id)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'feishu',?10) ON CONFLICT(tracking_id) DO UPDATE SET product_name=excluded.product_name,batch_no=excluded.batch_no,shop_name=excluded.shop_name,quantity=excluded.quantity,cargo_status=excluded.cargo_status,channel=excluded.channel,domestic_arrival=excluded.domestic_arrival,foreign_arrival=excluded.foreign_arrival,source='feishu',remote_record_id=excluded.remote_record_id,updated_at=CURRENT_TIMESTAMP",params![tracking,first_feishu_field(fields,&["品名","产品名称","商品名称"]),first_feishu_field(fields,&["批次号","批次"]),first_feishu_field(fields,&["店铺","店铺名称"]),quantity,first_feishu_field(fields,&["货物状态","状态"]),first_feishu_field(fields,&["渠道","物流渠道"]),domestic,foreign,json_text(record.get("record_id"))]).map_err(|e|e.to_string())?;
+        let sku = first_feishu_field(fields, &["SKU", "Ozon SKU", "商品SKU"]);
+        let cargo_status = first_feishu_field(fields, &["货物状态", "状态"]);
+        let number = |names: &[&str]| -> i64 {
+            names.iter().find_map(|name| feishu_field_number(fields.and_then(|v| v.get(*name)))).unwrap_or(0.0).round() as i64
+        };
+        let mut production = number(&["在生产数量", "生产中数量", "国内在生产"]);
+        let mut domestic_stock = number(&["国内仓数量", "国内仓库数量", "国内库存"]);
+        let mut overseas_transit = number(&["海外仓在途数量", "发海外仓在途", "国际在途数量"]);
+        let mut overseas_arrived = number(&["海外仓到仓数量", "到达海外仓数量", "海外仓库存"]);
+        if production + domestic_stock + overseas_transit + overseas_arrived == 0 {
+            let status = cargo_status.to_lowercase();
+            if status.contains("生产") { production = quantity; }
+            else if !foreign.is_empty() || status.contains("到达海外") || status.contains("海外仓已到") { overseas_arrived = quantity; }
+            else if status.contains("在途") || status.contains("发海外") || (!domestic.is_empty() && foreign.is_empty()) { overseas_transit = quantity; }
+            else if status.contains("国内仓") || status.contains("国内到库") { domestic_stock = quantity; }
+        }
+        tx.execute("INSERT INTO shipment_tracking(tracking_id,product_name,batch_no,shop_name,quantity,cargo_status,channel,domestic_arrival,foreign_arrival,source,remote_record_id,sku,production_qty,domestic_stock_qty,overseas_transit_qty,overseas_arrived_qty)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'feishu',?10,?11,?12,?13,?14,?15) ON CONFLICT(tracking_id) DO UPDATE SET product_name=excluded.product_name,batch_no=excluded.batch_no,shop_name=excluded.shop_name,quantity=excluded.quantity,cargo_status=excluded.cargo_status,channel=excluded.channel,domestic_arrival=excluded.domestic_arrival,foreign_arrival=excluded.foreign_arrival,source='feishu',remote_record_id=excluded.remote_record_id,sku=excluded.sku,production_qty=excluded.production_qty,domestic_stock_qty=excluded.domestic_stock_qty,overseas_transit_qty=excluded.overseas_transit_qty,overseas_arrived_qty=excluded.overseas_arrived_qty,updated_at=CURRENT_TIMESTAMP",params![tracking,first_feishu_field(fields,&["品名","产品名称","商品名称"]),first_feishu_field(fields,&["批次号","批次"]),first_feishu_field(fields,&["店铺","店铺名称"]),quantity,cargo_status,first_feishu_field(fields,&["渠道","物流渠道"]),domestic,foreign,json_text(record.get("record_id")),sku,production,domestic_stock,overseas_transit,overseas_arrived]).map_err(|e|e.to_string())?;
         count += 1;
     }
     tx.commit().map_err(|e| e.to_string())?;
@@ -6812,6 +7515,108 @@ mod cross_border_tests {
     }
 }
 
+#[cfg(test)]
+mod finance_category_tests {
+    use super::finance_service_category;
+
+    #[test]
+    fn delivery_card_and_breakdown_share_one_category() {
+        for service in [
+            "MarketplaceServiceItemDirectFlowLogistic",
+            "MarketplaceServiceItemRedistributionLastMileCourier",
+            "MarketplaceServiceItemDeliveryToHandoverPlaceOzon",
+        ] {
+            assert_eq!(finance_service_category(service).0, "delivery");
+        }
+    }
+
+    #[test]
+    fn audited_finance_categories_remain_distinct() {
+        assert_eq!(
+            finance_service_category("MarketplaceServiceItemReturnFlowLogistic").0,
+            "return_logistics"
+        );
+        assert_eq!(
+            finance_service_category("MarketplaceServiceItemDirectFlowLogistic").0,
+            "delivery"
+        );
+        assert_eq!(
+            finance_service_category("MarketplaceServiceItemAcquiring").0,
+            "acquiring"
+        );
+        assert_eq!(
+            finance_service_category("MarketplaceServiceStorageServiceAtTheWarehouseFbo").0,
+            "storage"
+        );
+        assert_eq!(
+            finance_service_category("OperationMarketplaceServiceCostPerClick").0,
+            "advertising"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shop_cost_isolation_tests {
+    use super::{active_shop_database_path, feishu_product_record_belongs_to_shop, upsert_cost, AppState, ProductCostInput};
+    use std::{fs, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
+
+    fn cost_input(value: f64) -> ProductCostInput {
+        ProductCostInput {
+            sku: "SAME-SKU".into(),
+            unit_cost: Some(value),
+            first_mile_cost: Some(value / 10.0),
+            length_cm: None,
+            width_cm: None,
+            height_cm: None,
+            weight_kg: None,
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn same_sku_keeps_independent_costs_in_each_shop_database() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ozon-shop-cost-isolation-{unique}"));
+        fs::create_dir_all(root.join("shops")).unwrap();
+        fs::write(
+            root.join("shops.json"),
+            r#"{"active_shop_id":"shop-a","shops":[{"id":"shop-a","name":"A","kind":"local","database_file":"shops/a.db","api_name":"A"},{"id":"shop-b","name":"B","kind":"local","database_file":"shops/b.db","api_name":"B"}]}"#,
+        )
+        .unwrap();
+        for file in ["a.db", "b.db"] {
+            let c = rusqlite::Connection::open(root.join("shops").join(file)).unwrap();
+            c.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '');CREATE TABLE product_costs(sku TEXT PRIMARY KEY,unit_cost REAL,first_mile_cost REAL,unit_cost_cny REAL,first_mile_cost_cny REAL,length_cm REAL,width_cm REAL,height_cm REAL,weight_kg REAL,note TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").unwrap();
+        }
+        let state = AppState { data_dir: root.clone(), active_shop_id: Mutex::new("shop-a".into()) };
+        let shop_a_path = active_shop_database_path(&state).unwrap();
+        upsert_cost(&rusqlite::Connection::open(&shop_a_path).unwrap(), &cost_input(11.0)).unwrap();
+        *state.active_shop_id.lock().unwrap() = "shop-b".into();
+        let shop_b_path = active_shop_database_path(&state).unwrap();
+        assert_ne!(shop_a_path, shop_b_path);
+        let shop_b = rusqlite::Connection::open(&shop_b_path).unwrap();
+        assert_eq!(shop_b.query_row("SELECT COUNT(*) FROM product_costs WHERE sku='SAME-SKU'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        upsert_cost(&shop_b, &cost_input(29.0)).unwrap();
+        *state.active_shop_id.lock().unwrap() = "shop-a".into();
+        assert_eq!(rusqlite::Connection::open(active_shop_database_path(&state).unwrap()).unwrap().query_row("SELECT unit_cost_cny FROM product_costs WHERE sku='SAME-SKU'", [], |r| r.get::<_, f64>(0)).unwrap(), 11.0);
+        *state.active_shop_id.lock().unwrap() = "shop-b".into();
+        assert_eq!(rusqlite::Connection::open(active_shop_database_path(&state).unwrap()).unwrap().query_row("SELECT unit_cost_cny FROM product_costs WHERE sku='SAME-SKU'", [], |r| r.get::<_, f64>(0)).unwrap(), 29.0);
+        drop(shop_b);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn feishu_cost_records_require_exact_shop_id() {
+        let a = serde_json::json!({"fields":{"店铺ID":"shop-a","SKU":"SAME-SKU"}});
+        let legacy = serde_json::json!({"fields":{"SKU":"SAME-SKU"}});
+        assert!(feishu_product_record_belongs_to_shop(&a, "shop-a"));
+        assert!(!feishu_product_record_belongs_to_shop(&a, "shop-b"));
+        assert!(!feishu_product_record_belongs_to_shop(&legacy, "shop-a"));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -6858,16 +7663,23 @@ pub fn run() {
             sync_fbs_orders,
             fbs_orders,
             competitors,
+            competitor_alert_settings,
+            save_competitor_alert_settings,
+            seed_competitor_demo_data,
+            delete_competitor_demo_data,
             add_competitor,
             refresh_competitor,
             refresh_competitors_due,
             refresh_competitors_all,
             start_competitors_collection,
+            rerun_competitors_collection,
+            retry_failed_competitors_collection,
             competitor_collection_progress,
             stop_competitors_collection,
             stop_competitor_collection_task,
             competitor_latest_run,
             set_competitor_manual_sales,
+            set_competitor_manual_metrics,
             open_competitor_browser,
             import_competitor_html,
             remove_competitor,
@@ -6885,6 +7697,7 @@ pub fn run() {
             sync_seller_sales,
             sync_performance_ads,
             sync_finance,
+            sync_all_data,
             test_feishu,
             sync_feishu_products,
             send_feishu_weekly,

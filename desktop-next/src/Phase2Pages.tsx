@@ -358,6 +358,10 @@ export function InventoryPage({
   setQuery,
   targetDays,
   setTargetDays,
+  leadTimeDays,
+  setLeadTimeDays,
+  safetyDays,
+  setSafetyDays,
   reload,
 }: {
   rows: InventoryRow[];
@@ -365,14 +369,25 @@ export function InventoryPage({
   setQuery: (value: string) => void;
   targetDays: number;
   setTargetDays: (value: number) => void;
+  leadTimeDays: number;
+  setLeadTimeDays: (value: number) => void;
+  safetyDays: number;
+  setSafetyDays: (value: number) => void;
   reload: () => Promise<void>;
 }) {
   const [syncing, setSyncing] = useState(false),
     [message, setMessage] = useState(""),
+    [riskFilter, setRiskFilter] = useState("all"),
     [page, setPage] = useState(0);
-  const pages = Math.max(1, Math.ceil(rows.length / 50)),
-    visible = rows.slice(page * 50, page * 50 + 50);
-  useEffect(() => setPage(0), [rows]);
+  const filteredRows = riskFilter === "all" ? rows : rows.filter((row) =>
+    riskFilter === "replenishment" ? row.suggestedQty > 0 :
+    riskFilter === "returns" ? (row.returnRate30d ?? 0) >= 5 :
+    riskFilter === "stockout" ? ["stockout", "critical", "warning"].includes(row.healthStatus) :
+    riskFilter === "overstock" ? ["overstock", "slow"].includes(row.healthStatus) :
+    row.healthStatus === riskFilter),
+    pages = Math.max(1, Math.ceil(filteredRows.length / 50)),
+    visible = filteredRows.slice(page * 50, page * 50 + 50);
+  useEffect(() => setPage(0), [rows, riskFilter]);
   const sync = async () => {
     setSyncing(true);
     setMessage("");
@@ -392,7 +407,16 @@ export function InventoryPage({
   const available = rows.reduce((s, x) => s + x.availableStock, 0),
     portal = rows.reduce((s, x) => s + (x.portalStock ?? x.availableStock), 0),
     transit = rows.reduce((s, x) => s + x.transitStock, 0),
-    suggested = rows.reduce((s, x) => s + x.suggestedQty, 0);
+    suggested = rows.reduce((s, x) => s + x.suggestedQty, 0),
+    productionTotal = rows.reduce((s, x) => s + x.domesticProductionStock, 0),
+    domesticTotal = rows.reduce((s, x) => s + x.domesticWarehouseStock, 0),
+    overseasTransitTotal = rows.reduce((s, x) => s + x.overseasTransitStock, 0),
+    overseasArrivedTotal = rows.reduce((s, x) => s + x.overseasArrivedStock, 0),
+    requestedTotal = rows.reduce((s, x) => s + x.requestedStock, 0),
+    stockoutCount = rows.filter((x) => x.healthStatus === "stockout").length,
+    riskCount = rows.filter((x) => ["critical", "warning"].includes(x.healthStatus)).length,
+    overstockCount = rows.filter((x) => ["overstock", "slow"].includes(x.healthStatus)).length,
+    highReturnRows = rows.filter((x) => (x.returnRate30d ?? 0) >= 5).sort((a, b) => (b.returnRate30d ?? 0) - (a.returnRate30d ?? 0));
   return (
     <>
       <PageTitle
@@ -435,16 +459,52 @@ export function InventoryPage({
           </span>
         </div>
       </div>
+      <section className="card inventory-supply-chain">
+        <div className="inventory-chain-title"><b>飞书 + Ozon 全链路库存</b><small>飞书阶段必须填写 SKU 才能并入对应商品；每批货只归入当前所在阶段，避免重复计算。</small></div>
+        <div className="inventory-chain-flow">
+          {[
+            ["国内在生产", productionTotal, "feishu"],
+            ["国内仓库", domesticTotal, "feishu"],
+            ["发海外仓在途", overseasTransitTotal, "feishu"],
+            ["到达海外仓", overseasArrivedTotal, "feishu"],
+            ["Ozon 已申请", requestedTotal, "ozon"],
+            ["Ozon 在途", transit, "ozon"],
+            ["Ozon 可售", available, "ozon"],
+          ].map(([label, value, source], index) => <div className="inventory-chain-step" key={String(label)}><span>{label}</span><strong>{value} 件</strong><small>{source === "feishu" ? "飞书" : "Ozon"}</small>{index < 6 && <i>→</i>}</div>)}
+        </div>
+      </section>
+      <section className="inventory-health-dashboard">
+        <button className={`inventory-health-card danger ${riskFilter === "stockout" ? "active" : ""}`} onClick={() => setRiskFilter(riskFilter === "stockout" ? "all" : "stockout")}>
+          <span>断货风险</span><strong>{stockoutCount + riskCount} 个 SKU</strong><small>已断货 {stockoutCount} · 14 天内风险 {riskCount}</small>
+        </button>
+        <button className={`inventory-health-card warning ${riskFilter === "replenishment" ? "active" : ""}`} onClick={() => setRiskFilter(riskFilter === "replenishment" ? "all" : "replenishment")}>
+          <span>补货任务</span><strong>{rows.filter((x) => x.suggestedQty > 0).length} 个 SKU</strong><small>建议补货合计 {suggested} 件，已扣除在途、申请及计划</small>
+        </button>
+        <button className={`inventory-health-card overstock ${riskFilter === "overstock" ? "active" : ""}`} onClick={() => setRiskFilter(riskFilter === "overstock" ? "all" : "overstock")}>
+          <span>积压与滞销</span><strong>{overstockCount} 个 SKU</strong><small>覆盖超过 60 天或近 30 天无销量；90 天以上重点处理</small>
+        </button>
+        <button className={`inventory-health-card returns ${riskFilter === "returns" ? "active" : ""}`} onClick={() => setRiskFilter(riskFilter === "returns" ? "all" : "returns")}>
+          <span>高退货关注</span><strong>{highReturnRows.length} 个 SKU</strong><small>近 30 天退货率达到 5% 及以上</small>
+        </button>
+      </section>
+      {!!highReturnRows.length && (
+        <section className="card inventory-return-panel">
+          <div><b>退货分析重点</b><small>按近 30 天 SKU 退货率排序；当前接口未提供可靠退货原因，因此不推测原因。</small></div>
+          <div className="inventory-return-list">
+            {highReturnRows.slice(0, 5).map((row) => <button key={row.sku} onClick={() => { setQuery(row.sku); setRiskFilter("all"); }}><b>{row.offerId || row.sku}</b><span>{row.returnUnits30d} 件 · {row.returnRate30d?.toFixed(1)}%</span><small>退货物流 ₽{row.returnLogisticsCost30d.toFixed(0)}</small></button>)}
+          </div>
+        </section>
+      )}
       <div className="list-toolbar">
         <div>
           <b>库存明细</b>
           <small>
-            建议量沿用：MAX(0, 日均销量 × 目标天数 − 可售 − 在途 − 已申请)
+            补货采用 7 日与 30 日日均销量中的较高值，并扣除可售、在途、已申请和已有计划。
           </small>
         </div>
         <div className="toolbar-actions">
           <label className="days-input">
-            目标天数{" "}
+            目标库存{" "}
             <input
               type="number"
               min="1"
@@ -455,6 +515,8 @@ export function InventoryPage({
               }
             />
           </label>
+          <label className="days-input">采购+运输 <input type="number" min="0" max="365" value={leadTimeDays} onChange={(e) => setLeadTimeDays(Math.max(0, Number(e.target.value) || 0))} /> 天</label>
+          <label className="days-input">安全库存 <input type="number" min="0" max="90" value={safetyDays} onChange={(e) => setSafetyDays(Math.max(0, Number(e.target.value) || 0))} /> 天</label>
           <SearchBox
             value={query}
             setValue={setQuery}
@@ -472,10 +534,14 @@ export function InventoryPage({
               <th>预留</th>
               <th>在途</th>
               <th>已申请</th>
+              <th>飞书供应链</th>
               <th>仓库</th>
               <th>日均销量</th>
+              <th>需求趋势</th>
               <th>预计可售</th>
+              <th>健康状态</th>
               <th>建议 / 计划</th>
+              <th>30 日退货 / 成本</th>
             </tr>
           </thead>
           <tbody>
@@ -492,31 +558,35 @@ export function InventoryPage({
                 <td>{row.reservedStock ?? "—"}</td>
                 <td>{row.transitStock}</td>
                 <td>{row.requestedStock}</td>
+                <td><div className="sku-chain"><span>生产 <b>{row.domesticProductionStock}</b></span><span>国内仓 <b>{row.domesticWarehouseStock}</b></span><span>海外在途 <b>{row.overseasTransitStock}</b></span><span>海外到仓 <b>{row.overseasArrivedStock}</b></span></div></td>
                 <td>{row.warehouseCount}</td>
-                <td>{row.dailySales.toFixed(1)}</td>
+                <td><b>{row.dailySales7d.toFixed(1)}</b><small>30日 {row.dailySales.toFixed(1)}</small></td>
+                <td className={(row.demandTrendPercent ?? 0) > 0 ? "demand-up" : (row.demandTrendPercent ?? 0) < 0 ? "demand-down" : ""}>{row.demandTrendPercent == null ? "—" : `${row.demandTrendPercent > 0 ? "+" : ""}${row.demandTrendPercent.toFixed(0)}%`}</td>
                 <td>
                   {row.estimatedDays == null
                     ? "—"
                     : `${row.estimatedDays.toFixed(1)} 天`}
                 </td>
+                <td><span className={`inventory-health-tag ${row.healthStatus}`}>{row.healthText}</span></td>
                 <td>
                   <b className={row.suggestedQty > 0 ? "danger-text" : ""}>
                     {row.suggestedQty}
                   </b>
                   <small>计划 {row.plannedQty}</small>
                 </td>
+                <td><b className={(row.returnRate30d ?? 0) >= 5 ? "danger-text" : ""}>{row.returnUnits30d} 件</b><small>{row.returnRate30d == null ? "无订单" : `${row.returnRate30d.toFixed(1)}%`} · ₽{row.returnLogisticsCost30d.toFixed(0)}</small></td>
               </tr>
             ))}
           </tbody>
         </table>
-        {!rows.length && <div className="empty">尚未同步库存快照</div>}
+        {!filteredRows.length && <div className="empty">{rows.length ? "当前风险筛选下没有商品" : "尚未同步库存快照"}</div>}
       </section>
       <div className="table-pagination">
         <button disabled={page === 0} onClick={() => setPage(page - 1)}>
           上一页
         </button>
         <span>
-          第 {page + 1} / {pages} 页 · 每页 50 条
+          第 {page + 1} / {pages} 页 · {filteredRows.length} 条 · 每页 50 条
         </span>
         <button disabled={page + 1 >= pages} onClick={() => setPage(page + 1)}>
           下一页

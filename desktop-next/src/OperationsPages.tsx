@@ -36,9 +36,11 @@ import {
   refreshListingCategories,
   searchListingCategories,
   competitors,
+  competitorAlertSettings,
   competitorLatestRun,
   competitorCollectionProgress,
   dataCoverage,
+  deleteCompetitorDemoData,
   exportDataset,
   exportApiBundle,
   exportWbApiBundle,
@@ -55,14 +57,18 @@ import {
   pruneCache,
   refreshCompetitor,
   refreshCompetitorsDue,
+  rerunCompetitorsCollection,
+  retryFailedCompetitorsCollection,
   startCompetitorsCollection,
   stopCompetitorsCollection,
   stopCompetitorCollectionTask,
-  setCompetitorManualSales,
+  setCompetitorManualMetrics,
+  seedCompetitorDemoData,
   removeCompetitor,
   saveFbsThreshold,
   saveListingSettings,
   saveProductCost,
+  saveCompetitorAlertSettings,
   saveWarehouseMapping,
   saveWbCost,
   saveWbSettings,
@@ -75,6 +81,7 @@ import {
   syncFeishuProducts,
   syncFeishuShipments,
   syncFinance,
+  syncAllData,
   syncListingCosts,
   syncLogs,
   syncPerformance,
@@ -95,6 +102,7 @@ import type {
   AnalyticsDetail,
   BusinessReport,
   CrossBorderReport,
+  CompetitorAlertSettings,
   CompetitorRow,
   CompetitorRunSummary,
   CompetitorCollectionProgress,
@@ -1229,19 +1237,27 @@ export function CompetitorsPage() {
     [selected, setSelected] = useState<number[]>([]),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
-    [manualSales, setManualSales] = useState<Record<number, string>>({}),
+    [manualSales, setManualSales] = useState<
+      Record<number, { daily: string; weekly: string; monthly: string }>
+    >({}),
     [latestRun, setLatestRun] = useState<CompetitorRunSummary | null>(null),
+    [alertSettings, setAlertSettings] =
+      useState<CompetitorAlertSettings | null>(null),
+    [savingAlerts, setSavingAlerts] = useState(false),
+    [salesPeriod, setSalesPeriod] = useState<"daily" | "weekly" | "monthly">("daily"),
     [collection, setCollection] = useState<CompetitorCollectionProgress | null>(
       null,
     );
   const collectionWasRunning = useRef(false);
   const load = async () => {
-    const [data, run] = await Promise.all([
+    const [data, run, settings] = await Promise.all([
       competitors(),
       competitorLatestRun(),
+      competitorAlertSettings(),
     ]);
     setRows(data);
     setLatestRun(run);
+    setAlertSettings(settings);
     setSelected((old) => (old.length ? old : data.map((x) => x.id)));
   };
   useEffect(() => {
@@ -1306,6 +1322,16 @@ export function CompetitorsPage() {
       setError(String(e));
     }
   };
+  const rerunBatch = async (failedOnly = false) => {
+    setError("");
+    try {
+      if (failedOnly) await retryFailedCompetitorsCollection();
+      else await rerunCompetitorsCollection();
+      setCollection(await competitorCollectionProgress());
+    } catch (e) {
+      setError(String(e));
+    }
+  };
   useEffect(() => {
     const el = document.getElementById("competitor-chart");
     if (!el) return;
@@ -1318,6 +1344,20 @@ export function CompetitorsPage() {
         ),
       ),
     ].sort();
+    const periodDays = salesPeriod === "daily" ? 1 : salesPeriod === "weekly" ? 7 : 30;
+    const periodLabel = salesPeriod === "daily" ? "日销量" : salesPeriod === "weekly" ? "周销量" : "月销量";
+    const periodSales = (row: CompetitorRow, date: string) => {
+      const end = new Date(`${date}T23:59:59`);
+      const cutoff = new Date(end);
+      cutoff.setDate(cutoff.getDate() - periodDays);
+      const points = row.snapshots
+        .filter((snapshot) => snapshot.salesTotal != null)
+        .map((snapshot) => ({ at: new Date(snapshot.capturedAt.replace(" ", "T")), value: snapshot.salesTotal! }))
+        .sort((a, b) => a.at.getTime() - b.at.getTime());
+      const current = points.filter((point) => point.at <= end).at(-1);
+      const previous = points.filter((point) => point.at <= cutoff).at(-1);
+      return current && previous ? Math.max(0, current.value - previous.value) : null;
+    };
     chart.setOption({
       tooltip: { trigger: "axis" },
       legend: { top: 0 },
@@ -1325,7 +1365,7 @@ export function CompetitorsPage() {
       xAxis: { type: "category", data: dates },
       yAxis: [
         { type: "value", name: "价格 ₽" },
-        { type: "value", name: "累计销量" },
+        { type: "value", name: periodLabel },
       ],
       series: chosen.flatMap((row) => [
         {
@@ -1339,16 +1379,12 @@ export function CompetitorsPage() {
           ),
         },
         {
-          name: `${row.name || row.productCode} 销量`,
+          name: `${row.name || row.productCode} ${periodLabel}`,
           type: "line",
           smooth: true,
           yAxisIndex: 1,
           lineStyle: { type: "dashed" },
-          data: dates.map(
-            (d) =>
-              row.snapshots.filter((s) => s.capturedAt.startsWith(d)).at(-1)
-                ?.salesTotal ?? null,
-          ),
+          data: dates.map((d) => periodSales(row, d)),
         },
       ]),
     });
@@ -1358,7 +1394,25 @@ export function CompetitorsPage() {
       window.removeEventListener("resize", resize);
       chart.dispose();
     };
-  }, [rows, selected]);
+  }, [rows, selected, salesPeriod]);
+  const pricedRows = rows
+    .filter((row) => row.latestPrice != null)
+    .sort((a, b) => (a.latestPrice ?? 0) - (b.latestPrice ?? 0));
+  const priceTiers = pricedRows.map((row, index) => ({
+    ...row,
+    tier:
+      index < pricedRows.length / 3
+        ? "低价带"
+        : index < (pricedRows.length * 2) / 3
+          ? "中价带"
+          : "高价带",
+  }));
+  const priceGaps = pricedRows.slice(1).map((row, index) => ({
+    lower: pricedRows[index],
+    upper: row,
+    gap: (row.latestPrice ?? 0) - (pricedRows[index].latestPrice ?? 0),
+  }));
+  const largestPriceGap = priceGaps.sort((a, b) => b.gap - a.gap)[0];
   return (
     <>
       <header className="page-header">
@@ -1414,6 +1468,31 @@ export function CompetitorsPage() {
             结构变化 {latestRun.changedLayout} · 不可访问{" "}
             {latestRun.inaccessible} · 待核验 {latestRun.ambiguousMatch}
           </span>
+          <div className="competitor-rerun-actions">
+            <button
+              className="outline-button"
+              disabled={collection?.running}
+              onClick={() => void rerunBatch(false)}
+            >
+              <RefreshCw size={14} />
+              重新运行本批次
+            </button>
+            <button
+              className="outline-button"
+              disabled={
+                collection?.running ||
+                latestRun.blocked +
+                  latestRun.changedLayout +
+                  latestRun.inaccessible +
+                  latestRun.ambiguousMatch +
+                  latestRun.incomplete ===
+                  0
+              }
+              onClick={() => void rerunBatch(true)}
+            >
+              仅重试失败任务
+            </button>
+          </div>
         </section>
       )}
       {collection && (collection.running || collection.total > 0) && (
@@ -1454,13 +1533,17 @@ export function CompetitorsPage() {
             <div className="competitor-task-board-title">
               <div>
                 <b>采集任务明细</b>
-                <small>每个竞品独立排队、采集和停止；停止一个任务不会影响其他任务</small>
+                <small>
+                  每个竞品独立排队、采集和停止；停止一个任务不会影响其他任务
+                </small>
               </div>
               <span>{collection.tasks?.length ?? 0} 个任务</span>
             </div>
             <div className="competitor-task-list">
               {(collection.tasks ?? []).map((task, index) => {
-                const canStop = ["queued", "running", "stopping"].includes(task.status);
+                const canStop = ["queued", "running", "stopping"].includes(
+                  task.status,
+                );
                 const statusText: Record<string, string> = {
                   queued: "等待中",
                   running: "采集中",
@@ -1471,13 +1554,20 @@ export function CompetitorsPage() {
                   failed: "失败",
                 };
                 return (
-                  <div className={`competitor-task-row task-${task.status}`} key={task.id}>
-                    <span className="competitor-task-index">{String(index + 1).padStart(2, "0")}</span>
+                  <div
+                    className={`competitor-task-row task-${task.status}`}
+                    key={task.id}
+                  >
+                    <span className="competitor-task-index">
+                      {String(index + 1).padStart(2, "0")}
+                    </span>
                     <div className="competitor-task-identity">
                       <b>{task.productCode || `任务 ${task.id}`}</b>
                       <small title={task.productUrl}>{task.productUrl}</small>
                     </div>
-                    <span className={`competitor-task-status status-${task.status}`}>
+                    <span
+                      className={`competitor-task-status status-${task.status}`}
+                    >
                       {statusText[task.status] ?? task.status}
                     </span>
                     <div className="competitor-task-message">
@@ -1492,7 +1582,11 @@ export function CompetitorsPage() {
                         setCollection(await competitorCollectionProgress());
                       }}
                     >
-                      {task.stopRequested ? "停止中" : canStop ? "停止此任务" : "—"}
+                      {task.stopRequested
+                        ? "停止中"
+                        : canStop
+                          ? "停止此任务"
+                          : "—"}
                     </button>
                   </div>
                 );
@@ -1503,20 +1597,201 @@ export function CompetitorsPage() {
       )}
       <section className="card competitor-chart-card">
         <div className="card-title">
-          多竞品价格与销量趋势{" "}
+          多竞品价格与周期销量趋势{" "}
           <span>
+            <span className="sales-period-switch" role="group" aria-label="销量周期">
+              {(["daily", "weekly", "monthly"] as const).map((period) => (
+                <button className={salesPeriod === period ? "active" : ""} key={period} onClick={() => setSalesPeriod(period)}>
+                  {period === "daily" ? "日销量" : period === "weekly" ? "周销量" : "月销量"}
+                </button>
+              ))}
+            </span>{" "}
+            <button className="outline-button demo-data-button" disabled={busy || collection?.running} onClick={async () => {
+              setBusy(true);
+              setError("");
+              try { await seedCompetitorDemoData(); await load(); } catch (e) { setError(String(e)); } finally { setBusy(false); }
+            }}>生成月度演示数据</button>{" "}
+            <button className="outline-button demo-delete-button" disabled={busy || collection?.running || !rows.some((row) => row.isDemo)} onClick={async () => {
+              if (!window.confirm("确定删除当前店铺的全部竞品演示数据吗？真实采集数据不会被删除。")) return;
+              setBusy(true);
+              setError("");
+              try { await deleteCompetitorDemoData(); await load(); } catch (e) { setError(String(e)); } finally { setBusy(false); }
+            }}>删除演示数据</button>{" "}
             <button
               className="outline-button"
               disabled={busy || collection?.running || !rows.length}
               onClick={refreshAll}
             >
-              {collection?.running ? "采集中" : "自动采集全部"}
+              {collection?.running ? "采集中" : "运行全部采集"}
             </button>{" "}
             <span className="badge blue">{selected.length} 个已选择</span>
           </span>
         </div>
         <div id="competitor-chart" className="competitor-chart" />
       </section>
+      {!!rows.length && (
+        <section className="card competitor-intelligence-summary">
+          <div className="competitor-alert-settings">
+            <div>
+              <div className="card-title">预警规则</div>
+              <p>规则仅应用于当前店铺，保存后会立即重新计算预警。</p>
+            </div>
+            {alertSettings && (
+              <div className="competitor-alert-fields">
+                <label>
+                  普通降价
+                  <span><input type="number" min="0" max="100" step="0.5" value={alertSettings.warningDropPercent} onChange={(e) => setAlertSettings({ ...alertSettings, warningDropPercent: Number(e.target.value) })} />%</span>
+                </label>
+                <label>
+                  严重降价
+                  <span><input type="number" min="0" max="100" step="0.5" value={alertSettings.criticalDropPercent} onChange={(e) => setAlertSettings({ ...alertSettings, criticalDropPercent: Number(e.target.value) })} />%</span>
+                </label>
+                <label>
+                  涨价机会
+                  <span><input type="number" min="0" max="100" step="0.5" value={alertSettings.opportunityRisePercent} onChange={(e) => setAlertSettings({ ...alertSettings, opportunityRisePercent: Number(e.target.value) })} />%</span>
+                </label>
+                <button className="dark-button" disabled={savingAlerts} onClick={async () => {
+                  setSavingAlerts(true);
+                  setError("");
+                  try {
+                    await saveCompetitorAlertSettings(alertSettings);
+                    await load();
+                  } catch (e) {
+                    setError(String(e));
+                  } finally {
+                    setSavingAlerts(false);
+                  }
+                }}><Save size={14} />{savingAlerts ? "保存中" : "保存规则"}</button>
+              </div>
+            )}
+          </div>
+          <div className="competitor-price-positioning">
+            <div className="card-title">当前样本价格分层</div>
+            {priceTiers.length ? (
+              <div className="price-tier-list">
+                {priceTiers.map((row) => <span className={`price-tier tier-${row.tier.slice(0, 1)}`} key={row.id}><b>{row.tier}</b>{row.productCode} · ₽{row.latestPrice}</span>)}
+              </div>
+            ) : <p>暂无可用价格。</p>}
+            <small>
+              {pricedRows.length < 3
+                ? "价格空档分析样本不足，至少需要 3 个有价格的竞品。"
+                : largestPriceGap
+                  ? `最大价格空档：₽${largestPriceGap.gap.toFixed(0)}（${largestPriceGap.lower.productCode} → ${largestPriceGap.upper.productCode}）`
+                  : "暂未发现价格空档。"}
+              价格带仅基于当前监控样本三等分，不代表全市场分布。
+            </small>
+          </div>
+        </section>
+      )}
+      {!!rows.length && (
+        <section className="card competitor-alert-center">
+          <div className="card-title">
+            价格预警
+            <span>
+              {
+                rows.filter((row) =>
+                  ["critical", "warning"].includes(row.priceAlertLevel),
+                ).length
+              }{" "}
+              个需要关注
+            </span>
+          </div>
+          <div className="competitor-alert-list">
+            {rows.map((row) => (
+              <div
+                className={`price-alert price-alert-${row.priceAlertLevel}`}
+                key={row.id}
+              >
+                <b>{row.productCode || row.name}</b>
+                <span>{row.priceAlertText}</span>
+                <small>
+                  当前 {row.latestPrice == null ? "—" : `₽${row.latestPrice}`} ·
+                  30 日区间 {row.priceMin30d == null ? "—" : `₽${row.priceMin30d}`}–
+                  {row.priceMax30d == null ? "—" : `₽${row.priceMax30d}`} · 30 日变价 {row.priceChanges30d} 次
+                </small>
+                {row.promotionSuspected && <em className="promotion-suspected">疑似促销（当前价低于 30 日均价 5% 以上）</em>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+      {selected.length > 0 && (
+        <section className="card table-card competitor-compare-matrix">
+          <div className="card-title">已选竞品对比矩阵</div>
+          <table>
+            <thead>
+              <tr>
+                <th>竞品</th>
+                <th>当前价格</th>
+                <th>最近变价</th>
+                <th>30 日最低 / 均价 / 最高</th>
+                <th>日 / 周 / 月销量</th>
+                <th>预警</th>
+                <th>市场信号</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows
+                .filter((row) => selected.includes(row.id))
+                .map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      <b>{row.productCode || "—"}</b>
+                      <small className="product">{row.name}</small>
+                    </td>
+                    <td>{row.latestPrice == null ? "—" : `₽${row.latestPrice}`}</td>
+                    <td
+                      className={
+                        (row.priceChangePercent ?? 0) < 0
+                          ? "price-down"
+                          : (row.priceChangePercent ?? 0) > 0
+                            ? "price-up"
+                            : ""
+                      }
+                    >
+                      {row.priceChangePercent == null
+                        ? "—"
+                        : `${row.priceChangePercent > 0 ? "+" : ""}${row.priceChangePercent.toFixed(1)}%`}
+                      <small>
+                        {row.priceChange == null
+                          ? ""
+                          : `${row.priceChange > 0 ? "+" : ""}₽${row.priceChange.toFixed(0)}`}
+                      </small>
+                    </td>
+                    <td>
+                      {row.priceMin30d == null ? "—" : `₽${row.priceMin30d}`}
+                      {" / "}
+                      {row.priceAvg30d == null ? "—" : `₽${row.priceAvg30d.toFixed(0)}`}
+                      {" / "}
+                      {row.priceMax30d == null ? "—" : `₽${row.priceMax30d}`}
+                    </td>
+                    <td>
+                      {row.dailySales ?? "—"} / {row.weeklySales ?? "—"} /{" "}
+                      {row.monthlySales ?? "—"}
+                    </td>
+                    <td>
+                      <span className={`price-alert-tag ${row.priceAlertLevel}`}>
+                        {row.priceAlertLevel === "critical"
+                          ? "大幅降价"
+                          : row.priceAlertLevel === "warning"
+                            ? "降价关注"
+                            : row.priceAlertLevel === "opportunity"
+                              ? "涨价机会"
+                              : row.priceAlertLevel === "stable"
+                                ? "稳定"
+                                : "数据不足"}
+                      </span>
+                    </td>
+                    <td>
+                      <span>30 日变价 {row.priceChanges30d} 次</span>
+                      {row.promotionSuspected && <small className="promotion-suspected">疑似促销</small>}
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </section>
+      )}
       <div className="competitor-grid">
         {rows.map((row) => (
           <article
@@ -1545,7 +1820,7 @@ export function CompetitorsPage() {
               )}
             </div>
             <h3>{row.name || `Ozon 商品 ${row.productCode}`}</h3>
-            <small>{row.productCode || "等待识别商品编号"}</small>
+            <small>{row.productCode || "等待识别商品编号"}{row.isDemo && <span className="demo-data-tag">演示数据</span>}</small>
             <div
               className={`competitor-status status-${row.latestStatus || "pending"}`}
             >
@@ -1576,6 +1851,19 @@ export function CompetitorsPage() {
                     ? "—"
                     : `₽${row.latestPrice.toLocaleString()}`}
                 </b>
+                <small
+                  className={
+                    (row.priceChangePercent ?? 0) < 0
+                      ? "price-down"
+                      : (row.priceChangePercent ?? 0) > 0
+                        ? "price-up"
+                        : ""
+                  }
+                >
+                  {row.priceChangePercent == null
+                    ? "等待变价"
+                    : `${row.priceChangePercent > 0 ? "+" : ""}${row.priceChangePercent.toFixed(1)}%`}
+                </small>
               </span>
               <span>
                 日销量<b>{row.dailySales ?? "—"}</b>
@@ -1587,45 +1875,99 @@ export function CompetitorsPage() {
                 月销量<b>{row.monthlySales ?? "—"}</b>
               </span>
             </div>
+            <div className={`card-price-alert ${row.priceAlertLevel}`}>
+              {row.priceAlertText}
+            </div>
+            <div className="competitor-market-signals">
+              <span>30 日变价 {row.priceChanges30d} 次</span>
+              {row.promotionSuspected && <span className="promotion-suspected">疑似促销</span>}
+            </div>
             <div className="competitor-manual-sales">
-              <input
-                type="number"
-                min="0"
-                value={manualSales[row.id] ?? ""}
-                placeholder="手填当前累计销量"
-                onChange={(e) =>
-                  setManualSales((old) => ({
-                    ...old,
-                    [row.id]: e.target.value,
-                  }))
-                }
-              />
+              {(["daily", "weekly", "monthly"] as const).map((period) => (
+                <label key={period}>
+                  <span>
+                    {period === "daily"
+                      ? "日销量"
+                      : period === "weekly"
+                        ? "周销量"
+                        : "月销量"}
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    value={manualSales[row.id]?.[period] ?? ""}
+                    placeholder={
+                      period === "daily"
+                        ? String(row.dailySales ?? "")
+                        : period === "weekly"
+                          ? String(row.weeklySales ?? "")
+                          : String(row.monthlySales ?? "")
+                    }
+                    onChange={(e) =>
+                      setManualSales((old) => ({
+                        ...old,
+                        [row.id]: {
+                          daily: old[row.id]?.daily ?? "",
+                          weekly: old[row.id]?.weekly ?? "",
+                          monthly: old[row.id]?.monthly ?? "",
+                          [period]: e.target.value,
+                        },
+                      }))
+                    }
+                  />
+                </label>
+              ))}
               <button
-                disabled={busy || !manualSales[row.id]?.trim()}
+                disabled={
+                  busy ||
+                  !Object.values(manualSales[row.id] ?? {}).some((value) =>
+                    value.trim(),
+                  )
+                }
                 onClick={async () => {
-                  const value = Number(manualSales[row.id]);
-                  if (!Number.isInteger(value) || value < 0) {
-                    setError("累计销量必须是大于或等于 0 的整数");
+                  const draft = manualSales[row.id];
+                  const parse = (value: string | undefined, fallback: number | null) =>
+                    value?.trim() ? Number(value) : fallback;
+                  const daily = parse(draft?.daily, row.dailySales);
+                  const weekly = parse(draft?.weekly, row.weeklySales);
+                  const monthly = parse(draft?.monthly, row.monthlySales);
+                  if (
+                    [daily, weekly, monthly].some(
+                      (value) =>
+                        value != null &&
+                        (!Number.isInteger(value) || value < 0),
+                    )
+                  ) {
+                    setError("日、周、月销量必须是大于或等于 0 的整数");
                     return;
                   }
-                  await setCompetitorManualSales(row.id, value);
-                  setManualSales((old) => ({ ...old, [row.id]: "" }));
+                  await setCompetitorManualMetrics(
+                    row.id,
+                    daily,
+                    weekly,
+                    monthly,
+                  );
+                  setManualSales((old) => {
+                    const next = { ...old };
+                    delete next[row.id];
+                    return next;
+                  });
                   await load();
                 }}
               >
-                保存销量快照
+                保存销量
               </button>
             </div>
             {row.latestNotes && (
               <p className="competitor-notes">{row.latestNotes}</p>
             )}
             <div className="competitor-actions">
-              <button onClick={() => refresh(row.id)} disabled={busy}>
+              <button
+                onClick={() => refresh(row.id)}
+                disabled={busy || collection?.running}
+              >
                 <RefreshCw size={14} />
-                采集快照
-              </button>
-              <button onClick={() => refresh(row.id)} disabled={busy}>
-                自动验证采集
+                重新采集
               </button>
               <button
                 className="remove"
@@ -1650,8 +1992,8 @@ export function CompetitorsPage() {
         <div>
           <h3>销量来源说明</h3>
           <p>
-            日、周、月销量由公开页面累计销量快照之差计算。若 Ozon
-            页面不公开累计销量，软件显示“—”，不会使用 AI 猜测。
+            趋势图提供日销量、周销量和月销量切换，数值由相应周期内公开累计销量快照之差计算，但不会直接展示累计销量。
+            若 Ozon 页面不公开累计销量，软件显示“—”，不会使用 AI 猜测。带“演示数据”标记的内容可以一键删除。
           </p>
         </div>
       </section>
@@ -1682,6 +2024,11 @@ export function ReportsPage({
     [crossData, setCrossData] = useState<CrossBorderReport | null>(null),
     [breakdown, setBreakdown] = useState<FinanceBreakdownRow[]>([]),
     [missingRows, setMissingRows] = useState<MissingCostRow[]>([]),
+    [metricDetail, setMetricDetail] = useState<{
+      title: string;
+      source: string;
+      rows: Array<{ label: string; value: string; note: string }>;
+    } | null>(null),
     [editingMissingCost, setEditingMissingCost] =
       useState<MissingCostRow | null>(null),
     [detailFilter, setDetailFilter] = useState(""),
@@ -1788,6 +2135,7 @@ export function ReportsPage({
     setMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
   };
   const openBreakdown = async (filter = "") => {
+    setMetricDetail(null);
     setDetailFilter(filter);
     setBusy("detail");
     try {
@@ -1795,6 +2143,19 @@ export function ReportsPage({
     } finally {
       setBusy("");
     }
+  };
+  const openMetric = (
+    title: string,
+    source: string,
+    rows: Array<[string, string, string]>,
+  ) => {
+    setBreakdown([]);
+    setDetailFilter("");
+    setMetricDetail({
+      title,
+      source,
+      rows: rows.map(([label, value, note]) => ({ label, value, note })),
+    });
   };
   const openMissingCosts = async () => {
     setBusy("missing-cost");
@@ -1970,7 +2331,34 @@ export function ReportsPage({
       {tab === "summary" && data && (
         <>
           <div className="report-hero">
-            <div>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() =>
+                openMetric("税前利润", "Finance 结算与已交付成本", [
+                  [
+                    "Finance 已结算净额",
+                    m(data.financeNet),
+                    "Finance amount 汇总",
+                  ],
+                  [
+                    "减：采购成本",
+                    m(-data.purchaseCost),
+                    `${data.costedUnits} 件已核算，${data.missingCostUnits} 件缺成本`,
+                  ],
+                  ["减：头程成本", m(-data.firstMileCost), "按已交付件数核算"],
+                  [
+                    "税前利润",
+                    data.settledProfit == null
+                      ? "成本未完整"
+                      : m(data.settledProfit),
+                    data.missingCostUnits
+                      ? `仍有 ${data.missingCostUnits} 件、${data.missingCostSkus} 个 SKU 缺成本`
+                      : "成本完整",
+                  ],
+                ])
+              }
+            >
               <span>税前利润</span>
               <strong
                 className={
@@ -1985,12 +2373,64 @@ export function ReportsPage({
               </strong>
               <small>Finance 净额 − 已交付商品采购成本 − 已交付商品头程</small>
             </div>
-            <div>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() =>
+                openMetric("Finance 已结算净额", "Ozon Finance API", [
+                  ["销售/退货应计", m(data.salesReturns), "accruals_for_sale"],
+                  [
+                    "应计费用",
+                    m(data.accrualFees),
+                    "佣金、物流、广告及其他服务",
+                  ],
+                  [
+                    "其他收入/调整",
+                    m(data.otherAdjustments),
+                    "Cash Flow others",
+                  ],
+                  [
+                    "合计",
+                    m(data.financeNet),
+                    `${data.financeOperations} 笔 Finance 记录`,
+                  ],
+                ])
+              }
+            >
               <span>Finance 已结算净额</span>
               <strong>{m(data.financeNet)}</strong>
               <small>用于与经营预估对账</small>
             </div>
-            <div>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() =>
+                openMetric("税后利润", "本地税费设置", [
+                  [
+                    "税前利润",
+                    data.settledProfit == null
+                      ? "成本未完整"
+                      : m(data.settledProfit),
+                    "成本完整后才计算",
+                  ],
+                  [
+                    `税额（${data.taxRate}%）`,
+                    m(data.taxAmount),
+                    "按销售额计算",
+                  ],
+                  [
+                    `提现手续费（${data.payoutFeeRate}%）`,
+                    m(data.payoutFee),
+                    "按 Finance 净额计算",
+                  ],
+                  [
+                    "税后利润",
+                    data.afterTaxProfit == null ? "—" : m(data.afterTaxProfit),
+                    "税前利润 + 税额 + 提现费",
+                  ],
+                ])
+              }
+            >
               <span>税后利润</span>
               <strong>
                 {data.afterTaxProfit == null ? "—" : m(data.afterTaxProfit)}
@@ -2006,46 +2446,175 @@ export function ReportsPage({
           </section>
           <section className="card report-breakdown">
             <h3>
-              期间构成 <small>点击 Finance 指标查看明细</small>
+              期间构成 <small>点击任意指标查看明细与数据口径</small>
             </h3>
             <div>
-              <span>
+              <button
+                onClick={() =>
+                  openMetric(
+                    "销售额（下单口径）",
+                    "Seller Analytics",
+                    data.daily.map(
+                      (x) =>
+                        [x.day, m(x.revenue), `${x.orders} 件`] as [
+                          string,
+                          string,
+                          string,
+                        ],
+                    ),
+                  )
+                }
+              >
                 销售额（下单口径）<b>{m(data.revenue)}</b>
-              </span>
-              <span>
+              </button>
+              <button
+                onClick={() =>
+                  openMetric(
+                    "订单量",
+                    "Seller Analytics",
+                    data.daily.map(
+                      (x) =>
+                        [x.day, `${x.orders} 件`, m(x.revenue)] as [
+                          string,
+                          string,
+                          string,
+                        ],
+                    ),
+                  )
+                }
+              >
                 订单量<b>{data.orders}</b>
-              </span>
-              <span>
+              </button>
+              <button
+                onClick={() =>
+                  openMetric("销售/退货应计", "Ozon Finance API", [
+                    [
+                      "应计金额",
+                      m(data.salesReturns),
+                      "accruals_for_sale 汇总",
+                    ],
+                    [
+                      "Finance 记录",
+                      `${data.financeOperations} 笔`,
+                      "当前月份",
+                    ],
+                  ])
+                }
+              >
                 销售/退货应计<b>{m(data.salesReturns)}</b>
-              </span>
-              <span>
+              </button>
+              <button
+                onClick={() =>
+                  openMetric("应计费用", "Ozon Finance API", [
+                    ["Finance 净额", m(data.financeNet), "amount 汇总"],
+                    [
+                      "减：销售/退货应计",
+                      m(-data.salesReturns),
+                      "accruals_for_sale",
+                    ],
+                    [
+                      "减：其他收入/调整",
+                      m(-data.otherAdjustments),
+                      "Cash Flow others",
+                    ],
+                    ["应计费用", m(data.accrualFees), "差额核算"],
+                  ])
+                }
+              >
                 应计费用<b>{m(data.accrualFees)}</b>
-              </span>
-              <span>
+              </button>
+              <button
+                onClick={() =>
+                  openMetric("其他收入/调整", "Ozon Cash Flow API", [
+                    [
+                      "其他收入/调整",
+                      m(data.otherAdjustments),
+                      "others.total 或 others.items 汇总",
+                    ],
+                  ])
+                }
+              >
                 其他收入/调整<b>{m(data.otherAdjustments)}</b>
-              </span>
-              <span>
+              </button>
+              <button
+                onClick={() =>
+                  openMetric(
+                    "Performance 广告",
+                    "Ozon Performance API",
+                    data.daily.map(
+                      (x) =>
+                        [x.day, m(x.adSpend), "日广告花费"] as [
+                          string,
+                          string,
+                          string,
+                        ],
+                    ),
+                  )
+                }
+              >
                 Performance 广告<b>{m(data.adSpend)}</b>
-              </span>
+              </button>
               <button onClick={() => openBreakdown("advertising")}>
                 Finance 广告应计<b>{m(data.financeAdvertising)}</b>
               </button>
-              <span className={data.missingCostSkus ? "missing-cost" : ""}>
+              <button
+                className={data.missingCostSkus ? "missing-cost" : ""}
+                onClick={() =>
+                  openMetric("采购成本", "已交付件数 × SKU 单位采购成本", [
+                    [
+                      "已核算件数",
+                      `${data.costedUnits} 件`,
+                      "Posting 交付事件优先，Finance 已交付记录兜底",
+                    ],
+                    [
+                      "缺成本件数",
+                      `${data.missingCostUnits} 件`,
+                      `${data.missingCostSkus} 个 SKU`,
+                    ],
+                    [
+                      "采购成本",
+                      m(data.purchaseCost),
+                      "仅汇总成本资料完整的已交付商品",
+                    ],
+                  ])
+                }
+              >
                 采购成本
                 <b>
                   {data.missingCostSkus
                     ? `缺 ${data.missingCostSkus} 个 SKU`
                     : m(data.purchaseCost)}
                 </b>
-              </span>
-              <span className={data.missingCostSkus ? "missing-cost" : ""}>
+              </button>
+              <button
+                className={data.missingCostSkus ? "missing-cost" : ""}
+                onClick={() =>
+                  openMetric("头程成本", "已交付件数 × SKU 单件头程", [
+                    [
+                      "已核算件数",
+                      `${data.costedUnits} 件`,
+                      "与采购成本使用相同交付口径",
+                    ],
+                    [
+                      "缺成本件数",
+                      `${data.missingCostUnits} 件`,
+                      `${data.missingCostSkus} 个 SKU`,
+                    ],
+                    [
+                      "头程成本",
+                      m(data.firstMileCost),
+                      "仅汇总成本资料完整的已交付商品",
+                    ],
+                  ])
+                }
+              >
                 头程成本
                 <b>
                   {data.missingCostSkus
                     ? "成本资料未完整"
                     : m(data.firstMileCost)}
                 </b>
-              </span>
+              </button>
               <button onClick={() => openBreakdown("commission")}>
                 平台佣金<b>{m(data.commission)}</b>
               </button>
@@ -2067,36 +2636,128 @@ export function ReportsPage({
               <button onClick={() => openBreakdown("other")}>
                 其他 Finance 项目<b>{m(data.otherFinanceFees)}</b>
               </button>
-              <span>
+              <button
+                onClick={() =>
+                  openMetric("税额", "本地税费设置", [
+                    ["计税销售额", m(data.revenue), "Seller 下单销售额"],
+                    ["税率", `${data.taxRate}%`, "连接设置中的本地税率"],
+                    ["税额", m(data.taxAmount), "计税销售额 × 税率"],
+                  ])
+                }
+              >
                 税额<b>{m(data.taxAmount)}</b>
-              </span>
-              <span>
+              </button>
+              <button
+                onClick={() =>
+                  openMetric("提现手续费", "本地税费设置", [
+                    ["Finance 净额", m(data.financeNet), "仅正数作为计费基数"],
+                    ["费率", `${data.payoutFeeRate}%`, "连接设置中的提现费率"],
+                    ["提现手续费", m(data.payoutFee), "Finance 净额 × 费率"],
+                  ])
+                }
+              >
                 提现手续费<b>{m(data.payoutFee)}</b>
-              </span>
+              </button>
               <button onClick={() => openBreakdown()}>
                 全部 Finance 明细<b>{data.financeOperations} 笔</b>
               </button>
-              <span>
+              <button
+                onClick={() =>
+                  openMetric("精确归属 SKU", "Ozon Finance API items[]", [
+                    [
+                      "精确归属",
+                      `${data.exactSkuOperations} 笔`,
+                      "一笔 Finance 操作只包含一个 SKU",
+                    ],
+                    [
+                      "全部 Finance",
+                      `${data.financeOperations} 笔`,
+                      "当前月份",
+                    ],
+                  ])
+                }
+              >
                 精确归属 SKU<b>{data.exactSkuOperations} 笔</b>
-              </span>
-              <span>
+              </button>
+              <button
+                onClick={() =>
+                  openMetric("未分摊 Finance", "Ozon Finance API items[]", [
+                    [
+                      "未分摊记录",
+                      `${data.unallocatedOperations} 笔`,
+                      "无 SKU 或一笔包含多个 SKU",
+                    ],
+                    [
+                      "未分摊金额",
+                      m(data.unallocatedFinanceAmount),
+                      "保留在店铺级损益，不猜测分摊",
+                    ],
+                  ])
+                }
+              >
                 未分摊 Finance
                 <b>
                   {data.unallocatedOperations} 笔 ·{" "}
                   {m(data.unallocatedFinanceAmount)}
                 </b>
-              </span>
-              <span>
+              </button>
+              <button
+                onClick={() =>
+                  openMetric(
+                    "Cash Flow 对账差额",
+                    "Ozon Finance / Cash Flow API",
+                    [
+                      [
+                        "Cash Flow 汇总",
+                        m(data.cashFlowReportedTotal),
+                        "orders + returns + commission + delivery/return + services",
+                      ],
+                      [
+                        "Finance 净额",
+                        m(data.financeNet),
+                        "Finance amount 汇总",
+                      ],
+                      [
+                        "对账差额",
+                        data.reconciliationDifference == null
+                          ? "无汇总缓存"
+                          : m(data.reconciliationDifference),
+                        "Cash Flow 汇总 − Finance 净额",
+                      ],
+                    ],
+                  )
+                }
+              >
                 Cash Flow 对账差额
                 <b>
                   {data.reconciliationDifference == null
                     ? "无汇总缓存"
                     : m(data.reconciliationDifference)}
                 </b>
-              </span>
-              <span>
+              </button>
+              <button
+                onClick={() =>
+                  openMetric("已核算销量", "交付事件与 SKU 成本表", [
+                    [
+                      "成本完整",
+                      `${data.costedUnits} 件`,
+                      "采购成本与头程成本均存在",
+                    ],
+                    [
+                      "成本缺失",
+                      `${data.missingCostUnits} 件`,
+                      `${data.missingCostSkus} 个 SKU`,
+                    ],
+                    [
+                      "交付总量",
+                      `${data.costedUnits + data.missingCostUnits} 件`,
+                      "当前月份成本核算口径",
+                    ],
+                  ])
+                }
+              >
                 已核算销量<b>{data.costedUnits} 件</b>
-              </span>
+              </button>
               <button
                 onClick={openMissingCosts}
                 disabled={!data.missingCostSkus}
@@ -2110,6 +2771,35 @@ export function ReportsPage({
               广告已包含在应计费用中，不会重复扣除。
             </p>
           </section>
+          {metricDetail && (
+            <section className="card table-card finance-detail">
+              <div className="card-title">
+                {metricDetail.title} 明细
+                <button onClick={() => setMetricDetail(null)}>关闭</button>
+              </div>
+              <p className="metric-detail-source">
+                数据来源：{metricDetail.source}
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>项目 / 日期</th>
+                    <th>数值</th>
+                    <th>口径说明</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {metricDetail.rows.map((row, index) => (
+                    <tr key={`${row.label}-${index}`}>
+                      <td>{row.label}</td>
+                      <td>{row.value}</td>
+                      <td>{row.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
           {(busy === "detail" || breakdown.length > 0) && (
             <section className="card table-card finance-detail">
               <div className="card-title">
@@ -2968,6 +3658,37 @@ export function SyncPage({ range }: { range: DateRange }) {
       setBusy("");
     }
   };
+  const syncAll = async () => {
+    if (!rangeValid) {
+      setMessage("请选择有效的同步日期，结束日期不能早于开始日期或晚于今天。");
+      return;
+    }
+    setBusy("all");
+    setMessage("Seller、Performance 和 Finance 已通过三个后台线程同时开始同步…");
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      const result = await syncAllData(syncRange);
+      clearReportCache();
+      const items = [
+        result.sellerError
+          ? `Seller 失败：${result.sellerError}`
+          : `Seller ${result.sellerRows ?? 0} 行`,
+        result.performanceError
+          ? `Performance 失败：${result.performanceError}`
+          : `Performance ${result.performanceRows ?? 0} 行`,
+        result.financeError
+          ? `Finance 失败：${result.financeError}`
+          : `Finance ${result.financeRows ?? 0} 行`,
+      ];
+      setMessage(`并行同步完成：${items.join("；")}`);
+      await load();
+    } catch (e) {
+      setMessage(`并行同步启动失败：${String(e)}`);
+      await load();
+    } finally {
+      setBusy("");
+    }
+  };
   return (
     <>
       <header className="page-header">
@@ -2976,10 +3697,20 @@ export function SyncPage({ range }: { range: DateRange }) {
           <h1>数据同步</h1>
           <p>API 数据写入当前店铺独立数据库，关闭软件后仍会保留</p>
         </div>
-        <button className="dark-button" onClick={load}>
-          <RefreshCw size={16} />
-          刷新状态
-        </button>
+        <div className="sync-header-actions">
+          <button
+            className="sync-all-button"
+            disabled={!!busy || !rangeValid}
+            onClick={() => void syncAll()}
+          >
+            <RefreshCw className={busy === "all" ? "spin" : ""} size={16} />
+            {busy === "all" ? "三线程同步中" : "同步所有数据"}
+          </button>
+          <button className="dark-button" disabled={!!busy} onClick={load}>
+            <RefreshCw size={16} />
+            刷新状态
+          </button>
+        </div>
       </header>
       <div className="month-toolbar sync-range-toolbar">
         <b>同步日期</b>
@@ -3064,7 +3795,7 @@ export function SyncPage({ range }: { range: DateRange }) {
             disabled={!!busy || !rangeValid}
             onClick={seller}
           >
-            {busy === "seller" ? "同步中" : "立即同步"}
+            {busy === "seller" || busy === "all" ? "同步中" : "立即同步"}
           </button>
         </section>
         <section className="card">
@@ -3081,7 +3812,7 @@ export function SyncPage({ range }: { range: DateRange }) {
             disabled={!!busy || !rangeValid}
             onClick={() => run("performance")}
           >
-            {busy === "performance" ? "同步中" : "立即同步"}
+            {busy === "performance" || busy === "all" ? "同步中" : "立即同步"}
           </button>
         </section>
         <section className="card">
@@ -3098,7 +3829,7 @@ export function SyncPage({ range }: { range: DateRange }) {
             disabled={!!busy || !rangeValid}
             onClick={() => run("finance")}
           >
-            {busy === "finance" ? "同步中" : "立即同步"}
+            {busy === "finance" || busy === "all" ? "同步中" : "立即同步"}
           </button>
         </section>
       </div>

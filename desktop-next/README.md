@@ -12,4 +12,6 @@ Tauri + React + Rust 桌面客户端，直接复用旧版 `data/shops.json` 和�
 
 `src-tauri\target\release\ozon-analytics-next.exe`
 
+生成正式 Windows 安装包可双击 `scripts\build-tauri-package.cmd`，NSIS 安装包位于 `src-tauri\target\release\bundle\nsis`。
+
 开发模式可运行 `scripts\dev-tauri.cmd`；仅执行浏览器预览只会看到模拟数据，真实本地数据库仅在桌面窗口读取。

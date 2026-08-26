@@ -1,6 +1,6 @@
 [package]
 name = "ozon-analytics-next"
-version = "0.1.0"
+version = "1.0.0"
 description = "Ozon Analytics modern desktop client"
 edition = "2021"
 

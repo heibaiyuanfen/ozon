@@ -1,0 +1,50 @@
+import { useEffect, useMemo, useState } from "react";
+import { AlertTriangle, CheckCircle2, RefreshCw, Save, ShieldCheck, Truck } from "lucide-react";
+import { crossBorderReport, inventory } from "./bridge";
+import type { CrossBorderReport, DateRange, InventoryRow } from "./types";
+import "./cross-border-operations.css";
+
+type Plan = { businessStage: string; monthlyBudget: string; teamCapacity: string; compliance: string; trademark: boolean; russianContent: boolean; returnPlan: boolean; customsPartner: boolean; fxBuffer: string; targetMargin: string };
+const initialPlan: Plan = { businessStage: "test", monthlyBudget: "", teamCapacity: "", compliance: "", trademark: false, russianContent: false, returnPlan: false, customsPartner: false, fxBuffer: "8", targetMargin: "20" };
+const cny = (value: number | null) => value == null ? "—" : `¥${value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`;
+
+export function CrossBorderOperationsPage({ range, shopName, enabled }: { range: DateRange; shopName: string; enabled: boolean }) {
+  const [report, setReport] = useState<CrossBorderReport | null>(null), [stocks, setStocks] = useState<InventoryRow[]>([]), [loading, setLoading] = useState(false), [saved, setSaved] = useState(false);
+  const [plan, setPlan] = useState<Plan>(() => { try { return JSON.parse(localStorage.getItem("ozon-russia-cross-border-plan") || "null") || initialPlan; } catch { return initialPlan; } });
+  const load = async () => { if (!enabled) return; setLoading(true); try { const [nextReport, nextStocks] = await Promise.all([crossBorderReport(range), inventory("", 45, 21, 7)]); setReport(nextReport); setStocks(nextStocks); } finally { setLoading(false); } };
+  useEffect(() => { setReport(null); setStocks([]); void load(); }, [range.from, range.to, enabled]);
+  const metrics = useMemo(() => {
+    const margin = report?.profitCny != null && report.revenueCny > 0 ? report.profitCny / report.revenueCny * 100 : null;
+    const fulfillmentTotal = report ? report.fbpOrders + report.rfbsOrders + report.whdOrders : 0;
+    const localShare = fulfillmentTotal && report ? report.fbpOrders / fulfillmentTotal * 100 : null;
+    const risky = stocks.filter((x) => ["stockout", "critical", "warning"].includes(x.healthStatus)).length;
+    const overstock = stocks.filter((x) => x.healthStatus === "overstock" || x.healthStatus === "slow").length;
+    const checklist = [report?.revenueCny ? 1 : 0, margin != null && margin > 0 ? 1 : 0, report?.missingCostSkus === 0 ? 1 : 0, stocks.length && risky === 0 ? 1 : 0, plan.russianContent ? 1 : 0, plan.customsPartner ? 1 : 0, plan.returnPlan ? 1 : 0, plan.trademark ? 1 : 0];
+    const readiness = Math.round(checklist.reduce((a, b) => a + b, 0) / checklist.length * 100);
+    const landed = report && report.units ? { selling: report.revenueCny / report.units, ads: report.adSpendCny / report.units, platform: report.estimatedPlatformFeesCny / report.units, purchaseFreight: report.purchaseAndFreightCny / report.units, profit: report.profitCny == null ? null : report.profitCny / report.units } : null;
+    return { margin, localShare, risky, overstock, readiness, landed };
+  }, [report, stocks, plan]);
+  const phase = !report?.units ? 1 : report.units < 50 ? 2 : report.units < 200 ? 3 : 4;
+  const save = () => { localStorage.setItem("ozon-russia-cross-border-plan", JSON.stringify(plan)); setSaved(true); window.setTimeout(() => setSaved(false), 1600); };
+  if (!enabled) return <section className="card cross-disabled"><Truck size={34}/><h1>Ozon 俄罗斯跨境经营</h1><p>该模块只读取跨境店铺的人民币成本、卢布销售、履约和库存数据。请先从左侧店铺选择器切换到跨境店。</p></section>;
+  return <div className="cross-ops-page">
+    <header className="page-header"><div><span className="eyebrow">OZON RUSSIA CROSS-BORDER</span><h1>Ozon 俄罗斯跨境经营</h1><p>{shopName} · 经营准备、落地成本、履约、合规和扩张路线图</p></div><div className="cross-header-actions"><button onClick={save}>{saved ? <CheckCircle2 size={16}/> : <Save size={16}/>} {saved ? "已保存" : "保存经营计划"}</button><button className="dark-button" onClick={()=>void load()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16}/>{loading ? "读取中" : "刷新真实数据"}</button></div></header>
+    <section className="cross-warning"><AlertTriangle size={17}/><span>税务、清关、认证和平台政策会变化；本页用于经营检查，最终申报与合规决策须以 Ozon、俄罗斯官方机构及专业顾问的最新要求为准。</span></section>
+    <div className="cross-kpis">
+      <div><span>跨境经营准备度</span><strong>{metrics.readiness}%</strong><small>真实数据 + 人工检查项</small></div><div><span>区间销售额</span><strong>{cny(report?.revenueCny ?? 0)}</strong><small>{report?.units ?? 0} 件</small></div><div><span>预估贡献利润率</span><strong>{metrics.margin == null ? "—" : `${metrics.margin.toFixed(1)}%`}</strong><small>{report?.missingCostSkus ? `缺 ${report.missingCostSkus} 个 SKU 成本` : "成本字段已覆盖"}</small></div><div><span>俄罗斯本地履约占比</span><strong>{metrics.localShare == null ? "—" : `${metrics.localShare.toFixed(1)}%`}</strong><small>按 FBP 订单占比</small></div><div><span>库存风险 SKU</span><strong>{metrics.risky}</strong><small>另有 {metrics.overstock} 个积压/慢销</small></div><div><span>当前阶段</span><strong>阶段 {phase}</strong><small>{["", "研究准备", "小批量测试", "规模增长", "优化扩张"][phase]}</small></div>
+    </div>
+    <div className="cross-main-grid">
+      <section className="card readiness-card"><div className="card-title">经营准备度检查</div><div className="readiness-list">
+        {[["已有俄罗斯市场真实销售", Boolean(report?.revenueCny), "来自当前店铺跨境利润缓存"], ["贡献利润为正", metrics.margin != null && metrics.margin > 0, metrics.margin == null ? "成本或费率不完整" : `当前 ${metrics.margin.toFixed(1)}%`], ["商品成本完整", report?.missingCostSkus === 0, `缺 ${report?.missingCostSkus ?? 0} 个 SKU`], ["库存无紧急风险", stocks.length > 0 && metrics.risky === 0, `${metrics.risky} 个风险 SKU`]].map(([label, ok, note])=><div key={String(label)} className={ok ? "ok" : "pending"}>{ok ? <CheckCircle2 size={17}/> : <AlertTriangle size={17}/>}<span><b>{label}</b><small>{note}</small></span></div>)}
+        {[["russianContent","俄语商品页与客服"],["customsPartner","清关/物流责任人"],["returnPlan","俄罗斯退货处理方案"],["trademark","商标与知识产权检查"]] .map(([key,label])=><label key={key}><input type="checkbox" checked={Boolean(plan[key as keyof Plan])} onChange={(e)=>setPlan({...plan,[key]:e.target.checked})}/><span><b>{label}</b><small>人工确认，需保留证明材料</small></span></label>)}
+      </div></section>
+      <section className="card plan-input-card"><div className="card-title">经营假设与风险缓冲 <span className="badge blue">人工输入</span></div><label>业务阶段<select value={plan.businessStage} onChange={(e)=>setPlan({...plan,businessStage:e.target.value})}><option value="test">测试期</option><option value="grow">增长期</option><option value="scale">规模期</option></select></label><label>每月扩张预算 CNY<input type="number" min="0" value={plan.monthlyBudget} onChange={(e)=>setPlan({...plan,monthlyBudget:e.target.value})}/></label><label>团队可投入能力<textarea value={plan.teamCapacity} onChange={(e)=>setPlan({...plan,teamCapacity:e.target.value})} placeholder="负责人、俄语客服、供应链、财务"/></label><label>合规/认证备注<textarea value={plan.compliance} onChange={(e)=>setPlan({...plan,compliance:e.target.value})} placeholder="EAC、标签、HS 编码、限制品检查等"/></label><div className="double-input"><label>汇率风险缓冲 %<input type="number" min="0" value={plan.fxBuffer} onChange={(e)=>setPlan({...plan,fxBuffer:e.target.value})}/></label><label>目标贡献利润率 %<input type="number" min="0" value={plan.targetMargin} onChange={(e)=>setPlan({...plan,targetMargin:e.target.value})}/></label></div></section>
+    </div>
+    <section className="card landed-card"><div className="card-title">单件落地成本与利润结构 <span className="badge green">当前店铺真实汇总</span></div>{metrics.landed ? <div className="landed-grid"><div><span>平均售价</span><b>{cny(metrics.landed.selling)}</b></div><div><span>采购 + 定价运费</span><b>{cny(metrics.landed.purchaseFreight)}</b></div><div><span>预估平台费</span><b>{cny(metrics.landed.platform)}</b></div><div><span>全店广告/件</span><b>{cny(metrics.landed.ads)}</b></div><div className={metrics.landed.profit != null && metrics.landed.profit >= 0 ? "positive" : "negative"}><span>预估贡献/件</span><b>{cny(metrics.landed.profit)}</b></div></div> : <div className="empty compact">当前区间尚无销量，无法计算单件落地结构。</div>}<p>按当前汇率 1 CNY = {report?.rubPerCny?.toFixed(4) ?? "—"} RUB。建议在定价中保留至少 {plan.fxBuffer || 0}% 汇率缓冲，并与目标贡献利润率 {plan.targetMargin || 0}% 对照。</p></section>
+    <div className="cross-main-grid">
+      <section className="card fulfillment-card"><div className="card-title">Ozon 履约结构与建议</div><div className="fulfillment-bars">{[["FBP / 平台仓",report?.fbpOrders ?? 0],["FBS / 卖家仓",report?.rfbsOrders ?? 0],["WHD / 其他履约",report?.whdOrders ?? 0]].map(([label,value])=>{const total=(report?.fbpOrders??0)+(report?.rfbsOrders??0)+(report?.whdOrders??0);return <div key={String(label)}><span>{label}</span><i><em style={{width:`${total ? Number(value)/total*100 : 0}%`}}/></i><b>{value}</b></div>})}</div><div className="cross-recommendation"><b>当前建议</b><p>{phase <= 2 ? "测试期优先小批量和可追踪线路，先验证真实签收时效、清关异常、退款与退货成本，再扩大海外仓库存。" : metrics.localShare != null && metrics.localShare < 50 ? "销量进入增长期，但本地履约占比较低。评估将稳定 SKU 分批转入 FBP，避免一次性压货。" : "本地履约已形成基础，按 SKU 周转和贡献利润优化补货，不以销售额单独决定扩仓。"}</p></div></section>
+      <section className="card compliance-card"><div className="card-title">俄罗斯经营控制清单</div>{[["商品准入","核实类目限制、认证、标签和俄语说明"],["海关资料","确认 HS 编码、申报要素、原产地和商业发票"],["税务责任","确认店铺主体、平台代扣及自身申报责任"],["消费者权益","展示俄语退换规则、质保和客服渠道"],["数据与知识产权","检查商标、图片、文案授权及个人数据要求"],["资金与汇率","核对卢布回款、换汇费用、结算周期和资金冻结风险"]].map(([title,text])=><div key={title}><ShieldCheck size={16}/><span><b>{title}</b><small>{text}</small></span></div>)}</section>
+    </div>
+    <section className="card roadmap-card"><div className="card-title">分阶段经营路线图</div><div className="roadmap">{[[1,"研究准备","补齐成本、认证、俄语内容、清关与退货方案","资料完整，首批 SKU 可发运"],[2,"小批量测试","选择少量 SKU，记录签收时效、异常和真实单件利润","完成首批 50 单并确认真实履约成本"],[3,"规模增长","稳定 SKU 转向本地履约，扩大广告和安全库存","月订单达到 200+ 且贡献利润为正"],[4,"优化扩张","优化仓网、汇率、退货与商品组合","经营自循环，可复制到更多 SKU"]].map(([n,title,action,milestone])=><div className={phase===n?"active":""} key={String(n)}><i>{n}</i><b>{title}</b><p>{action}</p><small>里程碑：{milestone}</small></div>)}</div></section>
+  </div>;
+}

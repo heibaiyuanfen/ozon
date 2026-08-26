@@ -523,7 +523,56 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 本轮实测：普通 Edge/Chrome 已能够自动打开商品 `2578856473` 的真实 Ozon 页面，页面显示售价 `1666₽` 和主图；独立 Python 源码第一次运行遇到页面导航导致执行上下文销毁，已增加导航期间重试。随后一次测试被任务中断，尚未取得“Python JSON 成功 → Rust 写入 SQLite”的完整证据。
 - 当前状态：**未完成、可继续**。GitHub 本次提交是明确的迁移检查点，不代表竞品采集已验收成功。
 - 下一步：重新打包最新 `competitor-collector.exe`，单独运行确认返回 `ok=true/name/price/image`；再构建 Tauri Release，执行 ERP 单任务采集并查询 `competitor_snapshots`；成功后补充截图、EXE 哈希和最终验收记录。
+
+### 2026-08-26：复用旧版“跟卖模式”商品采集逻辑
+
+- 已核实外部旧源码：跟卖自动任务第 1 阶段调用 `scrape_reference`；直连缺少完整图库时自动进入 `scrape_reference_browser`，使用持久化 Edge/Chrome 会话等待验证页结束，并校验最终 URL 的 Артикул，防止采集到错误变体。
+- `competitor_collector.py` 已复用旧版的固定左侧缩略图轨道识别、中央预览图排除、`wc2000` 高清地址转换、图库 URL 去重、页面水合及稳定轮询；同时保留竞品模块的可见售价读取和销量空值纪律。
+- Python 采集器现在返回主图、完整图库、图库识别模式和来源；Rust 桥接将这些字段写入采集证据，并继续把主图、售价交给 `competitor_products` / `competitor_snapshots`。
+- 新增 `scripts/build-competitor-collector.ps1`，用隔离 Python 3.12 打包采集器，并在 Release 目录存在时自动复制到主程序旁。
+- 本节点的静态迁移和采集器打包已完成；仍需使用真实 Ozon 商品执行 ERP 单任务采集，并查询 SQLite 快照完成线上页面验收。
+
+### 2026-08-26：月度盈亏采购成本口径复核
+
+- 2026 年 7 月当前缓存有 6,718 件下单量，但 `delivery_events` 与 Seller Analytics 的妥投字段均为空；旧实现静默回退到全部下单量，按 `采购成本 CNY × 14 RUB/CNY × 6,718 件` 核算，得到截图中的 ₽2,134,538.56。
+- Finance 中同期有 5,902 笔可精确归属 SKU 的 `OperationAgentDeliveredToCustomer`。按相同成本重算为 ₽1,866,705.96；旧口径多计 ₽267,832.60。
+- 新版月度盈亏的成本件数优先级改为：Posting 交付事件 → Finance 已交付流水 → 0，不再把取消、退货或尚未履约的全部下单件数直接计入采购成本，并提升缓存指纹版本使旧报表缓存自动失效。旧 Python 的日常经营预估仍按下单量估算，避免把“经营预估”和“已结算盈亏”错误合并。
+
+### 2026-08-26：新旧版本数据库彻底隔离
+
+- 问题确认：新版原 `locate_data_dir` 会沿 EXE 祖先目录查找 `data/shops.json`，因此与旧 Python 共用 `data/ozon_analytics.db`，存在运行时串库风险。
+- 新版唯一数据根目录改为 `data-next/`；默认本土店使用 `ozon_next_default.db`，其他店铺使用 `shops/shop_next_<店铺ID>.db`。WB、浏览器会话、竞品和上品运行数据也全部落在新版根目录下。
+- 首次启动若只有旧 `data/`，使用 SQLite `VACUUM INTO` 建立一致性快照，只迁移一次；新注册表写入完成后，后续启动只识别带 `database-generation.json` 的 `data-next/`，不再打开旧数据库。
+- 一次性迁移保留 API 配置、成本资料和历史业务数据，但清空月度报表缓存、分析缓存和同步断点，防止继承旧版计算结果。旧数据库不删除、不覆盖，可作为只读回退备份。
+- Rust Release 已使用项目 `.cargo/config.toml` 的 rsproxy 稀疏镜像离线缓存完成构建；竞品采集测试 4/4 通过。首次直接执行 `cargo build --release` 会遗漏 Tauri 的 `beforeBuildCommand`，导致 EXE 仍访问 `localhost:1420`；已改用唯一正确入口 `desktop-next/scripts/build-tauri-release.cmd`，先生成 Vite `dist` 再嵌入静态资源。修复后 `ozon-analytics-next.exe` SHA-256 为 `795844FA5F4D557389FDF35BFCF839C8F3C25BE8052C245EACB3DE5491BDA217`，配套 `competitor-collector.exe` SHA-256 为 `3541ABB3F99059A6A9BD5316CA74CA6D71698411A72AC48FB1DDEBE064F6C728`。
+- Release 启动验收：生产构建已嵌入 `index-Bj_BlHo2.js`、`react-vendor-B1co94AF.js` 等资源；错误进程已关闭，交付 EXE 保留在 `desktop-next/src-tauri/target/release/`。
 - 相关文件：`competitor_collector.py`、`desktop-next/src-tauri/src/lib.rs`、竞品任务/进度前端文件及本 Markdown。
+
+### 2026-08-26：月度盈亏成本完整性与全卡片明细
+
+- 根因：2026-07 的已交付成本口径中有 2 件商品缺少头程成本，分别属于 SKU `2914266239` 和 `3450387569`；税前利润因此显示“成本未完整”。原“缺成本 SKU”卡片却仍按下单销量查询，错误显示为 0，造成同一页面口径矛盾。
+- 数据口径修复：月报、缺成本 SKU 数量和缺成本明细统一使用“Posting 已交付事件优先、Finance `OperationAgentDeliveredToCustomer` 兜底”的已交付件数。7 月应显示缺成本 2 件、2 个 SKU；补齐两项头程成本后，税前及税后利润自动恢复计算。
+- 交互变化：月度盈亏顶部税前利润、Finance 净额、税后利润以及“期间构成”的全部汇总卡均可点击。Finance 分类继续展示逐项 API/服务明细；销售、订单、广告展示逐日明细；成本、税费、利润、归属和对账卡展示计算组成、数据来源与口径说明。
+- 缓存：报表指纹提升为 `finance-v5-consistent-missing-cost`，旧的矛盾缓存会自动失效，无需删除业务数据。
+- 修改模块/文件：`desktop-next/src-tauri/src/lib.rs`、`desktop-next/src/OperationsPages.tsx`、本 Markdown。
+- 验证：TypeScript/Vite 正式构建通过；Rust `cargo check --offline` 通过。SQLite 对 2026-07 的同口径复核结果为缺成本 2 件 / 2 个 SKU。
+
+### 2026-08-26：竞品采集器 Windows 输出编码修复
+
+- 错误现象：竞品任务进入 `incomplete`，提示 `stream did not contain valid UTF-8`；失败发生在 Rust 读取采集器标准输出阶段，尚未进入商品链接、价格或图片校验。
+- 根因：PyInstaller 采集器继承 Windows 控制台代码页，`ensure_ascii=False` 输出的商品名称或错误信息可能成为本地编码字节，而 Rust `read_to_string` 要求严格 UTF-8。
+- 修复：采集器 IPC 改为 ASCII-only JSON（Unicode 使用 JSON 转义，解析后内容不丢失）；Rust 改为字节读取、兼容旧采集器的有损解码，并从输出中提取 JSON 对象，因此升级过程中旧、新 sidecar 都不会再触发 UTF-8 边界错误。
+- 修改模块/文件：`competitor_collector.py`、`desktop-next/src-tauri/src/lib.rs`、本 Markdown。
+- 验证：采集器单元测试 2/2 通过；`competitor-collector.exe` 已重新打包并复制到 Release 目录；Tauri Release 构建通过。
+
+### 2026-08-26：月度盈亏全公式复核与配送明细统一
+
+- 差异根因：配送卡片将常规配送与末公里配送合并为“配送费用”，但点击明细仅过滤 `delivery`，遗漏内部分类键 `last_mile`。因此卡片为 ₽-927,059.03，明细当时只显示 ₽-850,903.28。
+- 配送复算：常规配送 `MarketplaceServiceItemDirectFlowLogistic` 为 6,781 条 / ₽-850,903.28；末公里 `MarketplaceServiceItemRedistributionLastMileCourier` 与 `MarketplaceServiceItemDeliveryToHandoverPlaceOzon` 合计 6,504 条 / ₽-76,155.75；两者合计 ₽-927,059.03，与卡片完全一致。
+- Finance 全分类复核：销售/退货 ₽10,831,284.33；佣金 ₽-4,781,717.35；广告 ₽-981,325.49；配送 ₽-927,059.03；退货物流 ₽-86,122.84；收单 ₽-431,148.84；仓储 ₽-118,823.44；罚款 ₽-11,489.68；其他 ₽-147,691.81。22,879 条原始记录按 `amount` 汇总为 ₽3,345,905.85；逐项恒等式误差仅约 ₽0.00000007（浮点舍入）。
+- 利润公式复核：采购成本 ₽1,866,705.96、头程 ₽585,137.73；已结算税前利润 = Finance 净额 − 采购 − 头程 = ₽894,062.16；税额 = 销售额 ₽12,570,917 × 3% = ₽-377,127.51；提现费 = Finance 净额 × 10% = ₽-334,590.59；税后利润约 ₽182,344.07。
+- 修复：末公里和交接点服务统一使用 `delivery` 分类键，配送卡片和点击明细从源头采用同一分类；新增配送、退货、收单、仓储及广告分类回归测试。
+- 修改模块/文件：`desktop-next/src-tauri/src/lib.rs`、本 Markdown。测试结果：Finance 分类测试 2/2 通过。
 
 ```markdown
 ### YYYY-MM-DD：更新标题

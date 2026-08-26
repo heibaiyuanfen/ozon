@@ -29,3 +29,19 @@
 .monitor-ai pre { white-space: pre-wrap; line-height: 1.65; color: #273752; }
 .monitor-logs table { min-width: 1000px; width: 100%; }
 @media (max-width: 800px) { .campaign-monitor-backdrop { padding: 0; } .campaign-monitor { width: 100vw; max-height: 100vh; border-radius: 0; } .monitor-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .campaign-effect-chart { height: 300px; } }
+.ad-financial-framework { margin: 16px 0; padding: 18px; }
+.ad-financial-framework > p { color: #7b879a; font-size: 11px; margin: 7px 0 14px; }
+.ad-financial-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
+.ad-financial-grid > div { display: grid; gap: 4px; padding: 11px; border-radius: 10px; background: #f7f9fc; }
+.ad-financial-grid span { color: #718097; font-size: 10px; }
+.ad-financial-grid b { color: #20304a; font-size: 16px; }
+.ad-financial-grid small { color: #98a3b3; font-size: 9px; }
+.ad-diagnosis { min-width: 220px; display: grid; gap: 4px; border-left: 3px solid #94a3b8; padding: 6px 8px; background: #f8fafc; }
+.ad-diagnosis b { font-size: 10px; }
+.ad-diagnosis small { color: #7b879a; white-space: normal; line-height: 1.35; }
+.ad-diagnosis.critical { border-color: #dc2626; background: #fff1f2; }
+.ad-diagnosis.warning { border-color: #f59e0b; background: #fffbeb; }
+.ad-diagnosis.good { border-color: #16a34a; background: #f0fdf4; }
+.ad-diagnosis.observe { border-color: #3b82f6; background: #eff6ff; }
+@media (max-width: 1200px) { .ad-financial-grid { grid-template-columns: repeat(2, 1fr); } }
+.app.sidebar-is-collapsed{grid-template-columns:74px 1fr}.sidebar{transition:width .2s ease}.sidebar.collapsed{width:74px;padding-left:10px;padding-right:10px}.sidebar-collapse{position:absolute;right:10px;top:10px;border:0;background:#eef4fc;color:#4b6d9f;width:28px;height:28px;border-radius:8px;display:grid;place-items:center;cursor:pointer}.sidebar.collapsed .brand{justify-content:center;padding:34px 0 18px}.sidebar.collapsed .brand>div:last-child,.sidebar.collapsed .shop-picker select,.sidebar.collapsed .shop-picker small,.sidebar.collapsed .shop-picker .lucide-chevron-down,.sidebar.collapsed .nav-label,.sidebar.collapsed .nav-group-toggle span,.sidebar.collapsed .nav-chevron,.sidebar.collapsed .nav-group-items,.sidebar.collapsed .sidebar-foot>div:last-child{display:none}.sidebar.collapsed .shop-picker{display:grid;grid-template-columns:1fr;place-items:center;padding:11px}.sidebar.collapsed .sidebar-foot{justify-content:center;padding:10px 0}.grouped-nav{gap:7px!important}.nav-group{display:grid;gap:3px}.sidebar nav .nav-group-toggle{width:100%;font-weight:700;color:#526179;background:#f8fafc}.sidebar nav .nav-group-toggle.current{color:#1d69df;background:#edf4ff}.nav-group-toggle span{flex:1}.nav-chevron{margin-left:auto}.nav-group-items{display:grid;gap:2px;padding-left:8px}.sidebar nav .nav-group-items button{padding:8px 10px;font-size:12px}.sidebar.collapsed .nav-group-toggle{justify-content:center;padding:11px}.sidebar.collapsed+main{padding-left:max(38px,calc((100vw - 74px - 1230px)/2))}

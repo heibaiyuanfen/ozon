@@ -9,6 +9,7 @@ import type {
   CompetitorRow,
   CompetitorRunSummary,
   CompetitorCollectionProgress,
+  CompetitorAlertSettings,
   ConnectionStatus,
   CredentialsForm,
   DashboardData,
@@ -34,6 +35,7 @@ import type {
   SupplyOrder,
   SupplyTimeslot,
   SyncLog,
+  SyncAllResult,
   WarehouseMapping,
   WbCost,
   WbDaily,
@@ -87,6 +89,7 @@ export async function dashboard(range: DateRange): Promise<DashboardData> {
     tacos: 14.57,
     ctr: 2.8,
     returnUnits: 3,
+    returnRate: 3,
     cancellationUnits: 4,
     cancellationRate: 4,
     views: 3200,
@@ -132,6 +135,14 @@ export async function advertising(range: DateRange): Promise<AdvertisingData> {
     ctr: null,
     cpc: null,
     roas: 0,
+    conversionRate: null,
+    cpa: null,
+    acos: null,
+    breakEvenRoas: null,
+    targetRoas: null,
+    maxCpa: null,
+    knownCostMargin: null,
+    marginCoveragePercent: 0,
     campaigns: [],
     trend: [],
   };
@@ -197,8 +208,10 @@ export async function exportProductCosts(): Promise<string> {
 export async function inventory(
   query: string,
   targetDays = 30,
+  leadTimeDays = 21,
+  safetyDays = 7,
 ): Promise<InventoryRow[]> {
-  if (isTauri()) return invoke("inventory", { query, targetDays });
+  if (isTauri()) return invoke("inventory", { query, targetDays, leadTimeDays, safetyDays });
   return Array.from({ length: 12 }, (_, i) => ({
     sku: String(2526402232 + i),
     offerId: `GJYB${String(i + 1).padStart(4, "0")}`,
@@ -208,11 +221,22 @@ export async function inventory(
     reservedStock: 8,
     transitStock: i * 2,
     requestedStock: i,
+    domesticProductionStock: i % 3 === 0 ? 30 : 0,
+    domesticWarehouseStock: i % 4 === 0 ? 20 : 0,
+    overseasTransitStock: i % 2 === 0 ? 15 : 0,
+    overseasArrivedStock: i % 5 === 0 ? 12 : 0,
     warehouseCount: 3 + (i % 4),
     dailySales: 2.4 + i / 10,
+    dailySales7d: 2.8 + i / 10,
+    demandTrendPercent: 16.7,
     estimatedDays: 28 - i,
+    healthStatus: i > 9 ? "critical" : i > 7 ? "warning" : "healthy",
+    healthText: i > 9 ? "7 天内断货" : i > 7 ? "库存偏低" : "库存健康",
     suggestedQty: i > 7 ? 20 + i : 0,
     plannedQty: i % 3 ? 0 : 12,
+    returnUnits30d: i % 4,
+    returnRate30d: i % 4 ? 2.5 + i / 5 : 0,
+    returnLogisticsCost30d: i * 23,
     updatedAt: "2026-08-24 12:31:19",
   }));
 }
@@ -287,6 +311,20 @@ export async function refreshCompetitorsAll(): Promise<number> {
 export async function startCompetitorsCollection(): Promise<void> {
   return invoke("start_competitors_collection");
 }
+export async function competitorAlertSettings(): Promise<CompetitorAlertSettings> {
+  return invoke("competitor_alert_settings");
+}
+export async function saveCompetitorAlertSettings(
+  input: CompetitorAlertSettings,
+): Promise<void> {
+  return invoke("save_competitor_alert_settings", { input });
+}
+export async function rerunCompetitorsCollection(): Promise<void> {
+  return invoke("rerun_competitors_collection");
+}
+export async function retryFailedCompetitorsCollection(): Promise<void> {
+  return invoke("retry_failed_competitors_collection");
+}
 export async function competitorCollectionProgress(): Promise<CompetitorCollectionProgress> {
   return invoke("competitor_collection_progress");
 }
@@ -304,6 +342,25 @@ export async function setCompetitorManualSales(
   salesTotal: number | null,
 ): Promise<void> {
   return invoke("set_competitor_manual_sales", { id, salesTotal });
+}
+export async function setCompetitorManualMetrics(
+  id: number,
+  dailySales: number | null,
+  weeklySales: number | null,
+  monthlySales: number | null,
+): Promise<void> {
+  return invoke("set_competitor_manual_metrics", {
+    id,
+    dailySales,
+    weeklySales,
+    monthlySales,
+  });
+}
+export async function seedCompetitorDemoData(): Promise<number> {
+  return invoke("seed_competitor_demo_data");
+}
+export async function deleteCompetitorDemoData(): Promise<number> {
+  return invoke("delete_competitor_demo_data");
 }
 export async function removeCompetitor(id: number): Promise<void> {
   if (isTauri()) await invoke("remove_competitor", { id });
@@ -433,6 +490,9 @@ export async function syncPerformance(range: DateRange): Promise<number> {
 }
 export async function syncFinance(range: DateRange): Promise<number> {
   return invoke("sync_finance", { range });
+}
+export async function syncAllData(range: DateRange): Promise<SyncAllResult> {
+  return invoke("sync_all_data", { range });
 }
 export async function testFeishu(): Promise<string> {
   return invoke("test_feishu");

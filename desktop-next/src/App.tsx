@@ -14,15 +14,19 @@ import {
   BrainCircuit,
   CalendarDays,
   ChevronDown,
+  ChevronRight,
   Database,
   LayoutDashboard,
   Megaphone,
   PackageSearch,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Search,
   Settings2,
   ShoppingBag,
   Store,
+  Target,
   Truck,
 } from "lucide-react";
 import {
@@ -70,6 +74,9 @@ import {
   WbPage,
 } from "./OperationsPages";
 import { ProductInsights } from "./ProductInsights";
+import { ProductDifferentiationPage } from "./ProductDifferentiationPage";
+import { CrossBorderOperationsPage } from "./CrossBorderOperationsPage";
+import { GrowthCenterPage } from "./GrowthCenterPage";
 
 const emptyDashboard: DashboardData = {
   revenue: 0,
@@ -86,6 +93,7 @@ const emptyDashboard: DashboardData = {
   tacos: null,
   ctr: null,
   returnUnits: 0,
+  returnRate: null,
   cancellationUnits: 0,
   cancellationRate: null,
   views: 0,
@@ -101,6 +109,14 @@ const emptyAds: AdvertisingData = {
   ctr: null,
   cpc: null,
   roas: null,
+  conversionRate: null,
+  cpa: null,
+  acos: null,
+  breakEvenRoas: null,
+  targetRoas: null,
+  maxCpa: null,
+  knownCostMargin: null,
+  marginCoveragePercent: 0,
   campaigns: [],
   trend: [],
 };
@@ -114,7 +130,9 @@ function iso(date: Date) {
 function rangeFor(days: number): DateRange {
   const to = new Date();
   const from = new Date();
-  from.setDate(to.getDate() - days + 1);
+  // Ozon Seller “最近 30 天”报表按当前日向前跨 30 个日期边界，
+  // 例如 8 月 26 日对应 7 月 27 日至 8 月 26 日（两端均包含）。
+  from.setDate(to.getDate() - days);
   return { from: iso(from), to: iso(to) };
 }
 function currentMonthRange(): DateRange {
@@ -139,6 +157,8 @@ function Sidebar({
   setWorkspace,
   wbPage,
   setWbPage,
+  collapsed,
+  setCollapsed,
 }: {
   page: PageKey;
   setPage: (page: PageKey) => void;
@@ -149,30 +169,26 @@ function Sidebar({
   setWorkspace: (value: "ozon" | "wb") => void;
   wbPage: "daily" | "costs" | "settings";
   setWbPage: (value: "daily" | "costs" | "settings") => void;
+  collapsed: boolean;
+  setCollapsed: (value: boolean) => void;
 }) {
-  const items: Array<[PageKey | "disabled", string, typeof LayoutDashboard]> = [
-    ["dashboard", "经营总览", LayoutDashboard],
-    ["orders", "订单中心", ShoppingBag],
-    ["fbs", "FBS 管理", Truck],
-    ["products", "商品中心", Box],
-    ["advertising", "广告运营", Megaphone],
-    ["reports", "数据报告", BarChart3],
-    ["monthly_profit", "月度盈亏", BarChart3],
-    ["weekly_report", "经营周报", CalendarDays],
-    ["cross_profit", "跨境店铺利润", BarChart3],
-    ["ai", "AI 分析", BrainCircuit],
-    ["inventory", "库存管理", PackageSearch],
-    ["supply", "约仓计划", Truck],
-    ["sync", "数据同步", RefreshCw],
-    ["feishu", "飞书协作", Database],
-    ["migration", "数据迁移", Database],
-    ["listing", "跨境上品", PackageSearch],
-    ["competitors", "竞品跟踪", PackageSearch],
-    ["shops", "店铺管理", Store],
-    ["settings", "连接设置", Settings2],
+  const groups: Array<{ id: string; label: string; icon: typeof LayoutDashboard; items: Array<[PageKey, string, typeof LayoutDashboard]> }> = [
+    { id: "operations", label: "经营管理", icon: LayoutDashboard, items: [["dashboard", "经营总览", LayoutDashboard], ["orders", "订单中心", ShoppingBag], ["products", "商品中心", Box], ["fbs", "FBS 管理", Truck]] },
+    { id: "marketing", label: "营销与洞察", icon: Target, items: [["growth_center", "增长中心", BarChart3], ["advertising", "广告运营", Megaphone], ["competitors", "竞品跟踪", PackageSearch], ["differentiation", "亚马逊差异化选品", Target], ["ai", "AI 分析", BrainCircuit]] },
+    { id: "reports", label: "报表与利润", icon: BarChart3, items: [["reports", "数据报告", BarChart3], ["monthly_profit", "月度盈亏", BarChart3], ["weekly_report", "经营周报", CalendarDays], ["cross_profit", "跨境店铺利润", BarChart3]] },
+    { id: "inventory", label: "库存与供应链", icon: PackageSearch, items: [["inventory", "库存管理", PackageSearch], ["supply", "约仓计划", Truck]] },
+    { id: "cross", label: "跨境运营", icon: Truck, items: [["cross_border_ops", "俄罗斯跨境经营", Truck], ["listing", "跨境上品", PackageSearch]] },
+    { id: "data", label: "数据与协作", icon: Database, items: [["sync", "数据同步", RefreshCw], ["feishu", "飞书协作", Database], ["migration", "数据迁移", Database]] },
+    { id: "system", label: "系统设置", icon: Settings2, items: [["shops", "店铺管理", Store], ["settings", "连接设置", Settings2]] },
   ];
+  const groupForPage = groups.find((group) => group.items.some(([key]) => key === page))?.id ?? "operations";
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ [groupForPage]: true });
+  useEffect(() => setOpenGroups((old) => ({ ...old, [groupForPage]: true })), [groupForPage]);
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
+      <button className="sidebar-collapse" title={collapsed ? "展开导航栏" : "收起导航栏"} onClick={() => setCollapsed(!collapsed)}>
+        {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+      </button>
       <button
         className="brand workspace-switch"
         onClick={() => setWorkspace(workspace === "ozon" ? "wb" : "ozon")}
@@ -205,20 +221,18 @@ function Sidebar({
       {workspace === "ozon" && (
         <>
           <div className="nav-label">工作台</div>
-          <nav>
-            {items.map(([key, label, Icon]) => (
-              <button
-                key={label}
-                disabled={key === "disabled"}
-                className={key === page ? "active" : ""}
-                onClick={() =>
-                  key !== "disabled" && startTransition(() => setPage(key))
-                }
-              >
-                <Icon size={17} />
-                {label}
-              </button>
-            ))}
+          <nav className="grouped-nav">
+            {groups.map((group) => {
+              const visibleItems = group.items.filter(([key]) => !(key === "monthly_profit" && activeShop?.kind === "cross_border"));
+              const GroupIcon = group.icon;
+              const opened = collapsed || openGroups[group.id];
+              return <section className="nav-group" key={group.id}>
+                <button className={`nav-group-toggle ${group.id === groupForPage ? "current" : ""}`} title={group.label} onClick={() => collapsed ? setCollapsed(false) : setOpenGroups((old) => ({ ...old, [group.id]: !old[group.id] }))}>
+                  <GroupIcon size={17} /><span>{group.label}</span>{opened ? <ChevronDown className="nav-chevron" size={14} /> : <ChevronRight className="nav-chevron" size={14} />}
+                </button>
+                {opened && <div className="nav-group-items">{visibleItems.map(([key, label, Icon]) => <button key={key} title={label} className={key === page ? "active" : ""} onClick={() => startTransition(() => setPage(key))}><Icon size={16} /><span>{label}</span></button>)}</div>}
+              </section>;
+            })}
           </nav>
         </>
       )}
@@ -589,6 +603,9 @@ function Dashboard({
               退货件数<b>{data.returnUnits}</b>
             </span>
             <span>
+              产品退货率<b>{pct(data.returnRate)}</b>
+            </span>
+            <span>
               取消件数<b>{data.cancellationUnits}</b>
             </span>
             <span>
@@ -820,8 +837,7 @@ function Advertising({
   const [campaignQuery, setCampaignQuery] = useState("");
   const [monitorId, setMonitorId] = useState<string | null>(null);
   const [monitorCache, setMonitorCache] = useState<Record<string, { data: CampaignMonitorData; at: number }>>({});
-  const conversion = data.clicks ? (data.orders / data.clicks) * 100 : null,
-    visibleCampaigns = data.campaigns.filter((x) =>
+  const visibleCampaigns = data.campaigns.filter((x) =>
       `${x.name} ${x.id}`
         .toLowerCase()
         .includes(campaignQuery.trim().toLowerCase()),
@@ -882,7 +898,21 @@ function Advertising({
           value={data.roas?.toFixed(2) ?? "—"}
           note="销售额 / 消耗"
         />
+        <Stat tone="orange" label="广告 ACOS" value={pct(data.acos)} note="消耗 / 归因销售额" />
+        <Stat tone="green" label="点击转化率" value={pct(data.conversionRate)} note="归因订单 / 点击" />
+        <Stat tone="pink" label="单笔归因成本 CPA" value={data.cpa == null ? "—" : money(data.cpa, currency)} note="消耗 / 归因订单" />
       </div>
+      <section className="card ad-financial-framework">
+        <div className="card-title">利润约束与投放目标 <span className="badge orange">⚠ 已知成本估算</span></div>
+        <p>依据已填写的采购成本和头程成本计算，不包含尚未归集的平台佣金、仓储、退货和其他费用，因此只作为广告上限参考。</p>
+        <div className="ad-financial-grid">
+          <div><span>成本覆盖率</span><b>{data.marginCoveragePercent.toFixed(1)}%</b><small>低于 80% 时不生成利润目标</small></div>
+          <div><span>已知成本毛利率</span><b>{pct(data.knownCostMargin == null ? null : data.knownCostMargin * 100)}</b><small>销售额减采购与头程</small></div>
+          <div><span>盈亏平衡 ROAS</span><b>{data.breakEvenRoas?.toFixed(2) ?? "—"}</b><small>1 ÷ 已知成本毛利率</small></div>
+          <div><span>可持续目标 ROAS</span><b>{data.targetRoas?.toFixed(2) ?? "—"}</b><small>盈亏线 × 1.5 利润缓冲</small></div>
+          <div><span>最大 CPA</span><b>{data.maxCpa == null ? "—" : money(data.maxCpa, currency)}</b><small>归因客单价 × 已知成本毛利率</small></div>
+        </div>
+      </section>
       <div className="ads-grid">
         <section className="card data-scope">
           <div className="card-title">
@@ -915,7 +945,7 @@ function Advertising({
           </div>
           <div className="funnel-step f3">
             <span>
-              订单<small>{pct(conversion)}</small>
+              订单<small>{pct(data.conversionRate)}</small>
             </span>
             <b>{data.orders}</b>
           </div>
@@ -946,6 +976,9 @@ function Advertising({
                 <th>消耗</th>
                 <th>销售额</th>
                 <th>ROAS</th>
+                <th>CTR / CPC</th>
+                <th>转化 / CPA</th>
+                <th>诊断与建议</th>
               </tr>
             </thead>
             <tbody>
@@ -962,6 +995,9 @@ function Advertising({
                   <td>{money(x.spend, currency)}</td>
                   <td>{money(x.revenue, currency)}</td>
                   <td>{x.roas?.toFixed(2) ?? "—"}</td>
+                  <td>{pct(x.ctr)}<small>{x.cpc == null ? "—" : money(x.cpc, currency)}</small></td>
+                  <td>{pct(x.conversionRate)}<small>{x.cpa == null ? "—" : money(x.cpa, currency)}</small></td>
+                  <td><div className={`ad-diagnosis ${x.diagnosisLevel}`}><b>{x.diagnosisText}</b><small>{x.recommendedAction}</small></div></td>
                 </tr>
               ))}
             </tbody>
@@ -1076,6 +1112,7 @@ function CampaignEffectChart({ data }: { data: Array<{ label: string; spend: num
 export function App() {
   const [page, setPage] = useState<PageKey>("dashboard"),
     [workspace, setWorkspace] = useState<"ozon" | "wb">("ozon"),
+    [sidebarCollapsed, setSidebarCollapsed] = useState(false),
     [wbPage, setWbPage] = useState<"daily" | "costs" | "settings">("daily"),
     [shops, setShops] = useState<Shop[]>([]),
     [days, setDays] = useState(7),
@@ -1087,7 +1124,9 @@ export function App() {
     [productRows, setProductRows] = useState<ProductRow[]>([]),
     [inventoryRows, setInventoryRows] = useState<InventoryRow[]>([]),
     [connection, setConnection] = useState<ConnectionStatus | null>(null),
-    [targetDays, setTargetDays] = useState(30);
+    [targetDays, setTargetDays] = useState(45),
+    [leadTimeDays, setLeadTimeDays] = useState(21),
+    [safetyDays, setSafetyDays] = useState(7);
   const activeShop = shops.find((s) => s.active) ?? shops[0],
     currency = activeShop?.kind === "cross_border" ? "CNY" : "RUB",
     range = useMemo(() => rangeFor(days), [days]),
@@ -1102,7 +1141,7 @@ export function App() {
       if (page === "products")
         setProductRows(await products(range, deferredQuery));
       if (page === "inventory")
-        setInventoryRows(await inventory(deferredQuery, targetDays));
+        setInventoryRows(await inventory(deferredQuery, targetDays, leadTimeDays, safetyDays));
       if (page === "settings") setConnection(await connectionStatus());
     } finally {
       setRefreshing(false);
@@ -1113,15 +1152,20 @@ export function App() {
   }, []);
   useEffect(() => {
     void load();
-  }, [page, range.from, range.to, activeShop?.id, deferredQuery, targetDays]);
+  }, [page, range.from, range.to, activeShop?.id, deferredQuery, targetDays, leadTimeDays, safetyDays]);
   const changeShop = async (id: string) => {
     await selectShop(id);
     clearReportCache();
+    setProductRows([]);
+    const nextShop = shops.find((shop) => shop.id === id);
+    if (nextShop?.kind === "cross_border" && page === "monthly_profit") {
+      setPage("cross_profit");
+    }
     setShops((xs) => xs.map((x) => ({ ...x, active: x.id === id })));
   };
   const reloadShops = async () => setShops(await listShops());
   return (
-    <div className="app">
+    <div className={`app ${sidebarCollapsed ? "sidebar-is-collapsed" : ""}`}>
       <Sidebar
         page={page}
         setPage={setPage}
@@ -1132,6 +1176,8 @@ export function App() {
         setWorkspace={setWorkspace}
         wbPage={wbPage}
         setWbPage={setWbPage}
+        collapsed={sidebarCollapsed}
+        setCollapsed={setSidebarCollapsed}
       />
       <main>
         {workspace === "wb" && <WbPage range={range} section={wbPage} days={days} setDays={setDays} />}
@@ -1182,13 +1228,15 @@ export function App() {
             )}{" "}
             {page === "reports" && (
               <ReportsPage
+                key={activeShop?.id}
                 range={range}
                 currency={currency}
                 initialTab="daily"
               />
             )}{" "}
-            {page === "monthly_profit" && (
+            {page === "monthly_profit" && activeShop?.kind !== "cross_border" && (
               <ReportsPage
+                key={activeShop?.id}
                 range={monthRange}
                 currency={currency}
                 initialTab="summary"
@@ -1196,6 +1244,7 @@ export function App() {
             )}{" "}
             {page === "weekly_report" && (
               <ReportsPage
+                key={activeShop?.id}
                 range={range}
                 currency={currency}
                 initialTab="weekly"
@@ -1203,12 +1252,14 @@ export function App() {
             )}{" "}
             {page === "cross_profit" && (
               <ReportsPage
+                key={activeShop?.id}
                 range={monthRange}
                 currency={currency}
                 initialTab="cross"
               />
             )}{" "}
             {page === "ai" && <AiPage range={range} />}{" "}
+            {page === "growth_center" && <GrowthCenterPage range={range} currency={currency} shopName={activeShop?.name || "当前店铺"} />}{" "}
             {page === "inventory" && (
               <InventoryPage
                 rows={inventoryRows}
@@ -1216,6 +1267,10 @@ export function App() {
                 setQuery={setQuery}
                 targetDays={targetDays}
                 setTargetDays={setTargetDays}
+                leadTimeDays={leadTimeDays}
+                setLeadTimeDays={setLeadTimeDays}
+                safetyDays={safetyDays}
+                setSafetyDays={setSafetyDays}
                 reload={load}
               />
             )}{" "}
@@ -1225,7 +1280,11 @@ export function App() {
             {page === "wb" && <WbPage range={range} section="daily" days={days} setDays={setDays} />}{" "}
             {page === "migration" && <MigrationPage range={range} />}{" "}
             {page === "listing" && <ListingPage />}{" "}
-            {page === "competitors" && <CompetitorsPage />}{" "}
+            {page === "cross_border_ops" && <CrossBorderOperationsPage range={range} shopName={activeShop?.name || "当前店铺"} enabled={activeShop?.kind === "cross_border"} />}{" "}
+            {page === "competitors" && (
+              <CompetitorsPage key={activeShop?.id} />
+            )}{" "}
+            {page === "differentiation" && <ProductDifferentiationPage />}{" "}
             {page === "shops" && (
               <ShopsPage
                 shops={shops}

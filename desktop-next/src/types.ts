@@ -7,7 +7,9 @@ export type PageKey =
   | "monthly_profit"
   | "weekly_report"
   | "cross_profit"
+  | "cross_border_ops"
   | "ai"
+  | "growth_center"
   | "inventory"
   | "fbs"
   | "supply"
@@ -17,6 +19,7 @@ export type PageKey =
   | "migration"
   | "listing"
   | "competitors"
+  | "differentiation"
   | "shops"
   | "settings";
 
@@ -53,6 +56,7 @@ export interface DashboardData {
   tacos: number | null;
   ctr: number | null;
   returnUnits: number;
+  returnRate: number | null;
   cancellationUnits: number;
   cancellationRate: number | null;
   views: number;
@@ -88,6 +92,14 @@ export interface AdvertisingData {
   ctr: number | null;
   cpc: number | null;
   roas: number | null;
+  conversionRate: number | null;
+  cpa: number | null;
+  acos: number | null;
+  breakEvenRoas: number | null;
+  targetRoas: number | null;
+  maxCpa: number | null;
+  knownCostMargin: number | null;
+  marginCoveragePercent: number;
   campaigns: Array<{
     id: string;
     name: string;
@@ -99,6 +111,14 @@ export interface AdvertisingData {
     spend: number;
     revenue: number;
     roas: number | null;
+    ctr: number | null;
+    cpc: number | null;
+    conversionRate: number | null;
+    cpa: number | null;
+    acos: number | null;
+    diagnosisLevel: string;
+    diagnosisText: string;
+    recommendedAction: string;
     budget: number;
   }>;
   trend: Array<{
@@ -186,11 +206,22 @@ export interface InventoryRow {
   reservedStock: number | null;
   transitStock: number;
   requestedStock: number;
+  domesticProductionStock: number;
+  domesticWarehouseStock: number;
+  overseasTransitStock: number;
+  overseasArrivedStock: number;
   warehouseCount: number;
   dailySales: number;
+  dailySales7d: number;
+  demandTrendPercent: number | null;
   estimatedDays: number | null;
+  healthStatus: "stockout" | "critical" | "warning" | "overstock" | "healthy" | "slow" | "empty";
+  healthText: string;
   suggestedQty: number;
   plannedQty: number;
+  returnUnits30d: number;
+  returnRate30d: number | null;
+  returnLogisticsCost30d: number;
   updatedAt: string;
 }
 
@@ -253,11 +284,22 @@ export interface CompetitorSnapshot {
 }
 export interface CompetitorRow {
   id: number;
+  isDemo: boolean;
   productUrl: string;
   productCode: string;
   name: string;
   imageUrl: string;
   latestPrice: number | null;
+  previousPrice: number | null;
+  priceChange: number | null;
+  priceChangePercent: number | null;
+  priceMin30d: number | null;
+  priceMax30d: number | null;
+  priceAvg30d: number | null;
+  priceAlertLevel: "critical" | "warning" | "opportunity" | "stable" | "pending";
+  priceAlertText: string;
+  priceChanges30d: number;
+  promotionSuspected: boolean;
   dailySales: number | null;
   weeklySales: number | null;
   monthlySales: number | null;
@@ -308,6 +350,19 @@ export interface CompetitorCollectionTask {
   startedAt: string;
   finishedAt: string;
   stopRequested: boolean;
+}
+export interface CompetitorAlertSettings {
+  warningDropPercent: number;
+  criticalDropPercent: number;
+  opportunityRisePercent: number;
+}
+export interface SyncAllResult {
+  sellerRows: number | null;
+  performanceRows: number | null;
+  financeRows: number | null;
+  sellerError: string;
+  performanceError: string;
+  financeError: string;
 }
 export interface BusinessReport {
   revenue: number;
