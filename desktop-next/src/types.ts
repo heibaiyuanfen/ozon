@@ -99,6 +99,7 @@ export interface AdvertisingData {
     spend: number;
     revenue: number;
     roas: number | null;
+    budget: number;
   }>;
   trend: Array<{
     day: string;
@@ -108,6 +109,41 @@ export interface AdvertisingData {
     spend: number;
     revenue: number;
   }>;
+}
+
+export interface CampaignActionLog {
+  id: number;
+  action: string;
+  requestedValue: string;
+  beforeState: string;
+  beforeBudget: number;
+  afterState: string;
+  afterBudget: number;
+  status: string;
+  message: string;
+  createdAt: string;
+  beforeSpend: number;
+  beforeRevenue: number;
+  afterSpend: number;
+  afterRevenue: number;
+}
+
+export interface CampaignMonitorData {
+  id: string;
+  name: string;
+  state: string;
+  budget: number;
+  budgetSource: string;
+  budgetKnown: boolean;
+  daily: AdvertisingData["trend"];
+  logs: CampaignActionLog[];
+}
+
+export interface CampaignControlInput {
+  campaignId: string;
+  action: "activate" | "deactivate" | "budget";
+  weeklyBudget?: number;
+  confirmation: string;
 }
 
 export interface ProductRow {
@@ -225,7 +261,53 @@ export interface CompetitorRow {
   dailySales: number | null;
   weeklySales: number | null;
   monthlySales: number | null;
+  latestStatus: string;
+  latestObservedAt: string;
+  latestRetryCount: number;
+  latestNotes: string;
   snapshots: CompetitorSnapshot[];
+}
+export interface CompetitorRunSummary {
+  runId: string;
+  startedAt: string;
+  finishedAt: string;
+  requested: number;
+  completed: number;
+  ok: number;
+  blocked: number;
+  changedLayout: number;
+  inaccessible: number;
+  ambiguousMatch: number;
+  incomplete: number;
+  status: string;
+  notes: string;
+}
+
+export interface CompetitorCollectionProgress {
+  running: boolean;
+  runId: string;
+  total: number;
+  completed: number;
+  succeeded: number;
+  failed: number;
+  currentId: number | null;
+  currentCode: string;
+  stage: string;
+  message: string;
+  stopRequested: boolean;
+  tasks: CompetitorCollectionTask[];
+}
+export interface CompetitorCollectionTask {
+  id: number;
+  productCode: string;
+  productUrl: string;
+  status: string;
+  stage: string;
+  message: string;
+  retryCount: number;
+  startedAt: string;
+  finishedAt: string;
+  stopRequested: boolean;
 }
 export interface BusinessReport {
   revenue: number;
@@ -441,9 +523,44 @@ export interface ListingRow {
   importTaskId: string;
   updatedAt: string;
 }
-export interface ListingJob { id:number; sourceUrl:string; article:string; offerId:string; title:string; categoryId:string; categoryDisplay:string; status:string; stage:number; error:string; payload:Record<string,unknown>; updatedAt:string; }
-export interface ListingCategory { descriptionCategoryId:number; typeId:number; name:string; display:string; score:number; }
-export interface ListingDraftInput { id:number; offerId:string; title:string; categoryId:string; categoryDisplay:string; typeId:string; price:string; weight:number; depth:number; width:number; height:number; description:string; images:string[]; attributes:unknown[]; complexAttributes:unknown[]; }
+export interface ListingJob {
+  id: number;
+  sourceUrl: string;
+  article: string;
+  offerId: string;
+  title: string;
+  categoryId: string;
+  categoryDisplay: string;
+  status: string;
+  stage: number;
+  error: string;
+  payload: Record<string, unknown>;
+  updatedAt: string;
+}
+export interface ListingCategory {
+  descriptionCategoryId: number;
+  typeId: number;
+  name: string;
+  display: string;
+  score: number;
+}
+export interface ListingDraftInput {
+  id: number;
+  offerId: string;
+  title: string;
+  categoryId: string;
+  categoryDisplay: string;
+  typeId: string;
+  price: string;
+  weight: number;
+  depth: number;
+  width: number;
+  height: number;
+  description: string;
+  images: string[];
+  attributes: unknown[];
+  complexAttributes: unknown[];
+}
 export interface ListingPriceInput {
   purchaseCost: number;
   labelFee: number;

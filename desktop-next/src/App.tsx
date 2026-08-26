@@ -27,6 +27,9 @@ import {
 } from "lucide-react";
 import {
   advertising,
+  campaignAiAnalysis,
+  campaignControl,
+  campaignMonitor,
   connectionStatus,
   dashboard,
   inventory,
@@ -37,6 +40,7 @@ import {
 } from "./bridge";
 import type {
   AdvertisingData,
+  CampaignMonitorData,
   ConnectionStatus,
   DashboardData,
   DateRange,
@@ -814,6 +818,8 @@ function Advertising({
   refresh: () => void;
 }) {
   const [campaignQuery, setCampaignQuery] = useState("");
+  const [monitorId, setMonitorId] = useState<string | null>(null);
+  const [monitorCache, setMonitorCache] = useState<Record<string, { data: CampaignMonitorData; at: number }>>({});
   const conversion = data.clicks ? (data.orders / data.clicks) * 100 : null,
     visibleCampaigns = data.campaigns.filter((x) =>
       `${x.name} ${x.id}`
@@ -944,7 +950,7 @@ function Advertising({
             </thead>
             <tbody>
               {visibleCampaigns.map((x) => (
-                <tr key={x.id}>
+                <tr key={x.id} onDoubleClick={() => setMonitorId(x.id)} title="双击打开活动监控">
                   <td>
                     <b>{x.name || x.id}</b>
                     <small>{x.id}</small>
@@ -966,8 +972,105 @@ function Advertising({
           </div>
         )}
       </section>
+      {monitorId && (
+        <CampaignMonitorModal
+          campaignId={monitorId}
+          currency={currency}
+          initialData={monitorCache[monitorId]?.data ?? null}
+          cacheFresh={Date.now() - (monitorCache[monitorId]?.at ?? 0) < 15 * 60 * 1000}
+          onLoaded={(next) => setMonitorCache((old) => ({ ...old, [monitorId]: { data: next, at: Date.now() } }))}
+          close={() => setMonitorId(null)}
+          refreshParent={refresh}
+        />
+      )}
     </>
   );
+}
+
+function CampaignMonitorModal({ campaignId, currency, initialData, cacheFresh, onLoaded, close, refreshParent }: {
+  campaignId: string; currency: string; initialData: CampaignMonitorData | null; cacheFresh: boolean;
+  onLoaded: (data: CampaignMonitorData) => void; close: () => void; refreshParent: () => void;
+}) {
+  const [data, setData] = useState<CampaignMonitorData | null>(initialData);
+  const [scale, setScale] = useState<"day" | "week" | "month">("day");
+  const [budget, setBudget] = useState(initialData?.budgetKnown ? String(initialData.budget) : "");
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [ai, setAi] = useState("");
+  const load = async () => {
+    const next = await campaignMonitor(campaignId);
+    setData(next); setBudget(next.budgetKnown ? String(next.budget) : ""); onLoaded(next);
+  };
+  useEffect(() => { if (!cacheFresh) void load(); }, [campaignId, cacheFresh]);
+  const series = useMemo(() => {
+    const grouped = new Map<string, { label: string; spend: number; revenue: number; orders: number }>();
+    for (const row of data?.daily ?? []) {
+      const d = new Date(`${row.day}T00:00:00`);
+      const key = scale === "day" ? row.day : scale === "month"
+        ? row.day.slice(0, 7)
+        : `${d.getFullYear()}-W${String(Math.ceil((((d.getTime() - new Date(d.getFullYear(), 0, 1).getTime()) / 86400000) + new Date(d.getFullYear(), 0, 1).getDay() + 1) / 7)).padStart(2, "0")}`;
+      const old = grouped.get(key) ?? { label: key, spend: 0, revenue: 0, orders: 0 };
+      old.spend += row.spend; old.revenue += row.revenue; old.orders += row.orders; grouped.set(key, old);
+    }
+    return [...grouped.values()];
+  }, [data, scale]);
+  const execute = async (action: "activate" | "deactivate" | "budget") => {
+    if (confirmation !== "确认执行") { alert("请输入“确认执行”后再操作。 "); return; }
+    if (!window.confirm("该操作会写入 Ozon 广告账户，确定继续吗？")) return;
+    setBusy(true);
+    try {
+      await campaignControl({ campaignId, action, weeklyBudget: action === "budget" ? Number(budget) : undefined, confirmation });
+      setConfirmation(""); await load(); refreshParent();
+    } catch (error) { alert(String(error)); } finally { setBusy(false); }
+  };
+  const total = series.reduce((a, x) => ({ spend: a.spend + x.spend, revenue: a.revenue + x.revenue, orders: a.orders + x.orders }), { spend: 0, revenue: 0, orders: 0 });
+  return <div className="campaign-monitor-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
+    <div className="campaign-monitor">
+      <button className="monitor-close" onClick={close}>×</button>
+      <h2>{data?.name || campaignId}</h2><p>活动 ID {campaignId} · {data?.state || "读取中"}</p>
+      <div className="monitor-kpis">
+        <div><span>当前周预算</span><strong>{data ? (data.budgetKnown ? money(data.budget, currency) : "—") : "读取中"}</strong><small>{data?.budgetSource || "正在读取本地缓存与 Performance API"}</small></div>
+        <div><span>区间花费</span><strong>{money(total.spend, currency)}</strong><small>{scale === "day" ? "日级" : scale === "week" ? "周级" : "月级"}汇总</small></div>
+        <div><span>归因销售额</span><strong>{money(total.revenue, currency)}</strong><small>{total.orders} 个广告订单</small></div>
+        <div><span>区间 ROAS</span><strong>{total.spend ? (total.revenue / total.spend).toFixed(2) : "—"}</strong><small>销售额 / 花费</small></div>
+      </div>
+      <div className="monitor-tabs">{(["day", "week", "month"] as const).map((x) => <button className={scale === x ? "active" : ""} onClick={() => setScale(x)} key={x}>{x === "day" ? "每日" : x === "week" ? "每周" : "每月"}</button>)}</div>
+      <section className="monitor-chart"><CampaignEffectChart data={series} />{!series.length && <div className="empty">近两个月暂无日级缓存。</div>}</section>
+      <section className="monitor-controls">
+        <b>广告账户控制</b><input type="number" min="0" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="周预算" />
+        <input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder="输入：确认执行" />
+        <button disabled={busy} onClick={() => void execute("budget")}>保存周预算</button><button disabled={busy} onClick={() => void execute("activate")}>开启</button><button disabled={busy} onClick={() => void execute("deactivate")}>关闭</button>
+      </section>
+      <section className="monitor-ai"><button disabled={busy} onClick={async () => { setBusy(true); try { setAi(await campaignAiAnalysis(campaignId)); } catch (e) { setAi(String(e)); } finally { setBusy(false); } }}>AI 分析调整效果与建议</button>{ai && <pre>{ai}</pre>}</section>
+      <section className="monitor-logs"><h3>独立操作日志与调整后效果</h3>{data?.logs.length ? <table><thead><tr><th>时间</th><th>操作</th><th>前 → 后</th><th>操作前 7 天</th><th>操作后</th><th>状态</th></tr></thead><tbody>{data.logs.map((x) => <tr key={x.id}><td>{x.createdAt}</td><td>{x.action} {x.requestedValue}</td><td>{x.beforeState} / {x.beforeBudget} → {x.afterState} / {x.afterBudget}</td><td>{money(x.beforeSpend, currency)} · ROAS {x.beforeSpend ? (x.beforeRevenue / x.beforeSpend).toFixed(2) : "—"}</td><td>{money(x.afterSpend, currency)} · ROAS {x.afterSpend ? (x.afterRevenue / x.afterSpend).toFixed(2) : "—"}</td><td>{x.status}</td></tr>)}</tbody></table> : <div className="empty">暂无 ERP 操作记录。</div>}</section>
+    </div>
+  </div>;
+}
+
+function CampaignEffectChart({ data }: { data: Array<{ label: string; spend: number; revenue: number; orders: number }> }) {
+  useEffect(() => {
+    const el = document.getElementById("campaign-effect-chart");
+    if (!el || !data.length) return;
+    const chart = echarts.init(el);
+    chart.setOption({
+      grid: { left: 22, right: 62, top: 52, bottom: 34, containLabel: true },
+      tooltip: { trigger: "axis" },
+      legend: { top: 8, data: ["广告花费", "归因销售额", "ROAS"] },
+      xAxis: { type: "category", boundaryGap: false, data: data.map((x) => x.label), axisLabel: { hideOverlap: true } },
+      yAxis: [
+        { type: "value", splitLine: { lineStyle: { color: "#edf1f7" } }, axisLabel: { color: "#8b98aa" } },
+        { type: "value", name: "ROAS", splitLine: { show: false }, axisLabel: { color: "#8b98aa" } },
+      ],
+      series: [
+        { name: "广告花费", type: "line", smooth: true, symbol: "circle", symbolSize: 5, data: data.map((x) => x.spend), lineStyle: { color: "#3478f6", width: 3 }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: "rgba(52,120,246,.28)" }, { offset: 1, color: "rgba(52,120,246,0)" }]) } },
+        { name: "归因销售额", type: "line", smooth: true, symbol: "none", data: data.map((x) => x.revenue), lineStyle: { color: "#f39a32", width: 2 } },
+        { name: "ROAS", type: "line", smooth: true, symbol: "none", yAxisIndex: 1, data: data.map((x) => x.spend ? Number((x.revenue / x.spend).toFixed(2)) : null), lineStyle: { color: "#69b83e", width: 2, type: "dashed" } },
+      ],
+    });
+    const resize = () => chart.resize(); window.addEventListener("resize", resize);
+    return () => { window.removeEventListener("resize", resize); chart.dispose(); };
+  }, [data]);
+  return <div id="campaign-effect-chart" className="campaign-effect-chart" />;
 }
 
 export function App() {

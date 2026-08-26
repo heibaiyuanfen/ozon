@@ -1,9 +1,14 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        LazyLock, Mutex,
+    },
 };
 use tauri::{Manager, State};
 mod insights;
@@ -11,6 +16,59 @@ mod listing;
 mod secrets;
 mod wb;
 static API_SYNC_LOCK: Mutex<()> = Mutex::new(());
+static COMPETITOR_COLLECTION_STOP: AtomicBool = AtomicBool::new(false);
+static COMPETITOR_TASK_STOPS: LazyLock<Mutex<HashSet<i64>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static COMPETITOR_COLLECTION_PROGRESS: LazyLock<Mutex<CompetitorCollectionProgress>> =
+    LazyLock::new(|| Mutex::new(CompetitorCollectionProgress::default()));
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompetitorCollectionProgress {
+    running: bool,
+    run_id: String,
+    total: i64,
+    completed: i64,
+    succeeded: i64,
+    failed: i64,
+    current_id: Option<i64>,
+    current_code: String,
+    stage: String,
+    message: String,
+    stop_requested: bool,
+    tasks: Vec<CompetitorCollectionTask>,
+}
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompetitorCollectionTask {
+    id: i64,
+    product_code: String,
+    product_url: String,
+    status: String,
+    stage: String,
+    message: String,
+    retry_count: i64,
+    started_at: String,
+    finished_at: String,
+    stop_requested: bool,
+}
+
+fn competitor_task_stop_requested(id: i64) -> bool {
+    COMPETITOR_COLLECTION_STOP.load(Ordering::SeqCst)
+        || COMPETITOR_TASK_STOPS
+            .lock()
+            .map(|stops| stops.contains(&id))
+            .unwrap_or(false)
+}
+
+fn update_competitor_task(id: i64, update: impl FnOnce(&mut CompetitorCollectionTask)) {
+    if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+        if let Some(task) = progress.tasks.iter_mut().find(|task| task.id == id) {
+            update(task);
+        }
+    }
+}
 
 pub(crate) struct AppState {
     pub(crate) data_dir: PathBuf,
@@ -108,6 +166,7 @@ struct CampaignRow {
     spend: f64,
     revenue: f64,
     roas: Option<f64>,
+    budget: f64,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,6 +192,44 @@ struct AdvertisingData {
     roas: Option<f64>,
     campaigns: Vec<CampaignRow>,
     trend: Vec<AdvertisingTrendRow>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CampaignActionLogRow {
+    id: i64,
+    action: String,
+    requested_value: String,
+    before_state: String,
+    before_budget: f64,
+    after_state: String,
+    after_budget: f64,
+    status: String,
+    message: String,
+    created_at: String,
+    before_spend: f64,
+    before_revenue: f64,
+    after_spend: f64,
+    after_revenue: f64,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CampaignMonitorData {
+    id: String,
+    name: String,
+    state: String,
+    budget: f64,
+    budget_source: String,
+    budget_known: bool,
+    daily: Vec<AdvertisingTrendRow>,
+    logs: Vec<CampaignActionLogRow>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CampaignControlInput {
+    campaign_id: String,
+    action: String,
+    weekly_budget: Option<f64>,
+    confirmation: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -264,7 +361,28 @@ struct CompetitorRow {
     daily_sales: Option<i64>,
     weekly_sales: Option<i64>,
     monthly_sales: Option<i64>,
+    latest_status: String,
+    latest_observed_at: String,
+    latest_retry_count: i64,
+    latest_notes: String,
     snapshots: Vec<CompetitorSnapshot>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompetitorRunSummary {
+    run_id: String,
+    started_at: String,
+    finished_at: String,
+    requested: i64,
+    completed: i64,
+    ok: i64,
+    blocked: i64,
+    changed_layout: i64,
+    inaccessible: i64,
+    ambiguous_match: i64,
+    incomplete: i64,
+    status: String,
+    notes: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -563,6 +681,21 @@ fn initialize_extensions(c: &Connection) -> Result<(), String> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS warehouse_cluster_mappings(warehouse_name TEXT PRIMARY KEY,cluster_name TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS competitor_products(id INTEGER PRIMARY KEY AUTOINCREMENT,product_url TEXT NOT NULL UNIQUE,product_code TEXT NOT NULL DEFAULT '',name TEXT NOT NULL DEFAULT '',image_url TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS competitor_snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT,competitor_id INTEGER NOT NULL,captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,price REAL,sales_total INTEGER,source TEXT NOT NULL DEFAULT 'web',UNIQUE(competitor_id,captured_at),FOREIGN KEY(competitor_id) REFERENCES competitor_products(id));CREATE TABLE IF NOT EXISTS shipment_tracking(tracking_id TEXT PRIMARY KEY,product_name TEXT NOT NULL DEFAULT '',batch_no TEXT NOT NULL DEFAULT '',shop_name TEXT NOT NULL DEFAULT '',quantity INTEGER NOT NULL DEFAULT 0,cargo_status TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT '',domestic_arrival TEXT NOT NULL DEFAULT '',foreign_arrival TEXT NOT NULL DEFAULT '',notified_foreign_arrival TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT 'local',remote_record_id TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_posting_routes_day ON posting_routes(day);CREATE INDEX IF NOT EXISTS idx_posting_routes_sku_destination ON posting_routes(sku,destination);CREATE INDEX IF NOT EXISTS idx_sales_daily_day_sku ON sales_daily(day,sku);CREATE INDEX IF NOT EXISTS idx_ad_daily_day_sku ON ad_daily(day,sku);CREATE INDEX IF NOT EXISTS idx_finance_operation_date ON finance_transactions(operation_date);").map_err(|e|e.to_string())?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS product_cluster_weights(sku TEXT NOT NULL,cluster_name TEXT NOT NULL,weight REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(sku,cluster_name));").map_err(|e|e.to_string())?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS inventory_totals(sku TEXT PRIMARY KEY,offer_id TEXT NOT NULL DEFAULT '',present_stock INTEGER NOT NULL DEFAULT 0,reserved_stock INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
+    c.execute_batch("CREATE TABLE IF NOT EXISTS campaign_action_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL,action TEXT NOT NULL,requested_value TEXT NOT NULL DEFAULT '',before_state TEXT NOT NULL DEFAULT '',before_budget REAL NOT NULL DEFAULT 0,after_state TEXT NOT NULL DEFAULT '',after_budget REAL NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'pending',message TEXT NOT NULL DEFAULT '',before_from TEXT NOT NULL DEFAULT '',before_to TEXT NOT NULL DEFAULT '',before_spend REAL NOT NULL DEFAULT 0,before_revenue REAL NOT NULL DEFAULT 0,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_campaign_action_logs_campaign ON campaign_action_logs(campaign_id,created_at DESC);").map_err(|e|e.to_string())?;
+    c.execute_batch("CREATE TABLE IF NOT EXISTS competitor_collection_runs(run_id TEXT PRIMARY KEY,workflow TEXT NOT NULL DEFAULT 'product_snapshot',platform TEXT NOT NULL DEFAULT 'ozon',locale TEXT NOT NULL DEFAULT 'ru-RU',started_at TEXT NOT NULL,finished_at TEXT NOT NULL DEFAULT '',search_context TEXT NOT NULL DEFAULT '',requested_scope TEXT NOT NULL DEFAULT '',completed_scope TEXT NOT NULL DEFAULT '',requested INTEGER NOT NULL DEFAULT 0,completed INTEGER NOT NULL DEFAULT 0,ok INTEGER NOT NULL DEFAULT 0,blocked INTEGER NOT NULL DEFAULT 0,changed_layout INTEGER NOT NULL DEFAULT 0,inaccessible INTEGER NOT NULL DEFAULT 0,ambiguous_match INTEGER NOT NULL DEFAULT 0,incomplete INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'running',notes TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS competitor_observations(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,competitor_id INTEGER NOT NULL,observed_at TEXT NOT NULL,status TEXT NOT NULL,retry_count INTEGER NOT NULL DEFAULT 0,source_url TEXT NOT NULL DEFAULT '',final_url TEXT NOT NULL DEFAULT '',locale TEXT NOT NULL DEFAULT 'ru-RU',search_context TEXT NOT NULL DEFAULT '',price_raw TEXT NOT NULL DEFAULT '',sales_raw TEXT NOT NULL DEFAULT '',evidence TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',FOREIGN KEY(run_id) REFERENCES competitor_collection_runs(run_id),FOREIGN KEY(competitor_id) REFERENCES competitor_products(id),UNIQUE(run_id,competitor_id));CREATE INDEX IF NOT EXISTS idx_competitor_observations_competitor ON competitor_observations(competitor_id,observed_at DESC);").map_err(|e|e.to_string())?;
+    let _ = c.execute(
+        "ALTER TABLE campaigns ADD COLUMN budget_known INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = c.execute(
+        "ALTER TABLE campaigns ADD COLUMN budget_updated_at TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = c.execute(
+        "ALTER TABLE campaigns ADD COLUMN budget_scale_version INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    c.execute("UPDATE campaigns SET budget=CASE WHEN budget_known=1 THEN budget/1000000.0 ELSE budget END,budget_scale_version=1 WHERE budget_scale_version=0", []).map_err(|e|e.to_string())?;
     c.execute_batch("CREATE INDEX IF NOT EXISTS idx_inventory_stock_sku ON inventory_stock(sku);CREATE INDEX IF NOT EXISTS idx_replenishment_plan_sku ON replenishment_plan(sku);").map_err(|e|e.to_string())?;
     let has_image = c
         .prepare("PRAGMA table_info(products)")
@@ -742,6 +875,31 @@ fn performance_post(
         .map_err(|e| format!("Performance API 请求失败（{path}）：{e}"))?;
     let raw = response.into_string().map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| format!("Performance API 返回无法解析：{e}"))
+}
+fn performance_mutation(
+    method: &str,
+    path: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let url = format!("https://api-performance.ozon.ru{path}");
+    let request = if method == "PATCH" {
+        ureq::patch(&url)
+    } else {
+        ureq::post(&url)
+    };
+    let response = request
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Accept", "application/json")
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|e| format!("Performance API 写操作失败（{path}）：{e}"))?;
+    let raw = response.into_string().map_err(|e| e.to_string())?;
+    if raw.trim().is_empty() {
+        Ok(serde_json::json!({}))
+    } else {
+        serde_json::from_str(&raw).map_err(|e| format!("Performance API 返回无法解析：{e}"))
+    }
 }
 fn feishu_base(c: &Connection) -> String {
     let value = setting(c, "feishu_base_url");
@@ -1227,9 +1385,16 @@ fn orders(
 fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingData, String> {
     let c = db(&state)?;
     let (impressions,clicks,cart_adds,orders,revenue,spend):(i64,i64,i64,i64,f64,f64)=c.query_row("WITH x AS(SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT COALESCE(SUM(impressions),0),COALESCE(SUM(clicks),0),COALESCE(SUM(cart_adds),0),COALESCE(SUM(orders),0),COALESCE(SUM(revenue),0),COALESCE(SUM(spend),0)FROM x,m WHERE (m.store=1 AND x.sku='')OR(m.store=0 AND x.sku<>'')",params![range.from,range.to],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(|e|e.to_string())?;
-    let mut stmt=c.prepare("WITH x AS(SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT a.campaign_id,COALESCE(NULLIF(MAX(a.campaign_name),''),MAX(c.name),a.campaign_id),COALESCE(MAX(c.state),''),COALESCE(MAX(c.payment_type),''),SUM(a.impressions),SUM(a.clicks),SUM(a.orders),SUM(a.spend),SUM(a.revenue)FROM x a CROSS JOIN m LEFT JOIN campaigns c ON c.campaign_id=a.campaign_id WHERE (m.store=1 AND a.sku='')OR(m.store=0 AND a.sku<>'')GROUP BY a.campaign_id ORDER BY SUM(a.spend)DESC").map_err(|e|e.to_string())?;
+    let to_date = chrono::NaiveDate::parse_from_str(&range.to, "%Y-%m-%d")
+        .unwrap_or_else(|_| chrono::Local::now().date_naive());
+    let active_from = to_date
+        .checked_sub_months(chrono::Months::new(2))
+        .unwrap_or(to_date)
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut stmt=c.prepare("WITH x AS(SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT a.campaign_id,COALESCE(NULLIF(MAX(a.campaign_name),''),MAX(c.name),a.campaign_id),COALESCE(MAX(c.state),''),COALESCE(MAX(c.payment_type),''),SUM(a.impressions),SUM(a.clicks),SUM(a.orders),SUM(a.spend),SUM(a.revenue),COALESCE(MAX(c.budget),0) FROM x a CROSS JOIN m LEFT JOIN campaigns c ON c.campaign_id=a.campaign_id WHERE (m.store=1 AND a.sku='')OR(m.store=0 AND a.sku<>'')GROUP BY a.campaign_id HAVING SUM(a.spend)>0 ORDER BY SUM(a.spend)DESC").map_err(|e|e.to_string())?;
     let campaigns = stmt
-        .query_map(params![range.from, range.to], |r| {
+        .query_map(params![active_from, range.to], |r| {
             let spend: f64 = r.get(7)?;
             let revenue: f64 = r.get(8)?;
             Ok(CampaignRow {
@@ -1247,6 +1412,7 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
                 } else {
                     None
                 },
+                budget: r.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -1292,6 +1458,273 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
         campaigns,
         trend,
     })
+}
+
+fn campaign_metrics(
+    c: &Connection,
+    campaign_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(f64, f64), String> {
+    c.query_row("WITH x AS(SELECT * FROM ad_daily WHERE campaign_id=?1 AND day BETWEEN ?2 AND ?3),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT COALESCE(SUM(spend),0),COALESCE(SUM(revenue),0)FROM x,m WHERE (m.store=1 AND sku='')OR(m.store=0 AND sku<>'')",params![campaign_id,from,to],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())
+}
+
+fn campaign_monitor_data(
+    campaign_id: String,
+    state: &AppState,
+) -> Result<CampaignMonitorData, String> {
+    let c = db(state)?;
+    let (name, mut current_state, mut budget, mut budget_known, budget_fresh): (String, String, f64, bool, bool) = c
+        .query_row(
+            "SELECT name,state,budget,budget_known=1,budget_known=1 AND datetime(budget_updated_at)>=datetime('now','-15 minutes') FROM campaigns WHERE campaign_id=?1",
+            [&campaign_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap_or_else(|_| (campaign_id.clone(), String::new(), 0.0, false, false));
+    let mut budget_source = if budget_known {
+        "本地缓存"
+    } else {
+        "尚未获取"
+    }
+    .to_string();
+    if !budget_fresh {
+        if let Ok(token) = performance_token(&c) {
+            if let Ok(payload) = performance_get(
+                &format!("/api/client/campaign?campaignIds={campaign_id}"),
+                &token,
+            ) {
+                if let Some(item) = payload
+                    .get("list")
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                {
+                    if let Some(value) = performance_budget_rub(
+                        item.get("weeklyBudget").or_else(|| item.get("budget")),
+                    ) {
+                        budget = value;
+                        budget_known = true;
+                        budget_source = "Performance API 实时值".to_string();
+                    }
+                    let api_state = json_text(item.get("state"));
+                    if !api_state.is_empty() {
+                        current_state = api_state;
+                    }
+                    let _ = c.execute(
+                    "UPDATE campaigns SET state=?1,budget=CASE WHEN ?2 THEN ?3 ELSE budget END,budget_known=CASE WHEN ?2 THEN 1 ELSE budget_known END,budget_updated_at=CASE WHEN ?2 THEN CURRENT_TIMESTAMP ELSE budget_updated_at END,budget_scale_version=1,updated_at=CURRENT_TIMESTAMP WHERE campaign_id=?4",
+                    params![current_state, budget_known, budget, campaign_id],
+                );
+                }
+            }
+        }
+    } else {
+        budget_source = "本地缓存（15 分钟内）".to_string();
+    }
+    let today = chrono::Local::now().date_naive();
+    let from = today
+        .checked_sub_months(chrono::Months::new(2))
+        .unwrap_or(today)
+        .format("%Y-%m-%d")
+        .to_string();
+    let to = today.format("%Y-%m-%d").to_string();
+    let mut daily_stmt=c.prepare("WITH x AS(SELECT * FROM ad_daily WHERE campaign_id=?1 AND day BETWEEN ?2 AND ?3),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT day,SUM(impressions),SUM(clicks),SUM(orders),SUM(spend),SUM(revenue)FROM x,m WHERE (m.store=1 AND sku='')OR(m.store=0 AND sku<>'')GROUP BY day ORDER BY day").map_err(|e|e.to_string())?;
+    let daily = daily_stmt
+        .query_map(params![campaign_id, from, to], |r| {
+            Ok(AdvertisingTrendRow {
+                day: r.get(0)?,
+                impressions: r.get(1)?,
+                clicks: r.get(2)?,
+                orders: r.get(3)?,
+                spend: r.get(4)?,
+                revenue: r.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut log_stmt=c.prepare("SELECT id,action,requested_value,before_state,before_budget,after_state,after_budget,status,message,created_at,before_spend,before_revenue FROM campaign_action_logs WHERE campaign_id=?1 ORDER BY id DESC LIMIT 200").map_err(|e|e.to_string())?;
+    let base = log_stmt
+        .query_map([&campaign_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, f64>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, f64>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+                r.get::<_, f64>(10)?,
+                r.get::<_, f64>(11)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut logs = Vec::new();
+    for row in base {
+        let after_from = row.9.chars().take(10).collect::<String>();
+        let (after_spend, after_revenue) = campaign_metrics(&c, &campaign_id, &after_from, &to)?;
+        logs.push(CampaignActionLogRow {
+            id: row.0,
+            action: row.1,
+            requested_value: row.2,
+            before_state: row.3,
+            before_budget: row.4,
+            after_state: row.5,
+            after_budget: row.6,
+            status: row.7,
+            message: row.8,
+            created_at: row.9,
+            before_spend: row.10,
+            before_revenue: row.11,
+            after_spend,
+            after_revenue,
+        });
+    }
+    Ok(CampaignMonitorData {
+        id: campaign_id,
+        name,
+        state: current_state,
+        budget,
+        budget_source,
+        budget_known,
+        daily,
+        logs,
+    })
+}
+
+#[tauri::command]
+async fn campaign_monitor(
+    campaign_id: String,
+    state: State<'_, AppState>,
+) -> Result<CampaignMonitorData, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || campaign_monitor_data(campaign_id, &owned))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn campaign_control_blocking(
+    input: CampaignControlInput,
+    state: &AppState,
+) -> Result<String, String> {
+    if input.confirmation.trim() != "确认执行" {
+        return Err("请输入“确认执行”后再提交广告写操作".into());
+    }
+    let c = db(state)?;
+    let (before_state, before_budget): (String, f64) = c
+        .query_row(
+            "SELECT state,budget FROM campaigns WHERE campaign_id=?1",
+            [&input.campaign_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "广告活动不存在，请先同步 Performance 广告".to_string())?;
+    let today = chrono::Local::now().date_naive();
+    let before_to = today.pred_opt().unwrap_or(today);
+    let before_from = before_to - chrono::Duration::days(6);
+    let before_from_text = before_from.format("%Y-%m-%d").to_string();
+    let before_to_text = before_to.format("%Y-%m-%d").to_string();
+    let (before_spend, before_revenue) =
+        campaign_metrics(&c, &input.campaign_id, &before_from_text, &before_to_text)?;
+    c.execute("INSERT INTO campaign_action_logs(campaign_id,action,requested_value,before_state,before_budget,before_from,before_to,before_spend,before_revenue,status)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'running')",params![input.campaign_id,input.action,input.weekly_budget.map(|v|v.to_string()).unwrap_or_default(),before_state,before_budget,before_from_text,before_to_text,before_spend,before_revenue]).map_err(|e|e.to_string())?;
+    let log_id = c.last_insert_rowid();
+    let result = (|| -> Result<(String, f64, String), String> {
+        let token = performance_token(&c)?;
+        match input.action.as_str() {
+            "activate" => {
+                performance_mutation(
+                    "POST",
+                    &format!("/api/client/campaign/{}/activate", input.campaign_id),
+                    &token,
+                    &serde_json::json!({}),
+                )?;
+            }
+            "deactivate" => {
+                performance_mutation(
+                    "POST",
+                    &format!("/api/client/campaign/{}/deactivate", input.campaign_id),
+                    &token,
+                    &serde_json::json!({}),
+                )?;
+            }
+            "budget" => {
+                let value = input
+                    .weekly_budget
+                    .filter(|v| *v > 0.0)
+                    .ok_or("周预算必须大于 0")?;
+                performance_mutation(
+                    "PATCH",
+                    &format!("/api/client/campaign/{}", input.campaign_id),
+                    &token,
+                    &serde_json::json!({"weeklyBudget":(value * 1_000_000.0).round() as i64}),
+                )?;
+            }
+            _ => return Err("不支持的广告操作".into()),
+        }
+        let payload = performance_get(
+            &format!("/api/client/campaign?campaignIds={}", input.campaign_id),
+            &token,
+        )?;
+        let item = payload
+            .get("list")
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first())
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let state_value = json_text(item.get("state"));
+        let budget_value = item
+            .get("weeklyBudget")
+            .or_else(|| item.get("budget"))
+            .and_then(|v| performance_budget_rub(Some(v)))
+            .unwrap_or_else(|| input.weekly_budget.unwrap_or(before_budget));
+        Ok((
+            state_value,
+            budget_value,
+            "Performance API 已执行并完成活动状态回读".to_string(),
+        ))
+    })();
+    match result {
+        Ok((after_state, after_budget, message)) => {
+            c.execute("UPDATE campaigns SET state=?1,budget=?2,budget_known=1,budget_updated_at=CURRENT_TIMESTAMP,budget_scale_version=1,updated_at=CURRENT_TIMESTAMP WHERE campaign_id=?3",params![after_state,after_budget,input.campaign_id]).map_err(|e|e.to_string())?;
+            c.execute("UPDATE campaign_action_logs SET after_state=?1,after_budget=?2,status='success',message=?3 WHERE id=?4",params![after_state,after_budget,message,log_id]).map_err(|e|e.to_string())?;
+            Ok(message)
+        }
+        Err(error) => {
+            let _=c.execute("UPDATE campaign_action_logs SET after_state=before_state,after_budget=before_budget,status='failed',message=?1 WHERE id=?2",params![error,log_id]);
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+async fn campaign_control(
+    input: CampaignControlInput,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || campaign_control_blocking(input, &owned))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn campaign_ai_analysis(
+    campaign_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move||{
+        let data=campaign_monitor_data(campaign_id,&owned)?;let c=db(&owned)?;let base=setting(&c,"ai_base_url");let model=setting(&c,"ai_model");let key=secret_setting(&c,"ai_api_key")?;
+        if base.is_empty()||model.is_empty()||key.is_empty(){return Err("请先在连接设置中配置 AI Base URL、模型和 API Key".into())}
+        let context=serde_json::to_string(&data.daily).map_err(|e|e.to_string())?;let logs=serde_json::to_string(&data.logs).map_err(|e|e.to_string())?;
+        let prompt=format!("广告活动 {}（{}），当前状态 {}，周预算 {}。近两个月逐日数据：{}。预算/开关操作及效果日志：{}。分析调整后的真实变化，区分样本不足与可确认结论，并给出是否启停、预算调整幅度及观察周期建议。",data.name,data.id,data.state,data.budget,context,logs);
+        let body=serde_json::json!({"model":model,"messages":[{"role":"system","content":"你是 Ozon 广告分析助手。只能依据提供的数据分析；不得声称已执行任何操作；明确区分事实、推断和建议。输出中文。"},{"role":"user","content":prompt}]});
+        let response=ureq::post(&chat_endpoint(&base)).set("Authorization",&format!("Bearer {key}")).set("Content-Type","application/json").send_string(&body.to_string()).map_err(|e|format!("AI 请求失败：{e}"))?;
+        let raw=response.into_string().map_err(|e|e.to_string())?;let payload:serde_json::Value=serde_json::from_str(&raw).map_err(|e|format!("AI 返回不是有效 JSON：{e}"))?;
+        payload.pointer("/choices/0/message/content").and_then(|v|v.as_str()).map(str::to_string).ok_or_else(||"AI 返回缺少正文".into())
+    }).await.map_err(|e|e.to_string())?
 }
 
 #[tauri::command]
@@ -1998,13 +2431,6 @@ fn first_capture(text: &str, patterns: &[&str]) -> String {
     }
     String::new()
 }
-fn capture_number(text: &str, patterns: &[&str]) -> Option<f64> {
-    let value = first_capture(text, patterns)
-        .replace(' ', "")
-        .replace("&nbsp;", "")
-        .replace(',', ".");
-    value.parse().ok()
-}
 fn canonical_ozon_product_url(value: &str) -> Result<(String, String), String> {
     let code = first_capture(value, &[r#"(?:-|/)(\d{6,})(?:/|\?|$)"#, r#"^(\d{6,})$"#]);
     if code.is_empty() {
@@ -2012,15 +2438,32 @@ fn canonical_ozon_product_url(value: &str) -> Result<(String, String), String> {
     }
     Ok((format!("https://www.ozon.ru/product/{code}/"), code))
 }
-fn save_competitor_html(c: &Connection, id: i64, html: &str, source: &str) -> Result<(), String> {
-    let url = c
-        .query_row(
-            "SELECT product_url FROM competitor_products WHERE id=?1",
-            [id],
-            |r| r.get::<_, String>(0),
-        )
-        .map_err(|e| e.to_string())?;
-    let (_, code) = canonical_ozon_product_url(&url)?;
+struct ParsedCompetitorPage {
+    name: String,
+    image: String,
+    price: Option<f64>,
+    sales: Option<i64>,
+    price_raw: String,
+    sales_raw: String,
+}
+fn parse_competitor_html(html: &str) -> Result<ParsedCompetitorPage, String> {
+    let lower = html.to_lowercase();
+    // Do not scan bundled JavaScript for generic words such as `captcha` or
+    // `проверка`: the normal Ozon storefront contains those strings too.  Only
+    // reject an explicit challenge title/body marker.
+    if [
+        "<title>antibot challenge page",
+        "<title>captcha",
+        "verify you are human</h",
+        "access denied</h",
+        "robot check</h",
+        "проверка безопасности</h",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return Err("blocked: Ozon 返回验证或访问限制页面".into());
+    }
     let name = first_capture(
         html,
         &[
@@ -2033,35 +2476,559 @@ fn save_competitor_html(c: &Connection, id: i64, html: &str, source: &str) -> Re
     let image = first_capture(
         html,
         &[
+            r#"\"codexMainImage\"\s*:\s*\"([^\"]+)\""#,
             r#"<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)"#,
             r#"<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']"#,
             r#"\"image\"\s*:\s*\"([^\"]+)\""#,
         ],
     );
-    let price = capture_number(
+    let price_raw = first_capture(
         html,
         &[
+            r#"\"codexVisiblePrice\"\s*:\s*\"([^\"]+)\""#,
             r#"\"price\"\s*:\s*\"?([0-9]+(?:[.,][0-9]+)?)"#,
             r#"\"cardPrice\"\s*:\s*\"?([0-9]+(?:[.,][0-9]+)?)"#,
+            r#"([0-9][0-9 \u{00a0}\u{202f}]{1,})\s*₽"#,
         ],
     );
-    let sales = capture_number(
+    let sales_raw = first_capture(
         html,
         &[
             r#"\"soldQuantity\"\s*:\s*([0-9]+)"#,
             r#"\"ordersCount\"\s*:\s*([0-9]+)"#,
             r#"\"soldAmount\"\s*:\s*([0-9]+)"#,
         ],
-    )
-    .map(|v| v as i64);
+    );
+    let price = price_raw
+        .replace([' ', '\u{00a0}', '\u{202f}', '₽'], "")
+        .replace(',', ".")
+        .parse()
+        .ok();
+    let sales = sales_raw.parse().ok();
     if name.is_empty() && image.is_empty() && price.is_none() {
-        return Err("页面未返回可识别的商品结构；请确认保存的是完成验证后的商品页 HTML".into());
+        return Err("changed_layout: 页面可访问，但未返回可识别的商品结构".into());
     }
-    c.execute("UPDATE competitor_products SET product_code=CASE WHEN ?2='' THEN product_code ELSE ?2 END,name=CASE WHEN ?3='' THEN name ELSE ?3 END,image_url=CASE WHEN ?4='' THEN image_url ELSE ?4 END,updated_at=CURRENT_TIMESTAMP WHERE id=?1",params![id,code,name,image]).map_err(|e|e.to_string())?;
-    c.execute("INSERT INTO competitor_snapshots(competitor_id,captured_at,price,sales_total,source) VALUES(?1,CURRENT_TIMESTAMP,?2,?3,?4)",params![id,price,sales,source]).map_err(|e|e.to_string())?;
+    Ok(ParsedCompetitorPage {
+        name,
+        image,
+        price,
+        sales,
+        price_raw,
+        sales_raw,
+    })
+}
+fn save_competitor_html(
+    c: &Connection,
+    id: i64,
+    html: &str,
+    source: &str,
+) -> Result<ParsedCompetitorPage, String> {
+    let url = c
+        .query_row(
+            "SELECT product_url FROM competitor_products WHERE id=?1",
+            [id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let (_, code) = canonical_ozon_product_url(&url)?;
+    let parsed = parse_competitor_html(html)?;
+    c.execute("UPDATE competitor_products SET product_code=CASE WHEN ?2='' THEN product_code ELSE ?2 END,name=CASE WHEN ?3='' THEN name ELSE ?3 END,image_url=CASE WHEN ?4='' THEN image_url ELSE ?4 END,updated_at=CURRENT_TIMESTAMP WHERE id=?1",params![id,code,parsed.name,parsed.image]).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO competitor_snapshots(competitor_id,captured_at,price,sales_total,source) VALUES(?1,CURRENT_TIMESTAMP,?2,?3,?4)",params![id,parsed.price,parsed.sales,source]).map_err(|e|e.to_string())?;
+    Ok(parsed)
+}
+fn validate_competitor_identity(html: &str, expected_code: &str) -> Result<(), String> {
+    let observed_url = first_capture(
+        html,
+        &[
+            r#"<meta[^>]+property=["']og:url["'][^>]+content=["']([^"']+)"#,
+            r#"<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)"#,
+        ],
+    );
+    if !observed_url.is_empty() {
+        if let Ok((_, observed_code)) = canonical_ozon_product_url(&observed_url) {
+            if observed_code != expected_code {
+                return Err(format!(
+                    "ambiguous_match: 目标商品 {expected_code}，页面商品 {observed_code}"
+                ));
+            }
+        }
+    }
     Ok(())
 }
-fn refresh_competitor_inner(c: &Connection, id: i64) -> Result<(), String> {
+fn installed_competitor_browser() -> Result<std::path::PathBuf, String> {
+    for path in [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ] {
+        let candidate = std::path::PathBuf::from(path);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err("未找到 Edge 或 Chrome 可执行文件".into())
+}
+
+fn collect_competitor_python_html(
+    url: &str,
+    expected_code: &str,
+    data_dir: &Path,
+    competitor_id: i64,
+) -> Result<String, String> {
+    use std::io::Read;
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    let helper = current.parent().unwrap_or(Path::new(".")).join("competitor-collector.exe");
+    let helper = if helper.is_file() { helper } else { PathBuf::from("competitor-collector.exe") };
+    if !helper.is_file() {
+        return Err("inaccessible: 缺少 competitor-collector.exe；请使用完整发布包或重新构建 Python 采集器".into());
+    }
+    let profile = data_dir.join("competitor_legacy_python_profile");
+    fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
+    let mut child = std::process::Command::new(&helper)
+        .arg("--url").arg(url)
+        .arg("--expected").arg(expected_code)
+        .arg("--profile").arg(&profile)
+        .arg("--timeout").arg("180")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn().map_err(|e| format!("无法启动旧版 Python/Playwright 采集器：{e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(210);
+    loop {
+        if competitor_task_stop_requested(competitor_id) {
+            let _ = child.kill();
+            return Err("cancelled: 用户已停止竞品采集".into());
+        }
+        if child.try_wait().map_err(|e| e.to_string())?.is_some() { break; }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            return Err("blocked: Python/Playwright 采集超过 210 秒".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    let mut raw = String::new();
+    if let Some(mut stdout) = child.stdout.take() { stdout.read_to_string(&mut raw).map_err(|e| e.to_string())?; }
+    let value: serde_json::Value = serde_json::from_str(raw.trim())
+        .map_err(|e| format!("Python 采集器返回格式无效：{e}"))?;
+    if !value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err(format!("blocked: {}", value.get("error").and_then(|v|v.as_str()).unwrap_or("Python 采集失败")));
+    }
+    let final_url=value.get("url").and_then(|v|v.as_str()).unwrap_or(url);
+    let name=value.get("name").and_then(|v|v.as_str()).unwrap_or("");
+    let price=value.get("price").and_then(|v|v.as_f64()).map(|v|v.to_string()).unwrap_or_default();
+    let image=value.get("image").and_then(|v|v.as_str()).unwrap_or("");
+    let evidence=serde_json::json!({"codexVisiblePrice":price,"codexMainImage":image});
+    let html=format!("<meta property=\"og:url\" content=\"{}\"><meta property=\"og:title\" content=\"{}\"><script type=\"application/json\">{}</script>",final_url.replace('"',"&quot;"),name.replace('"',"&quot;"),evidence);
+    validate_competitor_identity(&html, expected_code)?;
+    Ok(html)
+}
+
+fn collect_competitor_public_extension_html(
+    url: &str,
+    expected_code: &str,
+    data_dir: &Path,
+    competitor_id: i64,
+) -> Result<String, String> {
+    use std::io::{Read, Write};
+    let browser_path = installed_competitor_browser()?;
+    let browser_name = browser_path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+    let profile = data_dir.join(if browser_name.eq_ignore_ascii_case("chrome.exe") {
+        "competitor_public_chrome_profile_v3"
+    } else {
+        "competitor_public_edge_profile_v3"
+    });
+    let extension = data_dir.join("competitor_public_reader_extension");
+    fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&extension).map_err(|e| e.to_string())?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("无法启动竞品本地回传端口：{e}"))?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let debug_probe = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let debug_port = debug_probe.local_addr().map_err(|e| e.to_string())?.port();
+    drop(debug_probe);
+    fs::write(extension.join("manifest.json"), r#"{"manifest_version":3,"name":"Ozon ERP Public Product Reader","version":"1.0.1","description":"Reads public product fields for the local Ozon ERP.","host_permissions":["http://127.0.0.1/*"],"background":{"service_worker":"background.js"},"content_scripts":[{"matches":["https://www.ozon.ru/product/*","https://ozon.ru/product/*"],"js":["reader.js"],"run_at":"document_idle"}]}"#).map_err(|e| e.to_string())?;
+    fs::write(extension.join("background.js"), format!(r#"chrome.runtime.onMessage.addListener((data)=>{{fetch('http://127.0.0.1:{port}/result',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}}).catch(()=>{{}});}});"#)).map_err(|e| e.to_string())?;
+    let reader = format!(r#"(()=>{{
+const receiverPort={port};
+const visible=el=>{{if(!el)return false;const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'}};
+const read=()=>{{
+ const roots=[...document.querySelectorAll('[data-widget*="Price"],[data-widget*="price"],[class*="price"],[class*="Price"]')].filter(visible);
+ const text=(roots.map(x=>x.innerText||'').join('\n')||document.body?.innerText||'');
+ const match=text.match(/(?:^|\s)(\d[\d\s\u00a0\u202f]{{0,12}})\s*₽/);
+ const imgs=[...document.querySelectorAll('[data-widget*="Gallery"] img,[data-widget*="gallery"] img,img')].filter(visible);
+ const main=imgs.find(x=>{{const r=x.getBoundingClientRect(),u=x.currentSrc||x.src||'';return /^https?:/i.test(u)&&r.width>=250&&r.height>=250}})||imgs.find(x=>/^https?:/i.test(x.currentSrc||x.src||''));
+ const data={{url:location.href,title:document.title||'',visibleText:(document.body?.innerText||'').slice(0,20000),html:document.documentElement?.outerHTML||'',price:match?match[1]:'',image:main?(main.currentSrc||main.src||''):''}};
+ chrome.runtime.sendMessage(data).catch(()=>{{}});
+}};setInterval(read,1000);read();
+}})();"#);
+    fs::write(extension.join("reader.js"), reader).map_err(|e| e.to_string())?;
+    let mut child = std::process::Command::new(&browser_path)
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg(format!("--disable-extensions-except={}", extension.display()))
+        .arg(format!("--load-extension={}", extension.display()))
+        .arg(format!("--remote-debugging-port={debug_port}"))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--new-window").arg("about:blank").spawn()
+        .map_err(|e| format!("无法启动竞品公开页面浏览器：{e}"))?;
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let _ = std::process::Command::new(&browser_path)
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg(url)
+        .spawn()
+        .map_err(|e| format!("浏览器已启动，但无法打开竞品商品页：{e}"))?;
+    let mut devtools_browser = None;
+    for _ in 0..30 {
+        if let Ok(response) = ureq::get(&format!("http://127.0.0.1:{debug_port}/json/version")).timeout(std::time::Duration::from_secs(1)).call() {
+            if let Ok(value) = response.into_json::<serde_json::Value>() {
+                if let Some(ws) = value.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
+                    if let Ok(browser) = headless_chrome::Browser::connect(ws.to_string()) {
+                        devtools_browser = Some(browser);
+                        break;
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let visible_script = r#"(()=>{
+      const visible=(el)=>{if(!el)return false;const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'};
+      const roots=[...document.querySelectorAll('[data-widget*="Price"],[data-widget*="price"],[class*="price"],[class*="Price"]')].filter(visible);
+      const text=(roots.map(x=>x.innerText||'').join('\n')||document.body?.innerText||'');
+      const match=text.match(/(?:^|\s)(\d[\d\s\u00a0\u202f]{0,12})\s*₽/);
+      const imgs=[...document.querySelectorAll('[data-widget*="Gallery"] img,[data-widget*="gallery"] img,img')].filter(visible);
+      const main=imgs.find(x=>{const r=x.getBoundingClientRect(),u=x.currentSrc||x.src||'';return /^https?:/i.test(u)&&r.width>=250&&r.height>=250})||imgs.find(x=>/^https?:/i.test(x.currentSrc||x.src||''));
+      return JSON.stringify({url:location.href,html:document.documentElement?.outerHTML||'',price:match?match[1]:'',image:main?(main.currentSrc||main.src||''):''});
+    })()"#;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    let mut best = String::new();
+    let mut last_signature = String::new();
+    let mut stable = 0;
+    while std::time::Instant::now() < deadline {
+        if competitor_task_stop_requested(competitor_id) {
+            let _ = child.kill();
+            return Err("cancelled: 用户已停止竞品采集".into());
+        }
+        if let Some(browser) = devtools_browser.as_ref() {
+            for tab in browser.get_tabs().lock().iter() {
+                if !tab.get_url().contains("ozon.ru/product/") { continue; }
+                if let Ok(result) = tab.evaluate(visible_script, false) {
+                    if let Some(raw) = result.value.and_then(|v| v.as_str().map(str::to_string)) {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            let current_url = value.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                            let html = value.get("html").and_then(|v| v.as_str()).unwrap_or("");
+                            let harvested = serde_json::json!({"codexVisiblePrice":value.get("price").and_then(|v|v.as_str()).unwrap_or(""),"codexMainImage":value.get("image").and_then(|v|v.as_str()).unwrap_or("")});
+                            if canonical_ozon_product_url(current_url).map(|(_,c)|c==expected_code).unwrap_or(false) && !html.is_empty() {
+                                let enriched=format!("<script type=\"application/json\">{harvested}</script>{html}");
+                                if let Ok(parsed)=parse_competitor_html(&enriched) {
+                                    if parsed.price.is_some() && !parsed.image.is_empty() { best=enriched; break; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !best.is_empty() { break; }
+        }
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(800)));
+                let mut request = Vec::new();
+                let mut part = [0u8; 65536];
+                loop {
+                    match stream.read(&mut part) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            request.extend_from_slice(&part[..n]);
+                            if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                                let headers = String::from_utf8_lossy(&request[..header_end]);
+                                let content_length = headers.lines().find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok()).flatten()
+                                }).unwrap_or(0);
+                                if request.len() >= header_end + 4 + content_length { break; }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let body = request.windows(4).position(|w| w == b"\r\n\r\n").map(|p| &request[p + 4..]).unwrap_or(&[]);
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+                    let current_url = value.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    let html = value.get("html").and_then(|v| v.as_str()).unwrap_or("");
+                    let identity = canonical_ozon_product_url(current_url).map(|(_, c)| c == expected_code).unwrap_or(false);
+                    let harvested = serde_json::json!({
+                        "codexVisiblePrice": value.get("price").and_then(|v| v.as_str()).unwrap_or(""),
+                        "codexMainImage": value.get("image").and_then(|v| v.as_str()).unwrap_or("")
+                    });
+                    if identity && !html.is_empty() {
+                        let enriched = format!("<script type=\"application/json\">{harvested}</script>{html}");
+                        if let Ok(parsed) = parse_competitor_html(&enriched) {
+                            if parsed.price.is_some() && !parsed.image.is_empty() {
+                                let signature = format!("{}|{}|{}", parsed.price_raw, parsed.image, parsed.name);
+                                stable = if signature == last_signature { stable + 1 } else { 0 };
+                                last_signature = signature;
+                                best = enriched;
+                                if stable >= 1 { break; }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let _ = child.kill();
+    if best.is_empty() {
+        return Err("blocked: 普通浏览器公开页面在 240 秒内未回传完整售价与主图；请检查页面是否显示 Ozon 网络/验证限制".into());
+    }
+    validate_competitor_identity(&best, expected_code)?;
+    Ok(best)
+}
+
+fn collect_competitor_browser_html(
+    url: &str,
+    expected_code: &str,
+    data_dir: &Path,
+    competitor_id: i64,
+) -> Result<String, String> {
+    use headless_chrome::{Browser, LaunchOptions};
+    let browser_path = installed_competitor_browser()?;
+    let is_chrome = browser_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case("chrome.exe"))
+        .unwrap_or(false);
+    let profile = data_dir.join(if is_chrome {
+        "competitor_chrome_profile"
+    } else {
+        "competitor_edge_profile"
+    });
+    fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
+    // Pass the product URL to Edge/Chrome itself. This creates the visible first
+    // tab on the Ozon product instead of leaving the user on Edge's MSN new-tab.
+    let launch_url = OsString::from(url);
+    // Keep the explicit automation marker. Only restore normal foreground page
+    // networking that the library disables by default.
+    let background_networking = OsString::from("--disable-background-networking");
+    let network_service =
+        OsString::from("--enable-features=NetworkService,NetworkServiceInProcess");
+    let options = LaunchOptions::default_builder()
+        .headless(false)
+        .path(Some(browser_path))
+        .user_data_dir(Some(profile))
+        .window_size(Some((1360, 900)))
+        .args(vec![launch_url.as_os_str()])
+        .ignore_default_args(vec![
+            background_networking.as_os_str(),
+            network_service.as_os_str(),
+        ])
+        .idle_browser_timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("浏览器启动参数错误：{e}"))?;
+    let browser = Browser::new(options).map_err(|e| format!("无法启动竞品专用浏览器：{e}"))?;
+    let tab = browser
+        .wait_for_initial_tab()
+        .map_err(|e| format!("无法取得竞品浏览器页面：{e}"))?;
+    tab.navigate_to(url)
+        .map_err(|e| format!("无法打开竞品页：{e}"))?;
+    tab.bring_to_front()
+        .map_err(|e| format!("无法激活竞品页标签：{e}"))?;
+    let navigation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < navigation_deadline {
+        if competitor_task_stop_requested(competitor_id) {
+            return Err("cancelled: 用户已停止竞品采集".into());
+        }
+        let actual = tab.get_url();
+        if actual.contains("ozon.ru/") {
+            break;
+        }
+        let _ = tab.navigate_to(url);
+        let _ = tab.bring_to_front();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if !tab.get_url().contains("ozon.ru/") {
+        return Err(format!(
+            "inaccessible: 专用浏览器未能跳转到 Ozon，当前地址为 {}",
+            tab.get_url()
+        ));
+    }
+    let script = r#"(()=>{
+      const visible=(el)=>{if(!el)return false;const r=el.getBoundingClientRect();const s=getComputedStyle(el);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'};
+      const priceRoots=[...document.querySelectorAll('[data-widget*="Price"],[data-widget*="price"],[class*="price"],[class*="Price"]')].filter(visible);
+      const priceText=(priceRoots.map(x=>x.innerText||'').join('\n')||document.body?.innerText||'');
+      const priceMatch=priceText.match(/(?:^|\s)(\d[\d\s\u00a0\u202f]{0,12})\s*₽/);
+      const gallery=[...document.querySelectorAll('[data-widget*="Gallery"] img,[data-widget*="gallery"] img,img')].filter(visible);
+      const main=gallery.find(x=>{const r=x.getBoundingClientRect();const u=x.currentSrc||x.src||'';return /^https?:/i.test(u)&&r.width>=250&&r.height>=250})||gallery.find(x=>/^https?:/i.test(x.currentSrc||x.src||''));
+      return JSON.stringify({url:location.href,title:document.title||'',visibleText:(document.body?.innerText||'').slice(0,20000),html:document.documentElement?.outerHTML||'',price:priceMatch?priceMatch[1]:'',image:main?(main.currentSrc||main.src||''):''});
+    })()"#;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    let mut best = String::new();
+    let mut stable = 0;
+    let mut last_signature = String::new();
+    while std::time::Instant::now() < deadline {
+        if competitor_task_stop_requested(competitor_id) {
+            return Err("cancelled: 用户已停止竞品采集".into());
+        }
+        if let Ok(remote) = tab.evaluate(script, false) {
+            if let Some(raw) = remote.value.and_then(|v| v.as_str().map(str::to_string)) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let current_url = value.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    let title = value
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let html = value.get("html").and_then(|v| v.as_str()).unwrap_or("");
+                    let visible_text = value
+                        .get("visibleText")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let challenged = ["captcha", "access denied", "доступ ограничен", "проверка безопасности"]
+                        .iter()
+                        .any(|marker| {
+                            title.contains(marker) || visible_text.contains(marker)
+                        });
+                    if !challenged && !html.is_empty() {
+                        let identity = canonical_ozon_product_url(current_url)
+                            .map(|(_, code)| code == expected_code)
+                            .unwrap_or(false);
+                        if identity {
+                            let harvested = serde_json::json!({
+                                "codexVisiblePrice": value.get("price").and_then(|v| v.as_str()).unwrap_or(""),
+                                "codexMainImage": value.get("image").and_then(|v| v.as_str()).unwrap_or("")
+                            });
+                            let enriched = format!("<script type=\"application/json\">{harvested}</script>{html}");
+                            if let Ok(parsed) = parse_competitor_html(&enriched) {
+                                let signature = format!(
+                                    "{}|{}|{}",
+                                    parsed.price_raw, parsed.sales_raw, parsed.name
+                                );
+                                if signature == last_signature {
+                                    stable += 1;
+                                } else {
+                                    stable = 0;
+                                    last_signature = signature;
+                                }
+                                best = enriched;
+                                if stable >= 2 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    if best.is_empty() {
+        return Err("blocked: 专用浏览器在 240 秒内未得到可校验的商品页；如 Ozon 显示验证，请在弹出窗口完成后等待自动继续".into());
+    }
+    validate_competitor_identity(&best, expected_code)?;
+    Ok(best)
+}
+fn begin_competitor_run(c: &Connection, requested: i64, scope: &str) -> Result<String, String> {
+    let now = chrono::Local::now();
+    let run_id = format!("competitor-{}", now.timestamp_millis());
+    c.execute("INSERT INTO competitor_collection_runs(run_id,started_at,search_context,requested_scope,requested,status)VALUES(?1,?2,'language=ru-RU; device=desktop; login=anonymous; source=public_product_page',?3,?4,'running')",params![run_id,now.to_rfc3339(),scope,requested]).map_err(|e|e.to_string())?;
+    Ok(run_id)
+}
+fn observation_status(error: &str) -> &'static str {
+    let lower = error.to_lowercase();
+    if lower.starts_with("blocked:") || lower.contains("403") || lower.contains("captcha") {
+        "blocked"
+    } else if lower.starts_with("changed_layout:") {
+        "changed_layout"
+    } else if lower.starts_with("ambiguous_match:") {
+        "ambiguous_match"
+    } else if lower.contains("401") || lower.contains("404") {
+        "inaccessible"
+    } else {
+        "incomplete"
+    }
+}
+
+#[cfg(test)]
+mod competitor_monitoring_tests {
+    use super::{observation_status, parse_competitor_html, validate_competitor_identity};
+
+    #[test]
+    fn missing_public_sales_stays_null_instead_of_zero() {
+        let parsed = parse_competitor_html(
+            r#"<meta property="og:title" content="SKU-1"><script>{"price":"1299.50"}</script>"#,
+        )
+        .expect("page should remain a usable partial observation");
+        assert_eq!(parsed.price, Some(1299.5));
+        assert_eq!(parsed.sales, None);
+    }
+
+    #[test]
+    fn parses_visible_ozon_price_and_harvested_main_image() {
+        let parsed = parse_competitor_html(
+            r#"<script>{"codexVisiblePrice":"1 686","codexMainImage":"https://cdn1.ozone.ru/s3/main.jpg"}</script><title>商品</title>"#,
+        )
+        .expect("visible Ozon fields");
+        assert_eq!(parsed.price, Some(1686.0));
+        assert_eq!(parsed.image, "https://cdn1.ozone.ru/s3/main.jpg");
+        assert_eq!(parsed.sales, None);
+    }
+
+    #[test]
+    fn access_challenge_has_controlled_blocked_status() {
+        let error = parse_competitor_html("<title>Captcha</title>verify you are human")
+            .err()
+            .expect("challenge page must not be parsed as a product");
+        assert_eq!(observation_status(&error), "blocked");
+    }
+
+    #[test]
+    fn imported_page_must_match_stable_product_code() {
+        let error = validate_competitor_identity(
+            r#"<meta property="og:url" content="https://www.ozon.ru/product/demo-987654321/">"#,
+            "123456789",
+        )
+        .expect_err("wrong product HTML must be rejected");
+        assert_eq!(observation_status(&error), "ambiguous_match");
+    }
+}
+fn record_competitor_observation(
+    c: &Connection,
+    run_id: &str,
+    id: i64,
+    status: &str,
+    retries: i64,
+    source_url: &str,
+    source: &str,
+    parsed: Option<&ParsedCompetitorPage>,
+    notes: &str,
+) -> Result<(), String> {
+    let evidence = parsed
+        .map(|p| {
+            format!(
+                "title={}; price_raw={}; sales_raw={}",
+                p.name, p.price_raw, p.sales_raw
+            )
+        })
+        .unwrap_or_default();
+    c.execute("INSERT INTO competitor_observations(run_id,competitor_id,observed_at,status,retry_count,source_url,final_url,search_context,price_raw,sales_raw,evidence,notes)VALUES(?1,?2,?3,?4,?5,?6,?6,?7,?8,?9,?10,?11) ON CONFLICT(run_id,competitor_id) DO UPDATE SET observed_at=excluded.observed_at,status=excluded.status,retry_count=excluded.retry_count,price_raw=excluded.price_raw,sales_raw=excluded.sales_raw,evidence=excluded.evidence,notes=excluded.notes",params![run_id,id,chrono::Local::now().to_rfc3339(),status,retries,source_url,format!("language=ru-RU; device=desktop; login=anonymous; source={source}"),parsed.map(|p|p.price_raw.as_str()).unwrap_or(""),parsed.map(|p|p.sales_raw.as_str()).unwrap_or(""),evidence,notes]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+fn finish_competitor_run(c: &Connection, run_id: &str) -> Result<(), String> {
+    c.execute("UPDATE competitor_collection_runs SET finished_at=?2,completed=(SELECT COUNT(*) FROM competitor_observations WHERE run_id=?1),ok=(SELECT COUNT(*) FROM competitor_observations WHERE run_id=?1 AND status='ok'),blocked=(SELECT COUNT(*) FROM competitor_observations WHERE run_id=?1 AND status='blocked'),changed_layout=(SELECT COUNT(*) FROM competitor_observations WHERE run_id=?1 AND status='changed_layout'),inaccessible=(SELECT COUNT(*) FROM competitor_observations WHERE run_id=?1 AND status='inaccessible'),ambiguous_match=(SELECT COUNT(*) FROM competitor_observations WHERE run_id=?1 AND status='ambiguous_match'),incomplete=(SELECT COUNT(*) FROM competitor_observations WHERE run_id=?1 AND status='incomplete'),completed_scope=printf('%d/%d',(SELECT COUNT(*) FROM competitor_observations WHERE run_id=?1),requested),status=CASE WHEN EXISTS(SELECT 1 FROM competitor_observations WHERE run_id=?1 AND status<>'ok') THEN 'incomplete' ELSE 'ok' END WHERE run_id=?1",params![run_id,chrono::Local::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+fn refresh_competitor_for_run(
+    c: &Connection,
+    id: i64,
+    run_id: &str,
+    data_dir: &Path,
+) -> Result<(), String> {
     let url = c
         .query_row(
             "SELECT product_url FROM competitor_products WHERE id=?1",
@@ -2070,17 +3037,149 @@ fn refresh_competitor_inner(c: &Connection, id: i64) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     let (canonical_url, canonical_code) = canonical_ozon_product_url(&url)?;
-    let response = ureq::get(&canonical_url)
-        .set(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
-        )
-        .set("Accept-Language", "ru-RU,ru;q=0.9")
-        .call()
-        .map_err(|e| format!("竞品页面直连读取失败：{e}。已使用规范链接 {canonical_url}；Ozon 若要求验证，请在“跨境上品”打开专用浏览器完成验证后重试"))?;
-    let html = response.into_string().map_err(|e| e.to_string())?;
-    let _ = canonical_code;
-    save_competitor_html(c, id, &html, "ozon_public_page")
+    let mut last_error = String::new();
+    for attempt in 0..2 {
+        if competitor_task_stop_requested(id) {
+            return Err("cancelled: 用户已停止此竞品任务".into());
+        }
+        let stage = if attempt == 0 { "direct" } else { "browser" };
+        let task_message = if attempt == 0 {
+            "正在后台读取公开商品页"
+        } else {
+            "浏览器已直达 Ozon 商品页，等待页面稳定或人工验证"
+        };
+        update_competitor_task(id, |task| {
+            task.status = "running".into();
+            task.stage = stage.into();
+            task.message = task_message.into();
+            task.retry_count = attempt;
+            if task.started_at.is_empty() {
+                task.started_at = chrono::Local::now().to_rfc3339();
+            }
+        });
+        if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+            if progress.running {
+                progress.stage = if attempt == 0 { "direct" } else { "browser" }.into();
+                progress.message = if attempt == 0 {
+                    format!("正在后台直连读取竞品 {}", canonical_code)
+                } else {
+                    format!(
+                        "正在专用浏览器打开竞品 {}；如出现 Ozon 验证，完成后会自动继续",
+                        canonical_code
+                    )
+                };
+            }
+        }
+        let result = (|| -> Result<ParsedCompetitorPage, String> {
+            let (html, source) = if attempt == 0 {
+                let response = ureq::get(&canonical_url).set("User-Agent","Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36").set("Accept-Language", "ru-RU,ru;q=0.9").timeout(std::time::Duration::from_secs(35)).call().map_err(|e|format!("竞品页面直连读取失败：{e}"))?;
+                (
+                    response.into_string().map_err(|e| e.to_string())?,
+                    "ozon_public_page",
+                )
+            } else {
+                (
+                    collect_competitor_python_html(
+                        &canonical_url,
+                        &canonical_code,
+                        data_dir,
+                        id,
+                    )?,
+                    "dedicated_browser",
+                )
+            };
+            validate_competitor_identity(&html, &canonical_code)?;
+            let parsed = parse_competitor_html(&html)?;
+            if attempt == 0 && (parsed.price.is_none() || parsed.image.is_empty()) {
+                return Err("直连页面缺少售价或主图，转入专用浏览器读取可见页面".into());
+            }
+            save_competitor_html(c, id, &html, source)
+        })();
+        match result {
+            Ok(parsed) => {
+                if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+                    if progress.running {
+                        progress.stage = "saving".into();
+                        progress.message = format!("竞品 {} 已校验，正在写入快照", canonical_code);
+                    }
+                }
+                // Public Ozon pages do not reliably expose cumulative sales.
+                // Price + main image is a complete public-page capture; sales
+                // remains nullable and may be entered manually by the user.
+                let status = if parsed.price.is_some() && !parsed.image.is_empty() {
+                    "ok"
+                } else {
+                    "incomplete"
+                };
+                let notes = if status == "ok" {
+                    ""
+                } else {
+                    "页面售价或主图不完整；销量未公开时保持为空，可手工填写"
+                };
+                record_competitor_observation(
+                    c,
+                    run_id,
+                    id,
+                    status,
+                    attempt,
+                    &canonical_url,
+                    if attempt == 0 {
+                        "ozon_public_page"
+                    } else {
+                        "dedicated_browser"
+                    },
+                    Some(&parsed),
+                    notes,
+                )?;
+                update_competitor_task(id, |task| {
+                    task.status = if status == "ok" { "success" } else { "incomplete" }.into();
+                    task.stage = "completed".into();
+                    task.message = if status == "ok" {
+                        "采集、校验并缓存成功"
+                    } else {
+                        "页面售价或主图不完整；销量可手工填写"
+                    }
+                    .into();
+                    task.finished_at = chrono::Local::now().to_rfc3339();
+                });
+                return Ok(());
+            }
+            Err(error) => {
+                last_error = error;
+                let status = observation_status(&last_error);
+                if attempt == 0 {
+                    continue;
+                }
+                record_competitor_observation(
+                    c,
+                    run_id,
+                    id,
+                    status,
+                    attempt,
+                    &canonical_url,
+                    "dedicated_browser",
+                    None,
+                    &last_error,
+                )?;
+                update_competitor_task(id, |task| {
+                    task.status = "failed".into();
+                    task.stage = status.into();
+                    task.message = last_error.clone();
+                    task.finished_at = chrono::Local::now().to_rfc3339();
+                });
+                return Err(format!(
+                    "{last_error}。已记录状态 {status}；可重新点击自动采集继续"
+                ));
+            }
+        }
+    }
+    Err(last_error)
+}
+fn refresh_competitor_inner(c: &Connection, id: i64, data_dir: &Path) -> Result<(), String> {
+    let run_id = begin_competitor_run(c, 1, "single_competitor")?;
+    let result = refresh_competitor_for_run(c, id, &run_id, data_dir);
+    finish_competitor_run(c, &run_id)?;
+    result
 }
 
 #[tauri::command]
@@ -2097,6 +3196,24 @@ fn open_competitor_browser(id: i64, state: State<AppState>) -> Result<(), String
 }
 
 #[tauri::command]
+fn set_competitor_manual_sales(
+    id: i64,
+    sales_total: Option<i64>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    if sales_total.is_some_and(|value| value < 0) {
+        return Err("累计销量不能小于 0".into());
+    }
+    let c = db(&state)?;
+    c.execute(
+        "INSERT INTO competitor_snapshots(competitor_id,captured_at,price,sales_total,source) VALUES(?1,CURRENT_TIMESTAMP,(SELECT price FROM competitor_snapshots WHERE competitor_id=?1 ORDER BY captured_at DESC,id DESC LIMIT 1),?2,'manual_sales')",
+        params![id, sales_total],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn import_competitor_html(id: i64, path: String, state: State<AppState>) -> Result<(), String> {
     let path = path.trim();
     if path.is_empty() {
@@ -2104,7 +3221,61 @@ fn import_competitor_html(id: i64, path: String, state: State<AppState>) -> Resu
     }
     let html = fs::read_to_string(path).map_err(|e| format!("无法读取竞品 HTML：{e}"))?;
     let c = db(&state)?;
-    save_competitor_html(&c, id, &html, "verified_browser_html")
+    let run_id = begin_competitor_run(&c, 1, "verified_browser_html")?;
+    let result = (|| {
+        let url = c
+            .query_row(
+                "SELECT product_url FROM competitor_products WHERE id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let (_, expected_code) = canonical_ozon_product_url(&url)?;
+        validate_competitor_identity(&html, &expected_code)?;
+        let parsed = save_competitor_html(&c, id, &html, "verified_browser_html")?;
+        let status = if parsed.price.is_some() && parsed.sales.is_some() {
+            "ok"
+        } else {
+            "incomplete"
+        };
+        record_competitor_observation(
+            &c,
+            &run_id,
+            id,
+            status,
+            0,
+            &url,
+            "verified_browser_html",
+            Some(&parsed),
+            if status == "ok" {
+                ""
+            } else {
+                "验证后页面仍缺少部分公开指标"
+            },
+        )
+    })();
+    if let Err(error) = &result {
+        let url = c
+            .query_row(
+                "SELECT product_url FROM competitor_products WHERE id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+        let _ = record_competitor_observation(
+            &c,
+            &run_id,
+            id,
+            observation_status(error),
+            0,
+            &url,
+            "verified_browser_html",
+            None,
+            error,
+        );
+    }
+    finish_competitor_run(&c, &run_id)?;
+    result
 }
 fn sales_delta(snapshots: &[CompetitorSnapshot], days: i64) -> Option<i64> {
     let latest = snapshots.last()?.sales_total?;
@@ -2123,7 +3294,7 @@ fn sales_delta(snapshots: &[CompetitorSnapshot], days: i64) -> Option<i64> {
 #[tauri::command]
 fn competitors(state: State<AppState>) -> Result<Vec<CompetitorRow>, String> {
     let c = db(&state)?;
-    let mut stmt=c.prepare("SELECT id,product_url,product_code,name,image_url FROM competitor_products WHERE active=1 ORDER BY id").map_err(|e|e.to_string())?;
+    let mut stmt=c.prepare("SELECT p.id,p.product_url,p.product_code,p.name,p.image_url,COALESCE((SELECT status FROM competitor_observations o WHERE o.competitor_id=p.id ORDER BY o.id DESC LIMIT 1),''),COALESCE((SELECT observed_at FROM competitor_observations o WHERE o.competitor_id=p.id ORDER BY o.id DESC LIMIT 1),''),COALESCE((SELECT retry_count FROM competitor_observations o WHERE o.competitor_id=p.id ORDER BY o.id DESC LIMIT 1),0),COALESCE((SELECT notes FROM competitor_observations o WHERE o.competitor_id=p.id ORDER BY o.id DESC LIMIT 1),'') FROM competitor_products p WHERE p.active=1 ORDER BY p.id").map_err(|e|e.to_string())?;
     let base = stmt
         .query_map([], |r| {
             Ok((
@@ -2132,13 +3303,28 @@ fn competitors(state: State<AppState>) -> Result<Vec<CompetitorRow>, String> {
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, String>(8)?,
             ))
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     let mut out = vec![];
-    for (id, url, code, name, image) in base {
+    for (
+        id,
+        url,
+        code,
+        name,
+        image,
+        latest_status,
+        latest_observed_at,
+        latest_retry_count,
+        latest_notes,
+    ) in base
+    {
         let mut s=c.prepare("SELECT captured_at,price,sales_total FROM competitor_snapshots WHERE competitor_id=?1 ORDER BY captured_at").map_err(|e|e.to_string())?;
         let snaps = s
             .query_map([id], |r| {
@@ -2162,6 +3348,10 @@ fn competitors(state: State<AppState>) -> Result<Vec<CompetitorRow>, String> {
             daily_sales: sales_delta(&snaps, 1),
             weekly_sales: sales_delta(&snaps, 7),
             monthly_sales: sales_delta(&snaps, 30),
+            latest_status,
+            latest_observed_at,
+            latest_retry_count,
+            latest_notes,
             snapshots: snaps,
         })
     }
@@ -2178,7 +3368,7 @@ fn add_competitor_blocking(product_url: String, state: &AppState) -> Result<i64,
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
-    refresh_competitor_inner(&c, id)?;
+    refresh_competitor_inner(&c, id, &state.data_dir)?;
     Ok(id)
 }
 #[tauri::command]
@@ -2203,7 +3393,7 @@ async fn add_competitor(product_url: String, state: State<'_, AppState>) -> Resu
 }
 fn refresh_competitor_blocking(id: i64, state: &AppState) -> Result<(), String> {
     let c = db(&state)?;
-    refresh_competitor_inner(&c, id)
+    refresh_competitor_inner(&c, id, &state.data_dir)
 }
 #[tauri::command]
 async fn refresh_competitor(id: i64, state: State<'_, AppState>) -> Result<(), String> {
@@ -2225,26 +3415,152 @@ async fn refresh_competitor(id: i64, state: State<'_, AppState>) -> Result<(), S
     .await
     .map_err(|e| e.to_string())?
 }
+fn competitor_tasks(c: &Connection, ids: &[i64]) -> Vec<CompetitorCollectionTask> {
+    ids.iter()
+        .filter_map(|id| {
+            c.query_row(
+                "SELECT product_code,product_url FROM competitor_products WHERE id=?1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .ok()
+            .map(|(product_code, product_url)| CompetitorCollectionTask {
+                id: *id,
+                product_code,
+                product_url,
+                status: "queued".into(),
+                stage: "queued".into(),
+                message: "等待采集".into(),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
 fn refresh_competitors_due_blocking(state: &AppState) -> Result<i64, String> {
+    {
+        let progress = COMPETITOR_COLLECTION_PROGRESS
+            .lock()
+            .map_err(|_| "竞品采集进度锁异常")?;
+        if progress.running {
+            return Err("竞品采集任务已在运行".into());
+        }
+    }
     let c = db(&state)?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let mut stmt=c.prepare("SELECT p.id FROM competitor_products p WHERE p.active=1 AND COALESCE((SELECT MAX(substr(s.captured_at,1,10)) FROM competitor_snapshots s WHERE s.competitor_id=p.id),'')<?1 ORDER BY p.id").map_err(|e|e.to_string())?;
+    let mut stmt=c.prepare("SELECT p.id FROM competitor_products p WHERE p.active=1 AND NOT EXISTS(SELECT 1 FROM competitor_observations o WHERE o.competitor_id=p.id AND o.status='ok' AND substr(o.observed_at,1,10)=?1) ORDER BY p.id").map_err(|e|e.to_string())?;
     let ids = stmt
         .query_map([today], |r| r.get::<_, i64>(0))
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    COMPETITOR_COLLECTION_STOP.store(false, Ordering::SeqCst);
+    if let Ok(mut stops) = COMPETITOR_TASK_STOPS.lock() {
+        stops.clear();
+    }
+    let tasks = competitor_tasks(&c, &ids);
+    if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+        *progress = CompetitorCollectionProgress {
+            running: true,
+            total: ids.len() as i64,
+            stage: "preparing".into(),
+            message: format!("今日待采集竞品 {} 个", ids.len()),
+            tasks,
+            ..Default::default()
+        };
+    }
     let mut count = 0;
     let mut first_error = None;
+    let run_id = begin_competitor_run(&c, ids.len() as i64, "daily_due_competitors")?;
+    if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+        progress.run_id = run_id.clone();
+    }
     for id in ids {
-        match refresh_competitor_inner(&c, id) {
-            Ok(()) => count += 1,
+        if COMPETITOR_COLLECTION_STOP.load(Ordering::SeqCst) {
+            break;
+        }
+        let code = c
+            .query_row(
+                "SELECT product_code FROM competitor_products WHERE id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+        if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+            progress.current_id = Some(id);
+            progress.current_code = code;
+        }
+        if competitor_task_stop_requested(id) {
+            update_competitor_task(id, |task| {
+                task.status = "stopped".into();
+                task.stage = "stopped".into();
+                task.message = "已停止，未执行采集".into();
+                task.stop_requested = true;
+                task.finished_at = chrono::Local::now().to_rfc3339();
+            });
+            if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+                progress.completed += 1;
+            }
+            continue;
+        }
+        match refresh_competitor_for_run(&c, id, &run_id, &state.data_dir) {
+            Ok(()) => {
+                count += 1;
+                if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+                    progress.succeeded += 1;
+                }
+            }
             Err(error) => {
-                if first_error.is_none() {
+                if error.starts_with("cancelled:") {
+                    update_competitor_task(id, |task| {
+                        task.status = "stopped".into();
+                        task.stage = "stopped".into();
+                        task.message = "任务已安全停止".into();
+                        task.stop_requested = true;
+                        task.finished_at = chrono::Local::now().to_rfc3339();
+                    });
+                }
+                if !error.starts_with("cancelled:") {
+                    if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+                        progress.failed += 1;
+                    }
+                }
+                if first_error.is_none() && !error.starts_with("cancelled:") {
                     first_error = Some(error)
                 }
             }
         }
+        if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+            progress.completed += 1;
+        }
+    }
+    finish_competitor_run(&c, &run_id)?;
+    let stopped = COMPETITOR_COLLECTION_STOP.load(Ordering::SeqCst);
+    if stopped {
+        let _ = c.execute(
+            "UPDATE competitor_collection_runs SET status='stopped',notes='用户停止采集' WHERE run_id=?1",
+            [&run_id],
+        );
+    }
+    if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+        progress.running = false;
+        progress.current_id = None;
+        progress.current_code.clear();
+        progress.stop_requested = stopped;
+        progress.stage = if stopped { "stopped" } else { "completed" }.into();
+        progress.message = if stopped {
+            format!(
+                "已停止：完成 {}/{} 个任务",
+                progress.completed, progress.total
+            )
+        } else {
+            format!(
+                "今日待采集任务完成：成功 {}，失败 {}",
+                progress.succeeded, progress.failed
+            )
+        };
     }
     if count == 0 {
         if let Some(error) = first_error {
@@ -2252,6 +3568,262 @@ fn refresh_competitors_due_blocking(state: &AppState) -> Result<i64, String> {
         }
     }
     Ok(count)
+}
+fn refresh_competitors_all_blocking(state: &AppState) -> Result<i64, String> {
+    let c = db(state)?;
+    let mut stmt = c
+        .prepare("SELECT id FROM competitor_products WHERE active=1 ORDER BY id")
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map([], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    if let Ok(mut stops) = COMPETITOR_TASK_STOPS.lock() {
+        stops.clear();
+    }
+    let tasks = competitor_tasks(&c, &ids);
+    {
+        let mut progress = COMPETITOR_COLLECTION_PROGRESS
+            .lock()
+            .map_err(|_| "竞品采集进度锁异常")?;
+        *progress = CompetitorCollectionProgress {
+            running: true,
+            total: ids.len() as i64,
+            stage: "preparing".into(),
+            message: format!("已建立 {} 个竞品采集任务", ids.len()),
+            tasks,
+            ..Default::default()
+        };
+    }
+    COMPETITOR_COLLECTION_STOP.store(false, Ordering::SeqCst);
+    let run_id = begin_competitor_run(&c, ids.len() as i64, "manual_all_competitors")?;
+    if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+        progress.run_id = run_id.clone();
+    }
+    let mut ok = 0;
+    let mut errors = Vec::new();
+    for id in ids {
+        if COMPETITOR_COLLECTION_STOP.load(Ordering::SeqCst) {
+            break;
+        }
+        let code = c
+            .query_row(
+                "SELECT product_code FROM competitor_products WHERE id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+        if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+            progress.current_id = Some(id);
+            progress.current_code = code.clone();
+            progress.stage = "collecting".into();
+            progress.message = format!(
+                "正在采集 {}",
+                if code.is_empty() {
+                    id.to_string()
+                } else {
+                    code
+                }
+            );
+        }
+        if competitor_task_stop_requested(id) {
+            update_competitor_task(id, |task| {
+                task.status = "stopped".into();
+                task.stage = "stopped".into();
+                task.message = "已停止，未执行采集".into();
+                task.stop_requested = true;
+                task.finished_at = chrono::Local::now().to_rfc3339();
+            });
+            if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+                progress.completed += 1;
+            }
+            continue;
+        }
+        match refresh_competitor_for_run(&c, id, &run_id, &state.data_dir) {
+            Ok(()) => {
+                ok += 1;
+                if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+                    progress.succeeded += 1;
+                }
+            }
+            Err(e) => {
+                if e.starts_with("cancelled:") {
+                    update_competitor_task(id, |task| {
+                        task.status = "stopped".into();
+                        task.stage = "stopped".into();
+                        task.message = "任务已安全停止".into();
+                        task.stop_requested = true;
+                        task.finished_at = chrono::Local::now().to_rfc3339();
+                    });
+                }
+                if !e.starts_with("cancelled:") {
+                    errors.push(e);
+                    if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+                        progress.failed += 1;
+                    }
+                }
+            }
+        }
+        if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+            progress.completed += 1;
+        }
+    }
+    finish_competitor_run(&c, &run_id)?;
+    let stopped = COMPETITOR_COLLECTION_STOP.load(Ordering::SeqCst);
+    if stopped {
+        let _ = c.execute(
+            "UPDATE competitor_collection_runs SET status='stopped',notes=CASE WHEN notes='' THEN '用户停止采集' ELSE notes||'；用户停止采集' END WHERE run_id=?1",
+            [&run_id],
+        );
+    }
+    if !errors.is_empty() {
+        let _ = c.execute(
+            "UPDATE competitor_collection_runs SET notes=?2 WHERE run_id=?1",
+            params![
+                run_id,
+                errors.into_iter().take(5).collect::<Vec<_>>().join("；")
+            ],
+        );
+    }
+    if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+        progress.running = false;
+        progress.current_id = None;
+        progress.current_code.clear();
+        progress.stop_requested = stopped;
+        progress.stage = if stopped { "stopped" } else { "completed" }.into();
+        progress.message = if stopped {
+            format!(
+                "已停止：完成 {}/{} 个任务",
+                progress.completed, progress.total
+            )
+        } else {
+            format!(
+                "采集完成：成功 {}，失败 {}",
+                progress.succeeded, progress.failed
+            )
+        };
+    }
+    Ok(ok)
+}
+#[tauri::command]
+async fn refresh_competitors_all(state: State<'_, AppState>) -> Result<i64, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || refresh_competitors_all_blocking(&owned))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn start_competitors_collection(state: State<AppState>) -> Result<(), String> {
+    {
+        let progress = COMPETITOR_COLLECTION_PROGRESS
+            .lock()
+            .map_err(|_| "竞品采集进度锁异常")?;
+        if progress.running {
+            return Err("竞品采集任务已在运行".into());
+        }
+    }
+    let owned = background_state(&state)?;
+    COMPETITOR_COLLECTION_STOP.store(false, Ordering::SeqCst);
+    if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+        *progress = CompetitorCollectionProgress {
+            running: true,
+            stage: "queued".into(),
+            message: "竞品采集任务已加入队列".into(),
+            ..Default::default()
+        };
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = refresh_competitors_all_blocking(&owned) {
+            if let Ok(mut progress) = COMPETITOR_COLLECTION_PROGRESS.lock() {
+                progress.running = false;
+                progress.stage = "failed".into();
+                progress.message = error;
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn competitor_collection_progress() -> Result<CompetitorCollectionProgress, String> {
+    COMPETITOR_COLLECTION_PROGRESS
+        .lock()
+        .map(|progress| progress.clone())
+        .map_err(|_| "竞品采集进度锁异常".into())
+}
+
+#[tauri::command]
+fn stop_competitors_collection() -> Result<(), String> {
+    COMPETITOR_COLLECTION_STOP.store(true, Ordering::SeqCst);
+    let mut progress = COMPETITOR_COLLECTION_PROGRESS
+        .lock()
+        .map_err(|_| "竞品采集进度锁异常")?;
+    if progress.running {
+        progress.stop_requested = true;
+        progress.stage = "stopping".into();
+        progress.message = "已收到停止请求，正在安全结束当前步骤".into();
+        for task in &mut progress.tasks {
+            if matches!(task.status.as_str(), "queued" | "running") {
+                task.stop_requested = true;
+                task.status = if task.status == "running" {
+                    "stopping".into()
+                } else {
+                    "stopped".into()
+                };
+                task.stage = task.status.clone();
+                task.message = if task.status == "stopping" {
+                    "正在安全结束当前步骤"
+                } else {
+                    "批次已停止，任务未执行"
+                }
+                .into();
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_competitor_collection_task(id: i64) -> Result<(), String> {
+    COMPETITOR_TASK_STOPS
+        .lock()
+        .map_err(|_| "竞品任务停止状态锁异常")?
+        .insert(id);
+    let mut progress = COMPETITOR_COLLECTION_PROGRESS
+        .lock()
+        .map_err(|_| "竞品采集进度锁异常")?;
+    let task = progress
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == id)
+        .ok_or_else(|| "未找到对应的竞品采集任务".to_string())?;
+    if matches!(task.status.as_str(), "success" | "failed" | "incomplete" | "stopped") {
+        return Ok(());
+    }
+    task.stop_requested = true;
+    if task.status == "queued" {
+        task.status = "stopped".into();
+        task.stage = "stopped".into();
+        task.message = "已停止，轮到该任务时会直接跳过".into();
+    } else {
+        task.status = "stopping".into();
+        task.stage = "stopping".into();
+        task.message = "已收到停止请求，正在安全结束当前步骤".into();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn competitor_latest_run(state: State<AppState>) -> Result<Option<CompetitorRunSummary>, String> {
+    let c = db(&state)?;
+    let result=c.query_row("SELECT run_id,started_at,finished_at,requested,completed,ok,blocked,changed_layout,inaccessible,ambiguous_match,incomplete,status,notes FROM competitor_collection_runs ORDER BY started_at DESC LIMIT 1",[],|r|Ok(CompetitorRunSummary{run_id:r.get(0)?,started_at:r.get(1)?,finished_at:r.get(2)?,requested:r.get(3)?,completed:r.get(4)?,ok:r.get(5)?,blocked:r.get(6)?,changed_layout:r.get(7)?,inaccessible:r.get(8)?,ambiguous_match:r.get(9)?,incomplete:r.get(10)?,status:r.get(11)?,notes:r.get(12)?}));
+    match result {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 #[tauri::command]
 async fn refresh_competitors_due(state: State<'_, AppState>) -> Result<i64, String> {
@@ -2288,7 +3860,9 @@ fn finance_service_category(name: &str) -> (&'static str, &'static str) {
         "costperclick",
         "externalpromotion",
         "review",
-        "starsmembership",
+        "premium",
+        "subscription",
+        "cashback",
         "advert",
         "реклам",
         "продвиж",
@@ -2547,7 +4121,7 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
     let c = db(&state)?;
     let rate = rub_per_cny_for(&state, &c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS business_report_cache(range_key TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
-    let fingerprint:String=c.query_row("SELECT 'finance-v2|'||printf('%d|%s|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let fingerprint:String=c.query_row("SELECT 'finance-v3-delivered-cost-units|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     let cache_key = format!("{}|{}", range.from, range.to);
     if let Ok(payload) = c.query_row(
         "SELECT payload FROM business_report_cache WHERE range_key=?1 AND fingerprint=?2",
@@ -2558,7 +4132,11 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
             return Ok(report);
         }
     }
-    let(revenue,orders,purchase,first_mile,missing):(f64,i64,f64,f64,i64)=c.query_row("SELECT COALESCE(SUM(s.revenue),0),COALESCE(SUM(s.ordered_units),0),COALESCE(SUM(s.ordered_units*COALESCE(pc.unit_cost_cny*?3,pc.unit_cost,0)),0),COALESCE(SUM(s.ordered_units*COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny*?3,0)),0),COALESCE(SUM(CASE WHEN pc.sku IS NULL OR (pc.unit_cost_cny IS NULL AND pc.unit_cost IS NULL) THEN s.ordered_units ELSE 0 END),0) FROM sales_daily s LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2",params![range.from,range.to,rate],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(|e|e.to_string())?;
+    // Match the audited legacy P&L: cost only fulfilled units when a delivery
+    // record exists for that SKU; fall back to ordered units when fulfillment
+    // data is unavailable. Charging every ordered unit overstates COGS when
+    // orders are cancelled, returned, or not yet delivered.
+    let(revenue,orders,purchase,first_mile,missing,costed_units):(f64,i64,f64,f64,i64,i64)=c.query_row("WITH sales AS(SELECT sku,SUM(revenue) revenue,SUM(ordered_units) ordered FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) delivered FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),cost_base AS(SELECT s.sku,s.revenue,s.ordered,COALESCE(d.delivered,s.ordered) cost_units,pc.unit_cost_cny,pc.unit_cost,pc.first_mile_cost,pc.first_mile_cost_cny FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN product_costs pc ON pc.sku=s.sku) SELECT COALESCE(SUM(revenue),0),COALESCE(SUM(ordered),0),COALESCE(SUM(cost_units*COALESCE(unit_cost_cny*?3,unit_cost,0)),0),COALESCE(SUM(cost_units*COALESCE(first_mile_cost,first_mile_cost_cny*?3,0)),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)THEN cost_units ELSE 0 END),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NOT NULL OR unit_cost IS NOT NULL)AND(first_mile_cost IS NOT NULL OR first_mile_cost_cny IS NOT NULL)THEN cost_units ELSE 0 END),0) FROM cost_base",params![range.from,range.to,rate],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(|e|e.to_string())?;
     let ad_spend = c
         .query_row(
             "SELECT COALESCE(SUM(spend),0) FROM ad_daily WHERE day BETWEEN ?1 AND ?2 AND sku=''",
@@ -2588,7 +4166,9 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
         for text in raw {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                 let operation_amount = value_number(value.get("amount"));
-                sales_returns += value_number(value.get("accruals_for_sale"));
+                let operation_accrual = value_number(value.get("accruals_for_sale"));
+                let operation_commission = value_number(value.get("sale_commission"));
+                sales_returns += operation_accrual;
                 let item_skus = value
                     .get("items")
                     .and_then(|v| v.as_array())
@@ -2605,6 +4185,7 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
                     unallocated_operations += 1;
                     unallocated += operation_amount;
                 }
+                let mut service_total = 0.0;
                 for service in value
                     .get("services")
                     .and_then(|v| v.as_array())
@@ -2617,6 +4198,7 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
                         .and_then(|v| v.as_f64())
                         .or_else(|| json_text(service.get("price")).parse().ok())
                         .unwrap_or(0.0);
+                    service_total += price;
                     match finance_service_category(&name).0 {
                         "return_logistics" => returns += price,
                         "delivery" | "last_mile" => delivery += price,
@@ -2627,6 +4209,29 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
                         "advertising" => finance_advertising += price,
                         _ => {}
                     }
+                }
+                // Many Ozon Finance fees (CPC/CPO promotion, early payout,
+                // Premium and adjustments) are operation-level amounts and do
+                // not appear in `services[]`.  Classify the exact residual so
+                // the category cards reconcile to the API identity:
+                // amount = accrual + commission + services + residual.
+                let residual = operation_amount
+                    - operation_accrual
+                    - operation_commission
+                    - service_total;
+                let operation_name = format!(
+                    "{} {}",
+                    json_text(value.get("operation_type")),
+                    json_text(value.get("operation_type_name"))
+                );
+                match finance_service_category(&operation_name).0 {
+                    "return_logistics" => returns += residual,
+                    "delivery" | "last_mile" => delivery += residual,
+                    "acquiring" => acquiring += residual,
+                    "storage" => storage += residual,
+                    "penalties" => penalties += residual,
+                    "advertising" => finance_advertising += residual,
+                    _ => other += residual,
                 }
             }
         }
@@ -2709,7 +4314,6 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
         + penalties
         + other;
     let missing_cost_skus:i64=c.query_row("SELECT COUNT(DISTINCT s.sku)FROM sales_daily s LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2 AND s.ordered_units<>0 AND (pc.sku IS NULL OR (pc.unit_cost_cny IS NULL AND pc.unit_cost IS NULL)OR(pc.first_mile_cost IS NULL AND pc.first_mile_cost_cny IS NULL))",params![range.from,range.to],|r|r.get(0)).map_err(|e|e.to_string())?;
-    let costed_units = orders - missing;
     let tax_rate = setting(&c, "local_tax_rate")
         .parse::<f64>()
         .unwrap_or(3.0)
@@ -3570,6 +5174,23 @@ fn json_text(value: Option<&serde_json::Value>) -> String {
         .to_string()
 }
 
+fn json_f64(value: Option<&serde_json::Value>) -> Option<f64> {
+    value.and_then(|v| match v {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.trim().replace(',', ".").parse().ok(),
+        serde_json::Value::Object(map) => json_f64(
+            map.get("value")
+                .or_else(|| map.get("amount"))
+                .or_else(|| map.get("budget")),
+        ),
+        _ => None,
+    })
+}
+
+fn performance_budget_rub(value: Option<&serde_json::Value>) -> Option<f64> {
+    json_f64(value).map(|micro_rubles| micro_rubles / 1_000_000.0)
+}
+
 #[tauri::command]
 fn sync_logs(state: State<AppState>) -> Result<Vec<SyncLogRow>, String> {
     let c = db(&state)?;
@@ -3946,7 +5567,12 @@ fn sync_performance_ads_blocking(range: DateRange, state: &AppState) -> Result<i
                 }
                 let name = json_text(campaign.get("title"));
                 names.insert(id.clone(), name.clone());
-                tx.execute("INSERT INTO campaigns(campaign_id,name,state,payment_type,budget,source)VALUES(?1,?2,?3,?4,?5,'api') ON CONFLICT(campaign_id) DO UPDATE SET name=excluded.name,state=excluded.state,payment_type=excluded.payment_type,budget=excluded.budget,source='api',updated_at=CURRENT_TIMESTAMP",params![id,name,json_text(campaign.get("state")),json_text(campaign.get("paymentType")),campaign.get("budget").and_then(|v|v.as_f64()).unwrap_or(0.0)]).map_err(|e|e.to_string())?;
+                let budget = performance_budget_rub(
+                    campaign
+                        .get("weeklyBudget")
+                        .or_else(|| campaign.get("budget")),
+                );
+                tx.execute("INSERT INTO campaigns(campaign_id,name,state,payment_type,budget,budget_known,budget_updated_at,budget_scale_version,source)VALUES(?1,?2,?3,?4,COALESCE(?5,0),?6,CASE WHEN ?6=1 THEN CURRENT_TIMESTAMP ELSE '' END,1,'api') ON CONFLICT(campaign_id) DO UPDATE SET name=excluded.name,state=excluded.state,payment_type=excluded.payment_type,budget=CASE WHEN excluded.budget_known=1 THEN excluded.budget ELSE campaigns.budget END,budget_known=MAX(campaigns.budget_known,excluded.budget_known),budget_updated_at=CASE WHEN excluded.budget_known=1 THEN CURRENT_TIMESTAMP ELSE campaigns.budget_updated_at END,budget_scale_version=1,source='api',updated_at=CURRENT_TIMESTAMP",params![id,name,json_text(campaign.get("state")),json_text(campaign.get("paymentType")),budget,budget.is_some()]).map_err(|e|e.to_string())?;
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
@@ -4132,6 +5758,18 @@ fn sync_finance_blocking(range: DateRange, state: &AppState) -> Result<i64, Stri
             .cloned()
             .unwrap_or_default();
         let tx = c.transaction().map_err(|e| e.to_string())?;
+        // `/v3/finance/transaction/list` does not always return a stable
+        // operation_id.  The previous fallback included the response index,
+        // so a later sync with a different ordering inserted the same finance
+        // operation again and inflated both Finance net and profit.  Fetch all
+        // pages first, then atomically replace only the successfully fetched
+        // date range.  A failed request therefore preserves the prior cache,
+        // while repeated successful syncs are idempotent.
+        tx.execute(
+            "DELETE FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2",
+            params![range.from, range.to],
+        )
+        .map_err(|e| e.to_string())?;
         for (index, op) in operations.iter().enumerate() {
             let id = {
                 let v = json_text(op.get("operation_id"));
@@ -4191,6 +5829,10 @@ fn sync_finance_blocking(range: DateRange, state: &AppState) -> Result<i64, Stri
             let (from, to) = finance_period(row, &range.from, &range.to);
             tx.execute("INSERT INTO finance_cash_flow_details(row_id,period_from,period_to,raw_json)VALUES(?1,?2,?3,?4)",params![format!("{from}|{to}|{index}"),from,to,row.to_string()]).map_err(|e|e.to_string())?;
         }
+        tx.execute("DELETE FROM business_report_cache", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM analytics_detail_cache", [])
+            .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(operations.len() as i64)
     })();
@@ -5190,6 +6832,9 @@ pub fn run() {
             dashboard,
             orders,
             advertising,
+            campaign_monitor,
+            campaign_control,
+            campaign_ai_analysis,
             products,
             inventory,
             sync_inventory,
@@ -5213,6 +6858,13 @@ pub fn run() {
             add_competitor,
             refresh_competitor,
             refresh_competitors_due,
+            refresh_competitors_all,
+            start_competitors_collection,
+            competitor_collection_progress,
+            stop_competitors_collection,
+            stop_competitor_collection_task,
+            competitor_latest_run,
+            set_competitor_manual_sales,
             open_competitor_browser,
             import_competitor_html,
             remove_competitor,

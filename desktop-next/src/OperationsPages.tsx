@@ -36,6 +36,8 @@ import {
   refreshListingCategories,
   searchListingCategories,
   competitors,
+  competitorLatestRun,
+  competitorCollectionProgress,
   dataCoverage,
   exportDataset,
   exportApiBundle,
@@ -43,7 +45,6 @@ import {
   fbsOrders,
   financeBreakdown,
   importProductCostsCsv,
-  importCompetitorHtml,
   importApiBundle,
   importWbApiBundle,
   listingRows,
@@ -51,10 +52,13 @@ import {
   listingSettings,
   missingCostRows,
   notifyShipment,
-  openCompetitorBrowser,
   pruneCache,
   refreshCompetitor,
   refreshCompetitorsDue,
+  startCompetitorsCollection,
+  stopCompetitorsCollection,
+  stopCompetitorCollectionTask,
+  setCompetitorManualSales,
   removeCompetitor,
   saveFbsThreshold,
   saveListingSettings,
@@ -92,6 +96,8 @@ import type {
   BusinessReport,
   CrossBorderReport,
   CompetitorRow,
+  CompetitorRunSummary,
+  CompetitorCollectionProgress,
   DataCoverageRow,
   DateRange,
   FbsOrderRow,
@@ -133,43 +139,122 @@ const cachedDetail = (range: DateRange) => {
   return detailCache.get(key)!;
 };
 
-function MissingCostEditor({ row, close, saved }: { row: MissingCostRow; close: () => void; saved: () => void }) {
-  const value = (v: number | null) => v == null ? "" : String(v);
+function MissingCostEditor({
+  row,
+  close,
+  saved,
+}: {
+  row: MissingCostRow;
+  close: () => void;
+  saved: () => void;
+}) {
+  const value = (v: number | null) => (v == null ? "" : String(v));
   const [form, setForm] = useState({
-    unitCost: value(row.unitCost), firstMileCost: value(row.firstMileCost),
-    lengthCm: value(row.lengthCm), widthCm: value(row.widthCm), heightCm: value(row.heightCm),
-    weightKg: value(row.weightKg), note: row.note || "",
+    unitCost: value(row.unitCost),
+    firstMileCost: value(row.firstMileCost),
+    lengthCm: value(row.lengthCm),
+    widthCm: value(row.widthCm),
+    heightCm: value(row.heightCm),
+    weightKg: value(row.weightKg),
+    note: row.note || "",
   });
   const [busy, setBusy] = useState(false);
-  const numeric = (v: string) => v.trim() === "" ? null : Number(v);
-  const field = (key: keyof typeof form, label: string, required = false) => <label>
-    {label}{required && <b className="missing-cost">（缺失）</b>}
-    <input type={key === "note" ? "text" : "number"} min={key === "note" ? undefined : "0"} step="any" value={form[key]} onChange={e => setForm({...form, [key]: e.target.value})}/>
-  </label>;
-  return <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) close(); }}>
-    <div className="cost-modal">
-      <button className="modal-close" onClick={close}>×</button>
-      <h2>{row.offerId || "未命名货号"} / {row.sku}</h2>
-      <p>{row.productName || "补充成本后，月度盈亏将自动重新核算。"}</p>
-      <div className="cost-fields">
-        {field("unitCost", "采购成本（CNY/件）", row.missingPurchase)}
-        {field("firstMileCost", "头程成本（RUB/件）", row.missingFirstMile)}
-        {field("lengthCm", "长度（cm）", row.missingDimensions)}
-        {field("widthCm", "宽度（cm）", row.missingDimensions)}
-        {field("heightCm", "高度（cm）", row.missingDimensions)}
-        {field("weightKg", "重量（kg）", row.missingWeight)}
-        <label className="wide">备注<input value={form.note} onChange={e => setForm({...form, note:e.target.value})}/></label>
-      </div>
-      <div className="modal-actions">
-        <button className="dark-button" disabled={busy} onClick={async()=>{
-          const numbers=[form.unitCost,form.firstMileCost,form.lengthCm,form.widthCm,form.heightCm,form.weightKg];
-          if(numbers.some(v=>v.trim()!=="" && (!Number.isFinite(Number(v)) || Number(v)<0))){ window.alert("成本、尺寸和重量必须是大于或等于 0 的数字。"); return; }
-          setBusy(true); try { await saveProductCost({sku:row.sku,unitCost:numeric(form.unitCost),firstMileCost:numeric(form.firstMileCost),lengthCm:numeric(form.lengthCm),widthCm:numeric(form.widthCm),heightCm:numeric(form.heightCm),weightKg:numeric(form.weightKg),note:form.note}); saved(); } catch(e){ window.alert(`保存失败：${String(e)}`); } finally { setBusy(false); }
-        }}>{busy ? "保存中…" : "保存并重新核算"}</button>
-        <button className="outline-button" onClick={close}>取消</button>
+  const numeric = (v: string) => (v.trim() === "" ? null : Number(v));
+  const field = (key: keyof typeof form, label: string, required = false) => (
+    <label>
+      {label}
+      {required && <b className="missing-cost">（缺失）</b>}
+      <input
+        type={key === "note" ? "text" : "number"}
+        min={key === "note" ? undefined : "0"}
+        step="any"
+        value={form[key]}
+        onChange={(e) => setForm({ ...form, [key]: e.target.value })}
+      />
+    </label>
+  );
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) close();
+      }}
+    >
+      <div className="cost-modal">
+        <button className="modal-close" onClick={close}>
+          ×
+        </button>
+        <h2>
+          {row.offerId || "未命名货号"} / {row.sku}
+        </h2>
+        <p>{row.productName || "补充成本后，月度盈亏将自动重新核算。"}</p>
+        <div className="cost-fields">
+          {field("unitCost", "采购成本（CNY/件）", row.missingPurchase)}
+          {field("firstMileCost", "头程成本（RUB/件）", row.missingFirstMile)}
+          {field("lengthCm", "长度（cm）", row.missingDimensions)}
+          {field("widthCm", "宽度（cm）", row.missingDimensions)}
+          {field("heightCm", "高度（cm）", row.missingDimensions)}
+          {field("weightKg", "重量（kg）", row.missingWeight)}
+          <label className="wide">
+            备注
+            <input
+              value={form.note}
+              onChange={(e) => setForm({ ...form, note: e.target.value })}
+            />
+          </label>
+        </div>
+        <div className="modal-actions">
+          <button
+            className="dark-button"
+            disabled={busy}
+            onClick={async () => {
+              const numbers = [
+                form.unitCost,
+                form.firstMileCost,
+                form.lengthCm,
+                form.widthCm,
+                form.heightCm,
+                form.weightKg,
+              ];
+              if (
+                numbers.some(
+                  (v) =>
+                    v.trim() !== "" &&
+                    (!Number.isFinite(Number(v)) || Number(v) < 0),
+                )
+              ) {
+                window.alert("成本、尺寸和重量必须是大于或等于 0 的数字。");
+                return;
+              }
+              setBusy(true);
+              try {
+                await saveProductCost({
+                  sku: row.sku,
+                  unitCost: numeric(form.unitCost),
+                  firstMileCost: numeric(form.firstMileCost),
+                  lengthCm: numeric(form.lengthCm),
+                  widthCm: numeric(form.widthCm),
+                  heightCm: numeric(form.heightCm),
+                  weightKg: numeric(form.weightKg),
+                  note: form.note,
+                });
+                saved();
+              } catch (e) {
+                window.alert(`保存失败：${String(e)}`);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? "保存中…" : "保存并重新核算"}
+          </button>
+          <button className="outline-button" onClick={close}>
+            取消
+          </button>
+        </div>
       </div>
     </div>
-  </div>;
+  );
 }
 export const clearReportCache = () => {
   reportCache.clear();
@@ -221,14 +306,30 @@ export function ListingPage() {
       title: String(p.title || job.title || ""),
       categoryId: String(p.category_id || job.categoryId || ""),
       categoryDisplay: String(p.category_display || job.categoryDisplay || ""),
-      typeId: String(p.type_id || ""), price: String(p.price || ""),
-      weight: numberValue("weight"), depth: numberValue("depth"),
-      width: numberValue("width"), height: numberValue("height"),
-      description: String(p.description || ""), images: [], attributes: [], complexAttributes: [],
+      typeId: String(p.type_id || ""),
+      price: String(p.price || ""),
+      weight: numberValue("weight"),
+      depth: numberValue("depth"),
+      width: numberValue("width"),
+      height: numberValue("height"),
+      description: String(p.description || ""),
+      images: [],
+      attributes: [],
+      complexAttributes: [],
     });
-    setImagesText(Array.isArray(p.images) ? p.images.map(String).join("\n") : "");
-    setAttributesText(JSON.stringify(Array.isArray(p.attributes) ? p.attributes : [], null, 2));
-    setComplexAttributesText(JSON.stringify(Array.isArray(p.complex_attributes) ? p.complex_attributes : [], null, 2));
+    setImagesText(
+      Array.isArray(p.images) ? p.images.map(String).join("\n") : "",
+    );
+    setAttributesText(
+      JSON.stringify(Array.isArray(p.attributes) ? p.attributes : [], null, 2),
+    );
+    setComplexAttributesText(
+      JSON.stringify(
+        Array.isArray(p.complex_attributes) ? p.complex_attributes : [],
+        null,
+        2,
+      ),
+    );
   };
   const load = async () => {
     setBusy(true);
@@ -291,30 +392,388 @@ export function ListingPage() {
       <section className="card listing-config">
         <div className="card-title">参考商品与上品草稿</div>
         <div className="listing-fields">
-          <label>Ozon 商品链接或 Артикул<input value={reference} onChange={(e)=>setReference(e.target.value)} placeholder="支持链接、纯数字或 Артикул: 2379505289" /></label>
+          <label>
+            Ozon 商品链接或 Артикул
+            <input
+              value={reference}
+              onChange={(e) => setReference(e.target.value)}
+              placeholder="支持链接、纯数字或 Артикул: 2379505289"
+            />
+          </label>
         </div>
-        <button className="dark-button" disabled={busy||!reference.trim()} onClick={async()=>{setBusy(true);try{const id=await createListingDraft(reference);setMessage(`已创建上品草稿 #${id}，下一阶段将从参考商品采集标题、图片和属性。`);setReference("");setJobs(await listingJobs());}catch(e){setMessage(String(e));}finally{setBusy(false);}}}><Plus size={15}/>创建本地草稿</button>
-        {!!jobs.length&&<div className="table-card"><table><thead><tr><th>任务</th><th>Артикул / 货号</th><th>类目</th><th>阶段 / 状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>{jobs.slice(0,10).map(job=><tr key={job.id}><td>#{job.id}</td><td><b>{job.article}</b><small>{job.offerId||job.sourceUrl}</small></td><td>{job.categoryDisplay||"待匹配"}<small>{job.categoryId}</small></td><td>{["待采集","参考信息","类目完成","属性完成"][Math.min(job.stage,3)]} / {job.status}<small>{job.error}</small></td><td>{job.updatedAt}</td><td><button className="outline-button" onClick={()=>editJob(job)}>编辑</button><button className="outline-button" disabled={busy||job.status==='collecting'} onClick={async()=>{setBusy(true);setMessage(`正在后台采集任务 #${job.id}…`);try{await collectListingReference(job.id);setMessage(`任务 #${job.id} 已采集标题、描述、图片和页面属性。`);}catch(e){setMessage(String(e));}finally{const next=await listingJobs();setJobs(next);const current=next.find(v=>v.id===job.id);if(current&&draft?.id===job.id)editJob(current);setBusy(false);}}}>采集</button>{job.error&&<button className="outline-button" onClick={async()=>{await retryListingJob(job.id);setJobs(await listingJobs());}}>重试</button>}</td></tr>)}</tbody></table></div>}
-        {draft&&<div className="listing-draft-editor">
-          <div className="card-title">编辑草稿 #{draft.id}</div>
-          <div className="migration-note"><AlertTriangle/><div><h3>浏览器验证采集</h3><p>直连遇到重定向或验证时，打开浏览器完成验证，等待标题和图库显示完整，然后按 Ctrl+S 保存“网页，仅 HTML”。应用只读取你选择的 HTML，不读取 Cookie 或浏览器登录信息。</p><div className="listing-fields"><label>验证后 HTML 完整路径<input value={listingHtmlPath} onChange={e=>setListingHtmlPath(e.target.value)} placeholder="例如 D:\\下载\\Ozon商品.html"/></label></div><div className="competitor-actions"><button className="outline-button" onClick={async()=>{try{await openListingBrowser(draft.id);setMessage("已打开商品页；完成验证并等待图库加载后，请保存 HTML。") }catch(e){setMessage(String(e));}}}>打开 Edge/浏览器</button><button className="dark-button" disabled={busy||!listingHtmlPath.trim()} onClick={async()=>{setBusy(true);try{const count=await importListingHtml(draft.id,listingHtmlPath);const next=await listingJobs();setJobs(next);const current=next.find(v=>v.id===draft.id);if(current)editJob(current);setMessage(`验证页采集成功：已保存标题、描述、参数和 ${count} 张商品图片。`);setListingHtmlPath("");}catch(e){setMessage(String(e));}finally{setBusy(false);}}}>导入验证页并继续</button></div></div></div>
-          <div className="listing-fields">
-            <label>实时类目搜索<input value={categoryQuery} onChange={async e=>{const value=e.target.value;setCategoryQuery(value);try{setCategoryRows(await searchListingCategories(value,60));}catch(error){setCategoryRows([]);if(value.trim())setMessage(String(error));}}} placeholder="输入中文或俄文商品类型" /></label>
-            <div className="competitor-actions"><button className="outline-button" disabled={busy} onClick={async()=>{setBusy(true);try{const count=await refreshListingCategories();setCategoryRows(await searchListingCategories(categoryQuery||draft.title,60));setMessage(`已缓存 ${count} 个 Ozon 实时末级类目。`);}catch(e){setMessage(String(e));}finally{setBusy(false);}}}><RefreshCw size={14}/>刷新 Ozon 类目</button></div>
+        <button
+          className="dark-button"
+          disabled={busy || !reference.trim()}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              const id = await createListingDraft(reference);
+              setMessage(
+                `已创建上品草稿 #${id}，下一阶段将从参考商品采集标题、图片和属性。`,
+              );
+              setReference("");
+              setJobs(await listingJobs());
+            } catch (e) {
+              setMessage(String(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <Plus size={15} />
+          创建本地草稿
+        </button>
+        {!!jobs.length && (
+          <div className="table-card">
+            <table>
+              <thead>
+                <tr>
+                  <th>任务</th>
+                  <th>Артикул / 货号</th>
+                  <th>类目</th>
+                  <th>阶段 / 状态</th>
+                  <th>更新时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {jobs.slice(0, 10).map((job) => (
+                  <tr key={job.id}>
+                    <td>#{job.id}</td>
+                    <td>
+                      <b>{job.article}</b>
+                      <small>{job.offerId || job.sourceUrl}</small>
+                    </td>
+                    <td>
+                      {job.categoryDisplay || "待匹配"}
+                      <small>{job.categoryId}</small>
+                    </td>
+                    <td>
+                      {
+                        ["待采集", "参考信息", "类目完成", "属性完成"][
+                          Math.min(job.stage, 3)
+                        ]
+                      }{" "}
+                      / {job.status}
+                      <small>{job.error}</small>
+                    </td>
+                    <td>{job.updatedAt}</td>
+                    <td>
+                      <button
+                        className="outline-button"
+                        onClick={() => editJob(job)}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        className="outline-button"
+                        disabled={busy || job.status === "collecting"}
+                        onClick={async () => {
+                          setBusy(true);
+                          setMessage(`正在后台采集任务 #${job.id}…`);
+                          try {
+                            await collectListingReference(job.id);
+                            setMessage(
+                              `任务 #${job.id} 已采集标题、描述、图片和页面属性。`,
+                            );
+                          } catch (e) {
+                            setMessage(String(e));
+                          } finally {
+                            const next = await listingJobs();
+                            setJobs(next);
+                            const current = next.find((v) => v.id === job.id);
+                            if (current && draft?.id === job.id)
+                              editJob(current);
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        采集
+                      </button>
+                      {job.error && (
+                        <button
+                          className="outline-button"
+                          onClick={async () => {
+                            await retryListingJob(job.id);
+                            setJobs(await listingJobs());
+                          }}
+                        >
+                          重试
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-          {!!categoryRows.length&&<div className="table-card"><table><thead><tr><th>候选类目</th><th>类目 ID</th><th>type ID</th><th></th></tr></thead><tbody>{categoryRows.slice(0,20).map(row=><tr key={`${row.descriptionCategoryId}-${row.typeId}`}><td>{row.display}</td><td>{row.descriptionCategoryId}</td><td>{row.typeId}</td><td><button className="outline-button" onClick={()=>{setDraft({...draft,categoryId:String(row.descriptionCategoryId),categoryDisplay:row.display,typeId:String(row.typeId)});setCategoryRows([]);setMessage(`已选择实时类目：${row.display}`);}}>选择</button></td></tr>)}</tbody></table></div>}
-          <div className="listing-fields">
-            {([['offerId','货号 offer_id'],['title','俄文标题'],['categoryId','description_category_id'],['categoryDisplay','类目路径'],['typeId','type_id'],['price','售价 RUB']] as Array<[keyof ListingDraftInput,string]>).map(([key,label])=><label key={key}>{label}<input value={String(draft[key])} onChange={e=>setDraft({...draft,[key]:e.target.value})}/></label>)}
-            {([['weight','重量 g'],['depth','深度 mm'],['width','宽度 mm'],['height','高度 mm']] as Array<[keyof ListingDraftInput,string]>).map(([key,label])=><label key={key}>{label}<input type="number" min="0" value={Number(draft[key])} onChange={e=>setDraft({...draft,[key]:Number(e.target.value)})}/></label>)}
+        )}
+        {draft && (
+          <div className="listing-draft-editor">
+            <div className="card-title">编辑草稿 #{draft.id}</div>
+            <div className="migration-note">
+              <AlertTriangle />
+              <div>
+                <h3>浏览器验证采集</h3>
+                <p>
+                  直连遇到重定向或验证时，打开浏览器完成验证，等待标题和图库显示完整，然后按
+                  Ctrl+S 保存“网页，仅 HTML”。应用只读取你选择的 HTML，不读取
+                  Cookie 或浏览器登录信息。
+                </p>
+                <div className="listing-fields">
+                  <label>
+                    验证后 HTML 完整路径
+                    <input
+                      value={listingHtmlPath}
+                      onChange={(e) => setListingHtmlPath(e.target.value)}
+                      placeholder="例如 D:\\下载\\Ozon商品.html"
+                    />
+                  </label>
+                </div>
+                <div className="competitor-actions">
+                  <button
+                    className="outline-button"
+                    onClick={async () => {
+                      try {
+                        await openListingBrowser(draft.id);
+                        setMessage(
+                          "已打开商品页；完成验证并等待图库加载后，请保存 HTML。",
+                        );
+                      } catch (e) {
+                        setMessage(String(e));
+                      }
+                    }}
+                  >
+                    打开 Edge/浏览器
+                  </button>
+                  <button
+                    className="dark-button"
+                    disabled={busy || !listingHtmlPath.trim()}
+                    onClick={async () => {
+                      setBusy(true);
+                      try {
+                        const count = await importListingHtml(
+                          draft.id,
+                          listingHtmlPath,
+                        );
+                        const next = await listingJobs();
+                        setJobs(next);
+                        const current = next.find((v) => v.id === draft.id);
+                        if (current) editJob(current);
+                        setMessage(
+                          `验证页采集成功：已保存标题、描述、参数和 ${count} 张商品图片。`,
+                        );
+                        setListingHtmlPath("");
+                      } catch (e) {
+                        setMessage(String(e));
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    导入验证页并继续
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="listing-fields">
+              <label>
+                实时类目搜索
+                <input
+                  value={categoryQuery}
+                  onChange={async (e) => {
+                    const value = e.target.value;
+                    setCategoryQuery(value);
+                    try {
+                      setCategoryRows(await searchListingCategories(value, 60));
+                    } catch (error) {
+                      setCategoryRows([]);
+                      if (value.trim()) setMessage(String(error));
+                    }
+                  }}
+                  placeholder="输入中文或俄文商品类型"
+                />
+              </label>
+              <div className="competitor-actions">
+                <button
+                  className="outline-button"
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      const count = await refreshListingCategories();
+                      setCategoryRows(
+                        await searchListingCategories(
+                          categoryQuery || draft.title,
+                          60,
+                        ),
+                      );
+                      setMessage(`已缓存 ${count} 个 Ozon 实时末级类目。`);
+                    } catch (e) {
+                      setMessage(String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  <RefreshCw size={14} />
+                  刷新 Ozon 类目
+                </button>
+              </div>
+            </div>
+            {!!categoryRows.length && (
+              <div className="table-card">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>候选类目</th>
+                      <th>类目 ID</th>
+                      <th>type ID</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {categoryRows.slice(0, 20).map((row) => (
+                      <tr key={`${row.descriptionCategoryId}-${row.typeId}`}>
+                        <td>{row.display}</td>
+                        <td>{row.descriptionCategoryId}</td>
+                        <td>{row.typeId}</td>
+                        <td>
+                          <button
+                            className="outline-button"
+                            onClick={() => {
+                              setDraft({
+                                ...draft,
+                                categoryId: String(row.descriptionCategoryId),
+                                categoryDisplay: row.display,
+                                typeId: String(row.typeId),
+                              });
+                              setCategoryRows([]);
+                              setMessage(`已选择实时类目：${row.display}`);
+                            }}
+                          >
+                            选择
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="listing-fields">
+              {(
+                [
+                  ["offerId", "货号 offer_id"],
+                  ["title", "俄文标题"],
+                  ["categoryId", "description_category_id"],
+                  ["categoryDisplay", "类目路径"],
+                  ["typeId", "type_id"],
+                  ["price", "售价 RUB"],
+                ] as Array<[keyof ListingDraftInput, string]>
+              ).map(([key, label]) => (
+                <label key={key}>
+                  {label}
+                  <input
+                    value={String(draft[key])}
+                    onChange={(e) =>
+                      setDraft({ ...draft, [key]: e.target.value })
+                    }
+                  />
+                </label>
+              ))}
+              {(
+                [
+                  ["weight", "重量 g"],
+                  ["depth", "深度 mm"],
+                  ["width", "宽度 mm"],
+                  ["height", "高度 mm"],
+                ] as Array<[keyof ListingDraftInput, string]>
+              ).map(([key, label]) => (
+                <label key={key}>
+                  {label}
+                  <input
+                    type="number"
+                    min="0"
+                    value={Number(draft[key])}
+                    onChange={(e) =>
+                      setDraft({ ...draft, [key]: Number(e.target.value) })
+                    }
+                  />
+                </label>
+              ))}
+            </div>
+            <label>
+              俄文描述
+              <textarea
+                value={draft.description}
+                onChange={(e) =>
+                  setDraft({ ...draft, description: e.target.value })
+                }
+              />
+            </label>
+            <label>
+              图片地址（每行一个）
+              <textarea
+                value={imagesText}
+                onChange={(e) => setImagesText(e.target.value)}
+              />
+            </label>
+            <div className="listing-fields">
+              <label>
+                attributes JSON
+                <textarea
+                  value={attributesText}
+                  onChange={(e) => setAttributesText(e.target.value)}
+                />
+              </label>
+              <label>
+                complex_attributes JSON
+                <textarea
+                  value={complexAttributesText}
+                  onChange={(e) => setComplexAttributesText(e.target.value)}
+                />
+              </label>
+            </div>
+            <div className="competitor-actions">
+              <button
+                className="dark-button"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    const attributes = JSON.parse(attributesText),
+                      complexAttributes = JSON.parse(complexAttributesText);
+                    const stage = await saveListingDraft({
+                      ...draft,
+                      images: imagesText
+                        .split(/\r?\n/)
+                        .map((v) => v.trim())
+                        .filter(Boolean),
+                      attributes,
+                      complexAttributes,
+                    });
+                    setMessage(`草稿 #${draft.id} 已保存，当前阶段 ${stage}。`);
+                    const next = await listingJobs();
+                    setJobs(next);
+                    const current = next.find((v) => v.id === draft.id);
+                    if (current) editJob(current);
+                  } catch (e) {
+                    setMessage(`保存失败：${String(e)}`);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                <Save size={14} />
+                保存并校验阶段
+              </button>
+              <button className="outline-button" onClick={() => setDraft(null)}>
+                关闭
+              </button>
+            </div>
           </div>
-          <label>俄文描述<textarea value={draft.description} onChange={e=>setDraft({...draft,description:e.target.value})}/></label>
-          <label>图片地址（每行一个）<textarea value={imagesText} onChange={e=>setImagesText(e.target.value)}/></label>
-          <div className="listing-fields">
-            <label>attributes JSON<textarea value={attributesText} onChange={e=>setAttributesText(e.target.value)}/></label>
-            <label>complex_attributes JSON<textarea value={complexAttributesText} onChange={e=>setComplexAttributesText(e.target.value)}/></label>
-          </div>
-          <div className="competitor-actions"><button className="dark-button" disabled={busy} onClick={async()=>{setBusy(true);try{const attributes=JSON.parse(attributesText),complexAttributes=JSON.parse(complexAttributesText);const stage=await saveListingDraft({...draft,images:imagesText.split(/\r?\n/).map(v=>v.trim()).filter(Boolean),attributes,complexAttributes});setMessage(`草稿 #${draft.id} 已保存，当前阶段 ${stage}。`);const next=await listingJobs();setJobs(next);const current=next.find(v=>v.id===draft.id);if(current)editJob(current);}catch(e){setMessage(`保存失败：${String(e)}`);}finally{setBusy(false);}}}><Save size={14}/>保存并校验阶段</button><button className="outline-button" onClick={()=>setDraft(null)}>关闭</button></div>
-        </div>}
+        )}
       </section>
       <section className="card listing-config">
         <div className="card-title">台账配置</div>
@@ -464,9 +923,22 @@ export function ListingPage() {
                     ? "—"
                     : `${row.lengthCm} × ${row.widthCm} × ${row.heightCm} cm`}
                 </td>
-                <td>{row.listingMode || "—"}<small>{row.pricingMode || "—"}</small></td>
-                <td>{row.price == null ? "—" : row.price.toFixed(2)}<small>{row.profit == null ? "—" : `利润 ${row.profit.toFixed(2)} · ROI ${row.roiPercent?.toFixed(1) ?? "—"}%`}</small></td>
-                <td>{row.category || "—"}<small>{row.importTaskId || "—"}</small></td>
+                <td>
+                  {row.listingMode || "—"}
+                  <small>{row.pricingMode || "—"}</small>
+                </td>
+                <td>
+                  {row.price == null ? "—" : row.price.toFixed(2)}
+                  <small>
+                    {row.profit == null
+                      ? "—"
+                      : `利润 ${row.profit.toFixed(2)} · ROI ${row.roiPercent?.toFixed(1) ?? "—"}%`}
+                  </small>
+                </td>
+                <td>
+                  {row.category || "—"}
+                  <small>{row.importTaskId || "—"}</small>
+                </td>
                 <td>
                   <b>{row.status || "—"}</b>
                   <small>{row.updatedAt}</small>
@@ -755,13 +1227,21 @@ export function CompetitorsPage() {
   const [rows, setRows] = useState<CompetitorRow[]>([]),
     [url, setUrl] = useState(""),
     [selected, setSelected] = useState<number[]>([]),
-    [fallbackId, setFallbackId] = useState<number | null>(null),
-    [htmlPath, setHtmlPath] = useState(""),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [manualSales, setManualSales] = useState<Record<number, string>>({}),
+    [latestRun, setLatestRun] = useState<CompetitorRunSummary | null>(null),
+    [collection, setCollection] = useState<CompetitorCollectionProgress | null>(
+      null,
+    );
+  const collectionWasRunning = useRef(false);
   const load = async () => {
-    const data = await competitors();
+    const [data, run] = await Promise.all([
+      competitors(),
+      competitorLatestRun(),
+    ]);
     setRows(data);
+    setLatestRun(run);
     setSelected((old) => (old.length ? old : data.map((x) => x.id)));
   };
   useEffect(() => {
@@ -774,6 +1254,21 @@ export function CompetitorsPage() {
         .then(load);
     run();
     const timer = window.setInterval(run, 60 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const next = await competitorCollectionProgress();
+        setCollection(next);
+        if (collectionWasRunning.current && !next.running) await load();
+        collectionWasRunning.current = next.running;
+      } catch (e) {
+        setError(`无法读取采集进度：${String(e)}`);
+      }
+    };
+    void poll();
+    const timer = window.setInterval(poll, 700);
     return () => window.clearInterval(timer);
   }, []);
   const add = async () => {
@@ -803,25 +1298,13 @@ export function CompetitorsPage() {
   };
   const refreshAll = async () => {
     if (!rows.length) return;
-    setBusy(true);
     setError("");
-    let success = 0;
-    const failures: string[] = [];
-    for (const row of rows) {
-      try {
-        await refreshCompetitor(row.id);
-        success++;
-      } catch (e) {
-        failures.push(`${row.name || row.productCode || row.id}: ${String(e)}`);
-      }
+    try {
+      await startCompetitorsCollection();
+      setCollection(await competitorCollectionProgress());
+    } catch (e) {
+      setError(String(e));
     }
-    await load();
-    setBusy(false);
-    if (failures.length)
-      setError(
-        `已采集 ${success} 个，失败 ${failures.length} 个：${failures.slice(0, 3).join("；")}`,
-      );
-    else alert(`自动采集完成：${success} 个竞品`);
   };
   useEffect(() => {
     const el = document.getElementById("competitor-chart");
@@ -902,42 +1385,118 @@ export function CompetitorsPage() {
           {error}
         </div>
       )}
-      {fallbackId != null && (
-        <section className="card migration-note">
-          <AlertTriangle />
+      <section className="card migration-note">
+        <RefreshCw />
+        <div>
+          <h3>自动采集流程</h3>
+          <p>
+            软件会先在后台直连采集；如遇 Ozon 验证或字段不完整，会自动打开专用
+            Edge/Chrome。如页面要求验证，只需在弹出窗口完成验证，之后会自动校验商品、读取数据并入库，无需保存或导入
+            HTML。
+          </p>
+        </div>
+      </section>
+      {latestRun && (
+        <section className="card competitor-run-summary">
           <div>
-            <h3>验证页恢复采集</h3>
-            <p>
-              先在系统浏览器完成 Ozon 验证并打开商品页，再将网页另存为 HTML；软件只读取你明确选择的 HTML，不导入 Cookie 或浏览器凭证。
-            </p>
-            <div className="button-row">
-              <button onClick={() => openCompetitorBrowser(fallbackId)}>
-                在浏览器打开商品页
-              </button>
-              <input
-                value={htmlPath}
-                onChange={(e) => setHtmlPath(e.target.value)}
-                placeholder="验证后保存的 .html 完整路径"
-              />
-              <button
-                disabled={!htmlPath.trim()}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    await importCompetitorHtml(fallbackId, htmlPath);
-                    setHtmlPath("");
-                    setFallbackId(null);
-                    setError("");
-                    await load();
-                  } catch (e) {
-                    setError(String(e));
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                导入验证后页面
-              </button>
+            <b>最近采集批次</b>
+            <small>
+              {latestRun.startedAt} · {latestRun.runId}
+            </small>
+          </div>
+          <span className="badge blue">
+            完成 {latestRun.completed}/{latestRun.requested}
+          </span>
+          <span className="badge green">成功 {latestRun.ok}</span>
+          <span className="badge orange">不完整 {latestRun.incomplete}</span>
+          <span className="badge red">受阻 {latestRun.blocked}</span>
+          <span>
+            结构变化 {latestRun.changedLayout} · 不可访问{" "}
+            {latestRun.inaccessible} · 待核验 {latestRun.ambiguousMatch}
+          </span>
+        </section>
+      )}
+      {collection && (collection.running || collection.total > 0) && (
+        <section className="card competitor-progress-card">
+          <div className="competitor-progress-head">
+            <div>
+              <b>{collection.running ? "正在采集竞品" : "最近采集进度"}</b>
+              <small>{collection.message}</small>
+            </div>
+            <div className="competitor-progress-counts">
+              <span>
+                任务 {collection.completed}/{collection.total}
+              </span>
+              <span className="badge green">成功 {collection.succeeded}</span>
+              <span className="badge red">失败 {collection.failed}</span>
+              {collection.currentCode && (
+                <span>当前 {collection.currentCode}</span>
+              )}
+            </div>
+          </div>
+          <progress
+            max={Math.max(1, collection.total)}
+            value={collection.completed}
+          />
+          {collection.running && (
+            <button
+              className="stop-collection-button"
+              disabled={collection.stopRequested}
+              onClick={async () => {
+                await stopCompetitorsCollection();
+                setCollection(await competitorCollectionProgress());
+              }}
+            >
+              {collection.stopRequested ? "正在停止" : "停止采集"}
+            </button>
+          )}
+          <div className="competitor-task-board">
+            <div className="competitor-task-board-title">
+              <div>
+                <b>采集任务明细</b>
+                <small>每个竞品独立排队、采集和停止；停止一个任务不会影响其他任务</small>
+              </div>
+              <span>{collection.tasks?.length ?? 0} 个任务</span>
+            </div>
+            <div className="competitor-task-list">
+              {(collection.tasks ?? []).map((task, index) => {
+                const canStop = ["queued", "running", "stopping"].includes(task.status);
+                const statusText: Record<string, string> = {
+                  queued: "等待中",
+                  running: "采集中",
+                  stopping: "停止中",
+                  stopped: "已停止",
+                  success: "成功",
+                  incomplete: "不完整",
+                  failed: "失败",
+                };
+                return (
+                  <div className={`competitor-task-row task-${task.status}`} key={task.id}>
+                    <span className="competitor-task-index">{String(index + 1).padStart(2, "0")}</span>
+                    <div className="competitor-task-identity">
+                      <b>{task.productCode || `任务 ${task.id}`}</b>
+                      <small title={task.productUrl}>{task.productUrl}</small>
+                    </div>
+                    <span className={`competitor-task-status status-${task.status}`}>
+                      {statusText[task.status] ?? task.status}
+                    </span>
+                    <div className="competitor-task-message">
+                      <b>{task.stage || "queued"}</b>
+                      <small>{task.message || "等待采集"}</small>
+                    </div>
+                    <button
+                      className="task-stop-button"
+                      disabled={!canStop || task.stopRequested}
+                      onClick={async () => {
+                        await stopCompetitorCollectionTask(task.id);
+                        setCollection(await competitorCollectionProgress());
+                      }}
+                    >
+                      {task.stopRequested ? "停止中" : canStop ? "停止此任务" : "—"}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </section>
@@ -948,10 +1507,10 @@ export function CompetitorsPage() {
           <span>
             <button
               className="outline-button"
-              disabled={busy || !rows.length}
+              disabled={busy || collection?.running || !rows.length}
               onClick={refreshAll}
             >
-              {busy ? "采集中" : "自动采集全部"}
+              {collection?.running ? "采集中" : "自动采集全部"}
             </button>{" "}
             <span className="badge blue">{selected.length} 个已选择</span>
           </span>
@@ -987,6 +1546,28 @@ export function CompetitorsPage() {
             </div>
             <h3>{row.name || `Ozon 商品 ${row.productCode}`}</h3>
             <small>{row.productCode || "等待识别商品编号"}</small>
+            <div
+              className={`competitor-status status-${row.latestStatus || "pending"}`}
+            >
+              {row.latestStatus === "ok"
+                ? "采集正常"
+                : row.latestStatus === "blocked"
+                  ? "验证受阻"
+                  : row.latestStatus === "changed_layout"
+                    ? "页面结构变化"
+                    : row.latestStatus === "inaccessible"
+                      ? "不可访问"
+                      : row.latestStatus === "ambiguous_match"
+                        ? "商品标识待核验"
+                        : row.latestStatus === "incomplete"
+                          ? "数据不完整"
+                          : "等待采集"}
+              {row.latestObservedAt && (
+                <small>
+                  {row.latestObservedAt} · 重试 {row.latestRetryCount} 次
+                </small>
+              )}
+            </div>
             <div className="competitor-metrics">
               <span>
                 当前售价
@@ -1006,18 +1587,45 @@ export function CompetitorsPage() {
                 月销量<b>{row.monthlySales ?? "—"}</b>
               </span>
             </div>
+            <div className="competitor-manual-sales">
+              <input
+                type="number"
+                min="0"
+                value={manualSales[row.id] ?? ""}
+                placeholder="手填当前累计销量"
+                onChange={(e) =>
+                  setManualSales((old) => ({
+                    ...old,
+                    [row.id]: e.target.value,
+                  }))
+                }
+              />
+              <button
+                disabled={busy || !manualSales[row.id]?.trim()}
+                onClick={async () => {
+                  const value = Number(manualSales[row.id]);
+                  if (!Number.isInteger(value) || value < 0) {
+                    setError("累计销量必须是大于或等于 0 的整数");
+                    return;
+                  }
+                  await setCompetitorManualSales(row.id, value);
+                  setManualSales((old) => ({ ...old, [row.id]: "" }));
+                  await load();
+                }}
+              >
+                保存销量快照
+              </button>
+            </div>
+            {row.latestNotes && (
+              <p className="competitor-notes">{row.latestNotes}</p>
+            )}
             <div className="competitor-actions">
               <button onClick={() => refresh(row.id)} disabled={busy}>
                 <RefreshCw size={14} />
                 采集快照
               </button>
-              <button
-                onClick={() => {
-                  setFallbackId(row.id);
-                  setError("如直连遇到验证页，请使用下方安全恢复流程。");
-                }}
-              >
-                验证页处理
+              <button onClick={() => refresh(row.id)} disabled={busy}>
+                自动验证采集
               </button>
               <button
                 className="remove"
@@ -1074,7 +1682,8 @@ export function ReportsPage({
     [crossData, setCrossData] = useState<CrossBorderReport | null>(null),
     [breakdown, setBreakdown] = useState<FinanceBreakdownRow[]>([]),
     [missingRows, setMissingRows] = useState<MissingCostRow[]>([]),
-    [editingMissingCost, setEditingMissingCost] = useState<MissingCostRow | null>(null),
+    [editingMissingCost, setEditingMissingCost] =
+      useState<MissingCostRow | null>(null),
     [detailFilter, setDetailFilter] = useState(""),
     [busy, setBusy] = useState(""),
     [message, setMessage] = useState(""),
@@ -1362,7 +1971,7 @@ export function ReportsPage({
         <>
           <div className="report-hero">
             <div>
-              <span>Finance 结算口径利润</span>
+              <span>税前利润</span>
               <strong
                 className={
                   (data.settledProfit ?? data.estimatedProfit) < 0
@@ -1374,7 +1983,7 @@ export function ReportsPage({
                   ? "成本未完整"
                   : m(data.settledProfit)}
               </strong>
-              <small>平台净结算减采购与头程</small>
+              <small>Finance 净额 − 已交付商品采购成本 − 已交付商品头程</small>
             </div>
             <div>
               <span>Finance 已结算净额</span>
@@ -1566,7 +2175,12 @@ export function ReportsPage({
                   </thead>
                   <tbody>
                     {missingRows.map((row) => (
-                      <tr key={row.sku} onDoubleClick={() => setEditingMissingCost(row)} style={{cursor:"pointer"}} title="双击编辑该 SKU 成本">
+                      <tr
+                        key={row.sku}
+                        onDoubleClick={() => setEditingMissingCost(row)}
+                        style={{ cursor: "pointer" }}
+                        title="双击编辑该 SKU 成本"
+                      >
                         <td>
                           <b>{row.offerId || "—"}</b>
                           <small>{row.sku}</small>
@@ -1588,7 +2202,14 @@ export function ReportsPage({
                             .filter(Boolean)
                             .join("、") || "完整"}
                         </td>
-                        <td><button className="outline-button" onClick={() => setEditingMissingCost(row)}>编辑成本</button></td>
+                        <td>
+                          <button
+                            className="outline-button"
+                            onClick={() => setEditingMissingCost(row)}
+                          >
+                            编辑成本
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1596,15 +2217,30 @@ export function ReportsPage({
               )}
             </section>
           )}
-          {editingMissingCost && <MissingCostEditor row={editingMissingCost} close={()=>setEditingMissingCost(null)} saved={async()=>{
-            clearReportCache();
-            setEditingMissingCost(null);
-            setBusy("missing-cost");
-            try {
-              const [nextRows,nextReport]=await Promise.all([missingCostRows(effectiveRange),businessReport(effectiveRange)]);
-              setMissingRows(nextRows); setData(nextReport); setMessage(`SKU ${editingMissingCost.sku} 成本已保存，月度盈亏已重新核算。`);
-            } finally { setBusy(""); }
-          }}/>{" "}
+          {editingMissingCost && (
+            <MissingCostEditor
+              row={editingMissingCost}
+              close={() => setEditingMissingCost(null)}
+              saved={async () => {
+                clearReportCache();
+                setEditingMissingCost(null);
+                setBusy("missing-cost");
+                try {
+                  const [nextRows, nextReport] = await Promise.all([
+                    missingCostRows(effectiveRange),
+                    businessReport(effectiveRange),
+                  ]);
+                  setMissingRows(nextRows);
+                  setData(nextReport);
+                  setMessage(
+                    `SKU ${editingMissingCost.sku} 成本已保存，月度盈亏已重新核算。`,
+                  );
+                } finally {
+                  setBusy("");
+                }
+              }}
+            />
+          )}{" "}
         </>
       )}
       {tab === "cross" && <CrossBorderView data={crossData} />}
@@ -2093,7 +2729,9 @@ export function SupplyPage() {
   useEffect(() => {
     mounted.current = true;
     void load();
-    return () => { mounted.current = false; };
+    return () => {
+      mounted.current = false;
+    };
   }, []);
   const findSlots = async (row: SupplyOrder) => {
     setSelected(row);
@@ -2115,11 +2753,11 @@ export function SupplyPage() {
     setBusy(true);
     try {
       const result = await bookSupplyTimeslot(
-          selected.orderId,
-          slot.from,
-          slot.to,
-          "确认预约",
-        );
+        selected.orderId,
+        slot.from,
+        slot.to,
+        "确认预约",
+      );
       if (mounted.current) {
         alert(result);
         await load();
@@ -2732,7 +3370,9 @@ export function WbPage({
   setDays: (days: number) => void;
 }) {
   const wbChartRef = useRef<HTMLDivElement | null>(null);
-  const [tab, setTab] = useState<"daily" | "orders" | "ads" | "inventory" | "costs" | "settings">(section),
+  const [tab, setTab] = useState<
+      "daily" | "orders" | "ads" | "inventory" | "costs" | "settings"
+    >(section),
     [settings, setSettings] = useState<WbSettings | null>(null),
     [rows, setRows] = useState<WbDaily[]>([]),
     [orderRows, setOrderRows] = useState<WbOrderRow[]>([]),
@@ -2784,9 +3424,19 @@ export function WbPage({
       tooltip: { trigger: "axis" },
       legend: { data: ["销售额", "广告费", "暂估利润"] },
       grid: { left: 20, right: 62, top: 52, bottom: 30, containLabel: true },
-      xAxis: { type: "category", boundaryGap: false, data: entries.map(([day]) => day, ), axisTick: { show: false }, axisLine: { show: false } },
+      xAxis: {
+        type: "category",
+        boundaryGap: false,
+        data: entries.map(([day]) => day),
+        axisTick: { show: false },
+        axisLine: { show: false },
+      },
       yAxis: [
-        { type: "value", name: "销售 / 利润 CNY", splitLine: { lineStyle: { color: "#eef2f7" } } },
+        {
+          type: "value",
+          name: "销售 / 利润 CNY",
+          splitLine: { lineStyle: { color: "#eef2f7" } },
+        },
         { type: "value", name: "广告 CNY", splitLine: { show: false } },
       ],
       series: [
@@ -2797,7 +3447,12 @@ export function WbPage({
           symbol: "none",
           data: entries.map(([, value]) => value.revenue),
           lineStyle: { color: "#3478f6", width: 3 },
-          areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: "rgba(52,120,246,.22)" }, { offset: 1, color: "rgba(52,120,246,0)" }]) },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: "rgba(52,120,246,.22)" },
+              { offset: 1, color: "rgba(52,120,246,0)" },
+            ]),
+          },
         },
         {
           name: "广告费",
@@ -2837,7 +3492,10 @@ export function WbPage({
     adOrders = adRows.reduce((n, row) => n + row.orders, 0),
     adViews = adRows.reduce((n, row) => n + row.views, 0),
     adClicks = adRows.reduce((n, row) => n + row.clicks, 0),
-    activeProducts = new Set([...rows.map((row) => row.nmId), ...stockRows.filter((row) => row.quantity > 0).map((row) => row.nmId)]).size,
+    activeProducts = new Set([
+      ...rows.map((row) => row.nmId),
+      ...stockRows.filter((row) => row.quantity > 0).map((row) => row.nmId),
+    ]).size,
     avgOrder = units > 0 ? revenue / units : 0,
     acos = adSales > 0 ? (adSpend / adSales) * 100 : null,
     tacos = revenue > 0 ? (adSpend / revenue) * 100 : null,
@@ -2915,63 +3573,181 @@ export function WbPage({
         <>
           <div className="hero-grid">
             <section className="card summary">
-              <div className="card-title">实时销量 <span className="badge green">WB 本地缓存</span></div>
+              <div className="card-title">
+                实时销量 <span className="badge green">WB 本地缓存</span>
+              </div>
               <div className="four-cols">
-                <div className="stat blue"><span>销量</span><strong>{units}</strong><small>有效商品件数</small></div>
-                <div className="stat blue"><span>销售额</span><strong>¥{revenue.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong><small>订单实收预估</small></div>
-                <div className="stat blue"><span>订单商品行</span><strong>{orderRows.filter((row) => !row.cancelled).length}</strong><small>按 srid 去重</small></div>
-                <div className="stat blue"><span>平均件单价</span><strong>¥{avgOrder.toFixed(2)}</strong><small>销售额 ÷ 件数</small></div>
+                <div className="stat blue">
+                  <span>销量</span>
+                  <strong>{units}</strong>
+                  <small>有效商品件数</small>
+                </div>
+                <div className="stat blue">
+                  <span>销售额</span>
+                  <strong>
+                    ¥
+                    {revenue.toLocaleString(undefined, {
+                      maximumFractionDigits: 2,
+                    })}
+                  </strong>
+                  <small>订单实收预估</small>
+                </div>
+                <div className="stat blue">
+                  <span>订单商品行</span>
+                  <strong>
+                    {orderRows.filter((row) => !row.cancelled).length}
+                  </strong>
+                  <small>按 srid 去重</small>
+                </div>
+                <div className="stat blue">
+                  <span>平均件单价</span>
+                  <strong>¥{avgOrder.toFixed(2)}</strong>
+                  <small>销售额 ÷ 件数</small>
+                </div>
               </div>
             </section>
             <section className="card summary">
-              <div className="card-title">广告表现 <span className="badge purple">商品级精确归因</span></div>
+              <div className="card-title">
+                广告表现 <span className="badge purple">商品级精确归因</span>
+              </div>
               <div className="four-cols">
-                <div className="stat purple"><span>广告花费</span><strong>¥{adSpend.toFixed(2)}</strong><small>WB Promotion</small></div>
-                <div className="stat purple"><span>广告销售额</span><strong>¥{adSales.toFixed(2)}</strong><small>归因销售</small></div>
-                <div className="stat purple"><span>广告订单</span><strong>{adOrders}</strong><small>商品级缓存</small></div>
-                <div className="stat purple"><span>点击转化率</span><strong>{adConversion == null ? "—" : `${adConversion.toFixed(2)}%`}</strong><small>广告订单 ÷ 点击</small></div>
+                <div className="stat purple">
+                  <span>广告花费</span>
+                  <strong>¥{adSpend.toFixed(2)}</strong>
+                  <small>WB Promotion</small>
+                </div>
+                <div className="stat purple">
+                  <span>广告销售额</span>
+                  <strong>¥{adSales.toFixed(2)}</strong>
+                  <small>归因销售</small>
+                </div>
+                <div className="stat purple">
+                  <span>广告订单</span>
+                  <strong>{adOrders}</strong>
+                  <small>商品级缓存</small>
+                </div>
+                <div className="stat purple">
+                  <span>点击转化率</span>
+                  <strong>
+                    {adConversion == null ? "—" : `${adConversion.toFixed(2)}%`}
+                  </strong>
+                  <small>广告订单 ÷ 点击</small>
+                </div>
               </div>
             </section>
           </div>
           {!adRows.length && orderRows.length > 0 && (
-            <div className="error-banner"><AlertTriangle />订单已有数据，但广告缓存是 0 行。WB 广告接口要求 Token 开通“推广”权限；如果后台确有广告，请更新 Token 权限后重新同步。系统不会用订单数据伪造广告。</div>
+            <div className="error-banner">
+              <AlertTriangle />
+              订单已有数据，但广告缓存是 0 行。WB 广告接口要求 Token
+              开通“推广”权限；如果后台确有广告，请更新 Token
+              权限后重新同步。系统不会用订单数据伪造广告。
+            </div>
           )}
           <section className="card trend-card">
             <div className="section-heading">
-              <div><h2>业绩趋势</h2><p>销售额、广告花费和暂估利润的日度变化</p></div>
+              <div>
+                <h2>业绩趋势</h2>
+                <p>销售额、广告花费和暂估利润的日度变化</p>
+              </div>
               <div className="trend-actions">
                 <div className="tabs">
-                  {([[7, "最近7天"], [30, "最近30天"], [90, "本季度"]] as const).map(([value, label]) => (
-                    <button key={value} className={days === value ? "selected" : ""} onClick={() => setDays(value)}>{label}</button>
+                  {(
+                    [
+                      [7, "最近7天"],
+                      [30, "最近30天"],
+                      [90, "本季度"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      className={days === value ? "selected" : ""}
+                      onClick={() => setDays(value)}
+                    >
+                      {label}
+                    </button>
                   ))}
                 </div>
-                <div className="date-pill"><CalendarDays size={16} />{range.from} — {range.to}</div>
+                <div className="date-pill">
+                  <CalendarDays size={16} />
+                  {range.from} — {range.to}
+                </div>
               </div>
             </div>
             <div className="metric-strip">
-              <div className="stat blue selected-stat"><span>销售额</span><strong>¥{revenue.toFixed(2)}</strong><small>已汇总</small></div>
-              <div className="stat green"><span>销量</span><strong>{units}</strong><small>有效件数</small></div>
-              <div className="stat orange"><span>广告花费</span><strong>¥{adSpend.toFixed(2)}</strong><small>{adRows.length ? "商品级缓存" : "暂无缓存"}</small></div>
-              <div className="stat green"><span>在售商品</span><strong>{activeProducts}</strong><small>订单与库存快照</small></div>
+              <div className="stat blue selected-stat">
+                <span>销售额</span>
+                <strong>¥{revenue.toFixed(2)}</strong>
+                <small>已汇总</small>
+              </div>
+              <div className="stat green">
+                <span>销量</span>
+                <strong>{units}</strong>
+                <small>有效件数</small>
+              </div>
+              <div className="stat orange">
+                <span>广告花费</span>
+                <strong>¥{adSpend.toFixed(2)}</strong>
+                <small>{adRows.length ? "商品级缓存" : "暂无缓存"}</small>
+              </div>
+              <div className="stat green">
+                <span>在售商品</span>
+                <strong>{activeProducts}</strong>
+                <small>订单与库存快照</small>
+              </div>
             </div>
             <div ref={wbChartRef} className="report-chart" />
           </section>
           <div className="health-grid">
             <section className="card health-card">
-              <div className="card-title">经营健康度 <span className="badge blue">真实指标</span></div>
+              <div className="card-title">
+                经营健康度 <span className="badge blue">真实指标</span>
+              </div>
               <div className="health-list">
-                <span>广告 ACOS<b>{acos == null ? "—" : `${acos.toFixed(2)}%`}</b></span>
-                <span>整体 TACOS / DRR<b>{tacos == null ? "—" : `${tacos.toFixed(2)}%`}</b></span>
-                <span>广告 CTR<b>{ctr == null ? "—" : `${ctr.toFixed(2)}%`}</b></span>
-                <span>点击－下单转化<b>{adConversion == null ? "—" : `${adConversion.toFixed(2)}%`}</b></span>
-                <span>取消商品行<b>{orderRows.filter((row) => row.cancelled).length}</b></span>
-                <span>缺成本 SKU<b>{rows.filter((row) => !row.complete).length}</b></span>
+                <span>
+                  广告 ACOS<b>{acos == null ? "—" : `${acos.toFixed(2)}%`}</b>
+                </span>
+                <span>
+                  整体 TACOS / DRR
+                  <b>{tacos == null ? "—" : `${tacos.toFixed(2)}%`}</b>
+                </span>
+                <span>
+                  广告 CTR<b>{ctr == null ? "—" : `${ctr.toFixed(2)}%`}</b>
+                </span>
+                <span>
+                  点击－下单转化
+                  <b>
+                    {adConversion == null ? "—" : `${adConversion.toFixed(2)}%`}
+                  </b>
+                </span>
+                <span>
+                  取消商品行
+                  <b>{orderRows.filter((row) => row.cancelled).length}</b>
+                </span>
+                <span>
+                  缺成本 SKU<b>{rows.filter((row) => !row.complete).length}</b>
+                </span>
               </div>
             </section>
             <section className="card sync">
-              <div className="card-title">同步状态 <span className={`badge ${busy ? "blue" : "green"}`}>● {busy ? "同步中" : "已连接"}</span></div>
+              <div className="card-title">
+                同步状态{" "}
+                <span className={`badge ${busy ? "blue" : "green"}`}>
+                  ● {busy ? "同步中" : "已连接"}
+                </span>
+              </div>
               <p>WB 数据按独立 Token 同步并保存至独立 SQLite。</p>
-              <div><span>WB 连接<b>{settings?.token ? "已配置" : "未配置"}</b></span><span>广告缓存<b>{adRows.length} 行</b></span><span>数据来源<b>WB 本地快照</b></span></div>
+              <div>
+                <span>
+                  WB 连接<b>{settings?.token ? "已配置" : "未配置"}</b>
+                </span>
+                <span>
+                  广告缓存<b>{adRows.length} 行</b>
+                </span>
+                <span>
+                  数据来源<b>WB 本地快照</b>
+                </span>
+              </div>
             </section>
           </div>
           <div className="wb-weekly-action">
@@ -3145,54 +3921,200 @@ export function WbPage({
       )}
       {tab === "orders" && (
         <section className="card table-card">
-          <div className="card-title">WB 实时订单缓存 <span>{orderRows.length} 行</span></div>
+          <div className="card-title">
+            WB 实时订单缓存 <span>{orderRows.length} 行</span>
+          </div>
           <table>
-            <thead><tr><th>日期 / srid</th><th>nmId / 货号</th><th>仓库</th><th>金额 CNY</th><th>状态</th><th>更新时间</th></tr></thead>
-            <tbody>{orderRows.slice(0, 1000).map((row) => <tr key={row.srid}>
-              <td>{row.day}<small>{row.srid}</small></td><td>{row.nmId}<small>{row.article}</small></td>
-              <td>{row.warehouseName || "—"}</td><td>¥{row.revenueCny.toFixed(2)}</td>
-              <td>{row.cancelled ? "已取消" : "有效订单"}</td><td>{row.changedAt}</td>
-            </tr>)}</tbody>
+            <thead>
+              <tr>
+                <th>日期 / srid</th>
+                <th>nmId / 货号</th>
+                <th>仓库</th>
+                <th>金额 CNY</th>
+                <th>状态</th>
+                <th>更新时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {orderRows.slice(0, 1000).map((row) => (
+                <tr key={row.srid}>
+                  <td>
+                    {row.day}
+                    <small>{row.srid}</small>
+                  </td>
+                  <td>
+                    {row.nmId}
+                    <small>{row.article}</small>
+                  </td>
+                  <td>{row.warehouseName || "—"}</td>
+                  <td>¥{row.revenueCny.toFixed(2)}</td>
+                  <td>{row.cancelled ? "已取消" : "有效订单"}</td>
+                  <td>{row.changedAt}</td>
+                </tr>
+              ))}
+            </tbody>
           </table>
-          {!orderRows.length && <div className="empty">当前日期范围尚无 WB 订单缓存。</div>}
+          {!orderRows.length && (
+            <div className="empty">当前日期范围尚无 WB 订单缓存。</div>
+          )}
         </section>
       )}
       {tab === "ads" && (
         <section className="card table-card">
-          <div className="card-title">WB 商品级广告归因 <span>{adRows.length} 行</span></div>
+          <div className="card-title">
+            WB 商品级广告归因 <span>{adRows.length} 行</span>
+          </div>
           <table>
-            <thead><tr><th>日期</th><th>活动 / nmId</th><th>曝光</th><th>点击 / CTR</th><th>广告订单</th><th>花费 CNY</th><th>广告销售 CNY</th></tr></thead>
-            <tbody>{adRows.slice(0, 2000).map((row) => <tr key={`${row.day}-${row.nmId}-${row.campaignId}`}>
-              <td>{row.day}</td><td>{row.campaignId}<small>{row.nmId}</small></td><td>{row.views}</td>
-              <td>{row.clicks}<small>{row.ctr == null ? "—" : `${row.ctr.toFixed(2)}%`}</small></td>
-              <td>{row.orders}</td><td>¥{row.spendCny.toFixed(2)}</td><td>¥{row.salesCny.toFixed(2)}</td>
-            </tr>)}</tbody>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>活动 / nmId</th>
+                <th>曝光</th>
+                <th>点击 / CTR</th>
+                <th>广告订单</th>
+                <th>花费 CNY</th>
+                <th>广告销售 CNY</th>
+              </tr>
+            </thead>
+            <tbody>
+              {adRows.slice(0, 2000).map((row) => (
+                <tr key={`${row.day}-${row.nmId}-${row.campaignId}`}>
+                  <td>{row.day}</td>
+                  <td>
+                    {row.campaignId}
+                    <small>{row.nmId}</small>
+                  </td>
+                  <td>{row.views}</td>
+                  <td>
+                    {row.clicks}
+                    <small>
+                      {row.ctr == null ? "—" : `${row.ctr.toFixed(2)}%`}
+                    </small>
+                  </td>
+                  <td>{row.orders}</td>
+                  <td>¥{row.spendCny.toFixed(2)}</td>
+                  <td>¥{row.salesCny.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
           </table>
-          {!adRows.length && <div className="empty">当前日期范围尚无商品级广告缓存。</div>}
+          {!adRows.length && (
+            <div className="empty">当前日期范围尚无商品级广告缓存。</div>
+          )}
         </section>
       )}
       {tab === "inventory" && (
         <section className="card table-card">
-          <div className="card-title">WB 仓库库存 <span>{stockRows.length} 条库存 · {warehouseRows.length} 个目录仓库</span></div>
-          <div className="mini-stats"><div><span>可用库存<strong>{stockRows.reduce((n,row)=>n+row.quantity,0)} 件</strong></span></div><div><span>去客户途中<strong>{stockRows.reduce((n,row)=>n+row.inWayToClient,0)} 件</strong></span></div><div><span>客户退回途中<strong>{stockRows.reduce((n,row)=>n+row.inWayFromClient,0)} 件</strong></span></div></div>
-          <div className="migration-note"><AlertTriangle /><div><h3>库存口径</h3><p>数量来自 2026 新 Analytics `stocks-report/wb-warehouses` 只读接口；仓库目录来自 Marketplace API。Token 无 Analytics 权限时保留上次成功缓存，不回退到已停用接口。</p></div></div>
+          <div className="card-title">
+            WB 仓库库存{" "}
+            <span>
+              {stockRows.length} 条库存 · {warehouseRows.length} 个目录仓库
+            </span>
+          </div>
+          <div className="mini-stats">
+            <div>
+              <span>
+                可用库存
+                <strong>
+                  {stockRows.reduce((n, row) => n + row.quantity, 0)} 件
+                </strong>
+              </span>
+            </div>
+            <div>
+              <span>
+                去客户途中
+                <strong>
+                  {stockRows.reduce((n, row) => n + row.inWayToClient, 0)} 件
+                </strong>
+              </span>
+            </div>
+            <div>
+              <span>
+                客户退回途中
+                <strong>
+                  {stockRows.reduce((n, row) => n + row.inWayFromClient, 0)} 件
+                </strong>
+              </span>
+            </div>
+          </div>
+          <div className="migration-note">
+            <AlertTriangle />
+            <div>
+              <h3>库存口径</h3>
+              <p>
+                数量来自 2026 新 Analytics `stocks-report/wb-warehouses`
+                只读接口；仓库目录来自 Marketplace API。Token 无 Analytics
+                权限时保留上次成功缓存，不回退到已停用接口。
+              </p>
+            </div>
+          </div>
           <table>
-            <thead><tr><th>nmId / chrtId</th><th>仓库</th><th>发货区域</th><th>可用库存</th><th>去客户途中</th><th>退回途中</th><th>更新时间</th></tr></thead>
-            <tbody>{stockRows.slice(0,5000).map((row) => <tr key={`${row.nmId}-${row.chrtId}-${row.warehouseId}`}>
-              <td><b>{row.nmId}</b><small>{row.chrtId}</small></td><td>{row.warehouseName}<small>{row.warehouseId}</small></td><td>{row.regionName || "—"}</td>
-              <td>{row.quantity}</td><td>{row.inWayToClient}</td><td>{row.inWayFromClient}</td><td>{row.updatedAt}</td>
-            </tr>)}</tbody>
+            <thead>
+              <tr>
+                <th>nmId / chrtId</th>
+                <th>仓库</th>
+                <th>发货区域</th>
+                <th>可用库存</th>
+                <th>去客户途中</th>
+                <th>退回途中</th>
+                <th>更新时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stockRows.slice(0, 5000).map((row) => (
+                <tr key={`${row.nmId}-${row.chrtId}-${row.warehouseId}`}>
+                  <td>
+                    <b>{row.nmId}</b>
+                    <small>{row.chrtId}</small>
+                  </td>
+                  <td>
+                    {row.warehouseName}
+                    <small>{row.warehouseId}</small>
+                  </td>
+                  <td>{row.regionName || "—"}</td>
+                  <td>{row.quantity}</td>
+                  <td>{row.inWayToClient}</td>
+                  <td>{row.inWayFromClient}</td>
+                  <td>{row.updatedAt}</td>
+                </tr>
+              ))}
+            </tbody>
           </table>
-          {!stockRows.length && <div className="empty">尚无 WB 库存缓存；请使用具备 Analytics 权限的 Token 同步。</div>}
+          {!stockRows.length && (
+            <div className="empty">
+              尚无 WB 库存缓存；请使用具备 Analytics 权限的 Token 同步。
+            </div>
+          )}
           <div className="card-title">仓库目录</div>
           <table>
-            <thead><tr><th>仓库</th><th>地址</th><th>城市</th><th>国家</th><th>物流识别</th><th>来源键</th></tr></thead>
-            <tbody>{warehouseRows.map((row) => <tr key={row.warehouseKey}>
-              <td><b>{row.name || "—"}</b></td><td>{row.address || "—"}</td><td>{row.city || "—"}</td>
-              <td>{row.country || "—"}</td><td>{row.mode}</td><td>{row.warehouseKey}</td>
-            </tr>)}</tbody>
+            <thead>
+              <tr>
+                <th>仓库</th>
+                <th>地址</th>
+                <th>城市</th>
+                <th>国家</th>
+                <th>物流识别</th>
+                <th>来源键</th>
+              </tr>
+            </thead>
+            <tbody>
+              {warehouseRows.map((row) => (
+                <tr key={row.warehouseKey}>
+                  <td>
+                    <b>{row.name || "—"}</b>
+                  </td>
+                  <td>{row.address || "—"}</td>
+                  <td>{row.city || "—"}</td>
+                  <td>{row.country || "—"}</td>
+                  <td>{row.mode}</td>
+                  <td>{row.warehouseKey}</td>
+                </tr>
+              ))}
+            </tbody>
           </table>
-          {!warehouseRows.length && <div className="empty">尚未同步 WB 仓库目录。</div>}
+          {!warehouseRows.length && (
+            <div className="empty">尚未同步 WB 仓库目录。</div>
+          )}
         </section>
       )}
       {tab === "settings" && settings && (

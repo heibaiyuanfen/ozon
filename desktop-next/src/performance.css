@@ -5,3 +5,27 @@
 .sidebar nav::-webkit-scrollbar { width:4px; }
 .sidebar nav::-webkit-scrollbar-thumb { background:#dfe6ef; border-radius:5px; }
 .order-product{display:flex;align-items:center;gap:10px;min-width:260px}.order-product img,.order-image-placeholder{width:42px;height:42px;border-radius:8px;object-fit:cover;flex:0 0 42px;background:#f0f4fa;display:grid;place-items:center;color:#8391a5}.order-product>div{min-width:0}.order-product .product{display:block;max-width:330px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.campaigns tbody tr { cursor: pointer; }
+.campaigns tbody tr:hover { background: #f5f8ff; }
+.campaign-monitor-backdrop { position: fixed; inset: 0; z-index: 1000; background: rgba(15, 28, 52, .48); display: grid; place-items: center; padding: 28px; }
+.campaign-monitor { position: relative; width: min(1280px, 96vw); max-height: 92vh; overflow: auto; background: #f7f9fd; border-radius: 20px; padding: 26px; box-shadow: 0 24px 70px rgba(10, 25, 55, .25); }
+.campaign-monitor h2 { margin: 0 42px 4px 0; }
+.campaign-monitor > p { margin-top: 0; color: #75839b; }
+.monitor-close { position: absolute; right: 20px; top: 15px; border: 0; background: transparent; font-size: 32px; cursor: pointer; }
+.monitor-tabs { display: flex; gap: 8px; margin: 18px 0 10px; }
+.monitor-tabs button, .monitor-controls button, .monitor-ai button { border: 1px solid #d9e1ef; background: white; border-radius: 9px; padding: 9px 14px; cursor: pointer; }
+.monitor-tabs button.active { background: #3478f6; color: white; }
+.monitor-chart, .monitor-controls, .monitor-ai, .monitor-logs { background: white; border-radius: 14px; padding: 18px; margin-top: 12px; overflow: auto; }
+.monitor-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
+.monitor-kpis > div { display: flex; flex-direction: column; gap: 7px; padding: 16px 18px; background: white; border-radius: 13px; border: 1px solid #edf1f7; }
+.monitor-kpis span, .monitor-kpis small { color: #7e8ba1; }
+.monitor-kpis strong { font-size: 22px; color: #12223d; }
+.campaign-effect-chart { width: 100%; height: 360px; }
+.monitor-bar-row { display: grid; grid-template-columns: 100px minmax(120px, 1fr) 120px 100px; align-items: center; gap: 12px; min-height: 32px; }
+.monitor-bar-row i { height: 12px; display: block; border-radius: 8px; background: linear-gradient(90deg, #3478f6, #65a4ff); }
+.monitor-bar-row em { font-style: normal; color: #66748d; }
+.monitor-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.monitor-controls input { border: 1px solid #d9e1ef; border-radius: 9px; padding: 9px 12px; }
+.monitor-ai pre { white-space: pre-wrap; line-height: 1.65; color: #273752; }
+.monitor-logs table { min-width: 1000px; width: 100%; }
+@media (max-width: 800px) { .campaign-monitor-backdrop { padding: 0; } .campaign-monitor { width: 100vw; max-height: 100vh; border-radius: 0; } .monitor-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .campaign-effect-chart { height: 300px; } }

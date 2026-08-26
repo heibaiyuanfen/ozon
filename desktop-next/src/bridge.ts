@@ -1,10 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AdvertisingData,
+  CampaignControlInput,
+  CampaignMonitorData,
   AnalyticsDetail,
   BusinessReport,
   CrossBorderReport,
   CompetitorRow,
+  CompetitorRunSummary,
+  CompetitorCollectionProgress,
   ConnectionStatus,
   CredentialsForm,
   DashboardData,
@@ -133,6 +137,22 @@ export async function advertising(range: DateRange): Promise<AdvertisingData> {
   };
 }
 
+export async function campaignMonitor(
+  campaignId: string,
+): Promise<CampaignMonitorData> {
+  return invoke("campaign_monitor", { campaignId });
+}
+
+export async function campaignControl(
+  input: CampaignControlInput,
+): Promise<string> {
+  return invoke("campaign_control", { input });
+}
+
+export async function campaignAiAnalysis(campaignId: string): Promise<string> {
+  return invoke("campaign_ai_analysis", { campaignId });
+}
+
 export async function products(
   range: DateRange,
   query: string,
@@ -252,11 +272,38 @@ export async function refreshCompetitor(id: number): Promise<void> {
 export async function openCompetitorBrowser(id: number): Promise<void> {
   await invoke("open_competitor_browser", { id });
 }
-export async function importCompetitorHtml(id: number, path: string): Promise<void> {
+export async function importCompetitorHtml(
+  id: number,
+  path: string,
+): Promise<void> {
   await invoke("import_competitor_html", { id, path });
 }
 export async function refreshCompetitorsDue(): Promise<number> {
   return invoke("refresh_competitors_due");
+}
+export async function refreshCompetitorsAll(): Promise<number> {
+  return invoke("refresh_competitors_all");
+}
+export async function startCompetitorsCollection(): Promise<void> {
+  return invoke("start_competitors_collection");
+}
+export async function competitorCollectionProgress(): Promise<CompetitorCollectionProgress> {
+  return invoke("competitor_collection_progress");
+}
+export async function stopCompetitorsCollection(): Promise<void> {
+  return invoke("stop_competitors_collection");
+}
+export async function stopCompetitorCollectionTask(id: number): Promise<void> {
+  return invoke("stop_competitor_collection_task", { id });
+}
+export async function competitorLatestRun(): Promise<CompetitorRunSummary | null> {
+  return invoke("competitor_latest_run");
+}
+export async function setCompetitorManualSales(
+  id: number,
+  salesTotal: number | null,
+): Promise<void> {
+  return invoke("set_competitor_manual_sales", { id, salesTotal });
 }
 export async function removeCompetitor(id: number): Promise<void> {
   if (isTauri()) await invoke("remove_competitor", { id });
@@ -496,15 +543,41 @@ export async function saveListingSettings(
 export async function listingRows(query: string): Promise<ListingRow[]> {
   return invoke("listing_rows", { query });
 }
-export async function listingJobs():Promise<ListingJob[]>{return invoke("listing_jobs");}
-export async function createListingDraft(reference:string):Promise<number>{return invoke("create_listing_draft",{reference});}
-export async function saveListingDraft(form:ListingDraftInput):Promise<number>{return invoke("save_listing_draft",{form});}
-export async function retryListingJob(id:number):Promise<void>{return invoke("retry_listing_job",{id});}
-export async function collectListingReference(id:number):Promise<number>{return invoke("collect_listing_reference",{id});}
-export async function openListingBrowser(id:number):Promise<void>{return invoke("open_listing_browser",{id});}
-export async function importListingHtml(id:number,path:string):Promise<number>{return invoke("import_listing_html",{id,path});}
-export async function refreshListingCategories():Promise<number>{return invoke("refresh_listing_categories");}
-export async function searchListingCategories(query:string,limit=60):Promise<import("./types").ListingCategory[]>{return invoke("search_listing_categories",{query,limit});}
+export async function listingJobs(): Promise<ListingJob[]> {
+  return invoke("listing_jobs");
+}
+export async function createListingDraft(reference: string): Promise<number> {
+  return invoke("create_listing_draft", { reference });
+}
+export async function saveListingDraft(
+  form: ListingDraftInput,
+): Promise<number> {
+  return invoke("save_listing_draft", { form });
+}
+export async function retryListingJob(id: number): Promise<void> {
+  return invoke("retry_listing_job", { id });
+}
+export async function collectListingReference(id: number): Promise<number> {
+  return invoke("collect_listing_reference", { id });
+}
+export async function openListingBrowser(id: number): Promise<void> {
+  return invoke("open_listing_browser", { id });
+}
+export async function importListingHtml(
+  id: number,
+  path: string,
+): Promise<number> {
+  return invoke("import_listing_html", { id, path });
+}
+export async function refreshListingCategories(): Promise<number> {
+  return invoke("refresh_listing_categories");
+}
+export async function searchListingCategories(
+  query: string,
+  limit = 60,
+): Promise<import("./types").ListingCategory[]> {
+  return invoke("search_listing_categories", { query, limit });
+}
 export async function syncListingCosts(): Promise<number> {
   return invoke("sync_listing_costs");
 }
