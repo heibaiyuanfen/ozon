@@ -2681,13 +2681,15 @@ const read=()=>{{
     let mut devtools_browser = None;
     for _ in 0..30 {
         if let Ok(response) = ureq::get(&format!("http://127.0.0.1:{debug_port}/json/version")).timeout(std::time::Duration::from_secs(1)).call() {
-            if let Ok(value) = response.into_json::<serde_json::Value>() {
+            if let Ok(raw) = response.into_string() {
+              if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(ws) = value.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) {
                     if let Ok(browser) = headless_chrome::Browser::connect(ws.to_string()) {
                         devtools_browser = Some(browser);
                         break;
                     }
                 }
+              }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -2711,7 +2713,8 @@ const read=()=>{{
             return Err("cancelled: 用户已停止竞品采集".into());
         }
         if let Some(browser) = devtools_browser.as_ref() {
-            for tab in browser.get_tabs().lock().iter() {
+            let tabs = browser.get_tabs().lock().map_err(|e| format!("无法读取竞品浏览器标签页：{e}"))?;
+            for tab in tabs.iter() {
                 if !tab.get_url().contains("ozon.ru/product/") { continue; }
                 if let Ok(result) = tab.evaluate(visible_script, false) {
                     if let Some(raw) = result.value.and_then(|v| v.as_str().map(str::to_string)) {
