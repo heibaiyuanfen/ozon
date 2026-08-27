@@ -13,11 +13,21 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "competitor-collector.exe build failed"
     }
+    $builtCollector = Join-Path $repoRoot "dist\competitor-collector.exe"
+    $rootCollector = Join-Path $repoRoot "competitor-collector.exe"
+    if (-not (Test-Path -LiteralPath $builtCollector)) {
+        throw "Built collector not found: $builtCollector"
+    }
+    # The ERP resolves this sidecar beside its own executable. Always refresh
+    # the repository/release root so an ignored stale EXE cannot survive a Git
+    # pull and silently continue running old Python code.
+    Copy-Item -LiteralPath $builtCollector -Destination $rootCollector -Force
     $releaseDir = Join-Path $repoRoot "desktop-next\src-tauri\target\release"
     if (Test-Path -LiteralPath $releaseDir) {
-        Copy-Item -LiteralPath (Join-Path $repoRoot "dist\competitor-collector.exe") `
+        Copy-Item -LiteralPath $builtCollector `
             -Destination (Join-Path $releaseDir "competitor-collector.exe") -Force
     }
+    Get-FileHash -LiteralPath $rootCollector -Algorithm SHA256 | Format-List
 } finally {
     Pop-Location
 }

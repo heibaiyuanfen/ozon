@@ -308,6 +308,18 @@
 .cost-modal > p {
   color: #8794a7;
 }
+.shipment-sku-modal { width: min(880px, calc(100vw - 32px)); }
+.shipment-sku-modal > label { display: grid; gap: 7px; margin: 18px 0; }
+.shipment-sku-modal input, .shipment-sku-modal select { min-height: 40px; border: 1px solid #d7dce3; border-radius: 8px; padding: 8px 10px; background: #fff; }
+.shipment-sku-rows { display: grid; gap: 10px; margin: 14px 0; max-height: 360px; overflow: auto; }
+.shipment-sku-row { display: grid; grid-template-columns: minmax(360px, 1fr) 110px auto; gap: 10px; align-items: center; }
+.shipment-sku-row .outline-button { white-space: nowrap; }
+@media (max-width: 760px) { .shipment-sku-row { grid-template-columns: 1fr; } }
+.settlement-grid { display:grid; grid-template-columns:minmax(150px,1.5fr) 90px repeat(5,90px) minmax(130px,1fr); gap:8px; align-items:center; margin:8px 0; }
+.settlement-grid input { width:100%; min-width:0; }
+.settlement-grid span small { display:block; }
+.settlement-head { color:#69778d; font-size:12px; position:sticky; top:0; background:#fff; z-index:1; }
+.settlement-grid > small { grid-column:1/-1; text-align:right; }
 .modal-close {
   position: absolute;
   right: 18px;
@@ -763,7 +775,7 @@
   font-size: 11px;
 }
 .competitor-image {
-  height: 88px;
+  height: 180px;
   border-radius: 10px;
   background: #f2f5f9;
   display: grid;
@@ -774,7 +786,8 @@
 .competitor-image img {
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
+  object-position: center;
 }
 .competitor-card h3 {
   white-space: nowrap;

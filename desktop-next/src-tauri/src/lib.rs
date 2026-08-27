@@ -678,6 +678,23 @@ struct SupplyTimeslot {
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SupplyClusterPlanRow {
+    sku: String,
+    offer_id: String,
+    product_name: String,
+    macrolocal_cluster_id: String,
+    cluster_name: String,
+    available_stock: i64,
+    transit_stock: i64,
+    requested_stock: i64,
+    daily_sales: f64,
+    recommended_qty: i64,
+    planned_qty: i64,
+    target_days: i64,
+    plan_saved: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SyncLogRow {
     id: i64,
     started_at: String,
@@ -703,6 +720,37 @@ struct ShipmentRow {
     source: String,
     updated_at: String,
     needs_notification: bool,
+    sku_allocations: Vec<ShipmentSkuAllocation>,
+    settlement_completed: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShipmentSkuAllocation {
+    sku: String,
+    quantity: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShipmentSkuOption {
+    sku: String,
+    offer_id: String,
+    name: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShipmentSettlementItem {
+    sku: String,
+    batch_quantity: i64,
+    requested_stock: i64,
+    fbo_quantity: i64,
+    fbs_quantity: i64,
+    overseas_remaining_quantity: i64,
+    loss_quantity: i64,
+    other_quantity: i64,
+    note: String,
 }
 
 fn read_registry(data_dir: &Path) -> Result<ShopFile, String> {
@@ -794,7 +842,17 @@ fn initialize_next_data_dir(legacy_dir: &Path, next_dir: &Path) -> Result<(), St
     Ok(())
 }
 
-fn locate_data_dir(executable: &Path) -> Result<PathBuf, String> {
+fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target).map_err(|e|e.to_string())?;
+    for entry in fs::read_dir(source).map_err(|e|e.to_string())? {
+        let entry=entry.map_err(|e|e.to_string())?;
+        let destination=target.join(entry.file_name());
+        if entry.file_type().map_err(|e|e.to_string())?.is_dir(){copy_directory(&entry.path(),&destination)?;}else{fs::copy(entry.path(),destination).map_err(|e|e.to_string())?;}
+    }
+    Ok(())
+}
+
+fn locate_data_dir(executable: &Path, local_app_dir: &Path, resource_dir: &Path) -> Result<PathBuf, String> {
     let executable_dir = executable.parent().ok_or("无法确定程序目录")?;
     for root in executable_dir.ancestors() {
         let next = root.join("data-next");
@@ -812,7 +870,15 @@ fn locate_data_dir(executable: &Path) -> Result<PathBuf, String> {
             return Ok(next);
         }
     }
-    Err("找不到新版 data-next/shops.json，也没有可用于一次性初始化的旧 data/shops.json".into())
+    let local_data=local_app_dir.join("data-next");
+    if local_data.join("shops.json").is_file(){return Ok(local_data)}
+    for template in [resource_dir.join("data-next-template"),resource_dir.join("resources").join("data-next-template")] {
+        if template.join("shops.json").is_file(){
+            copy_directory(&template,&local_data)?;
+            return Ok(local_data);
+        }
+    }
+    Err(format!("无法初始化本地数据目录。安装资源缺少 data-next-template；预期本地目录：{}",local_data.display()))
 }
 fn initialize_extensions(c: &Connection) -> Result<(), String> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS warehouse_cluster_mappings(warehouse_name TEXT PRIMARY KEY,cluster_name TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS competitor_products(id INTEGER PRIMARY KEY AUTOINCREMENT,product_url TEXT NOT NULL UNIQUE,product_code TEXT NOT NULL DEFAULT '',name TEXT NOT NULL DEFAULT '',image_url TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS competitor_snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT,competitor_id INTEGER NOT NULL,captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,price REAL,sales_total INTEGER,source TEXT NOT NULL DEFAULT 'web',UNIQUE(competitor_id,captured_at),FOREIGN KEY(competitor_id) REFERENCES competitor_products(id));CREATE TABLE IF NOT EXISTS shipment_tracking(tracking_id TEXT PRIMARY KEY,product_name TEXT NOT NULL DEFAULT '',batch_no TEXT NOT NULL DEFAULT '',shop_name TEXT NOT NULL DEFAULT '',quantity INTEGER NOT NULL DEFAULT 0,cargo_status TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT '',domestic_arrival TEXT NOT NULL DEFAULT '',foreign_arrival TEXT NOT NULL DEFAULT '',notified_foreign_arrival TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT 'local',remote_record_id TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_posting_routes_day ON posting_routes(day);CREATE INDEX IF NOT EXISTS idx_posting_routes_sku_destination ON posting_routes(sku,destination);CREATE INDEX IF NOT EXISTS idx_sales_daily_day_sku ON sales_daily(day,sku);CREATE INDEX IF NOT EXISTS idx_ad_daily_day_sku ON ad_daily(day,sku);CREATE INDEX IF NOT EXISTS idx_finance_operation_date ON finance_transactions(operation_date);").map_err(|e|e.to_string())?;
@@ -824,10 +890,16 @@ fn initialize_extensions(c: &Connection) -> Result<(), String> {
         "domestic_stock_qty INTEGER NOT NULL DEFAULT 0",
         "overseas_transit_qty INTEGER NOT NULL DEFAULT 0",
         "overseas_arrived_qty INTEGER NOT NULL DEFAULT 0",
+        "foreign_appointment TEXT NOT NULL DEFAULT ''",
+        "supply_source_shop_id TEXT NOT NULL DEFAULT ''",
+        "status_formula_version TEXT NOT NULL DEFAULT ''",
     ] {
         let _ = c.execute(&format!("ALTER TABLE shipment_tracking ADD COLUMN {column}"), []);
     }
     let _ = c.execute("CREATE INDEX IF NOT EXISTS idx_shipment_tracking_sku ON shipment_tracking(sku)", []);
+    c.execute_batch("CREATE TABLE IF NOT EXISTS feishu_supply_chain_product_mappings(product_name TEXT NOT NULL,shop_name TEXT NOT NULL DEFAULT '',sku TEXT NOT NULL,source TEXT NOT NULL DEFAULT 'manual',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(product_name,shop_name));CREATE TABLE IF NOT EXISTS feishu_supply_chain_sync_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,source_shop_id TEXT NOT NULL DEFAULT '',source_shop_name TEXT NOT NULL DEFAULT '',records_count INTEGER NOT NULL DEFAULT 0,matched_count INTEGER NOT NULL DEFAULT 0,unmatched_count INTEGER NOT NULL DEFAULT 0,unshipped_qty INTEGER NOT NULL DEFAULT 0,transit_qty INTEGER NOT NULL DEFAULT 0,overseas_arrived_qty INTEGER NOT NULL DEFAULT 0,delivered_qty INTEGER NOT NULL DEFAULT 0,status_formula_version TEXT NOT NULL DEFAULT 'cargo-status-v1');").map_err(|e|e.to_string())?;
+    c.execute_batch("CREATE TABLE IF NOT EXISTS shipment_sku_allocations(tracking_id TEXT NOT NULL,sku TEXT NOT NULL,quantity INTEGER NOT NULL CHECK(quantity>0),updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(tracking_id,sku),FOREIGN KEY(tracking_id) REFERENCES shipment_tracking(tracking_id) ON DELETE CASCADE);CREATE INDEX IF NOT EXISTS idx_shipment_sku_allocations_sku ON shipment_sku_allocations(sku);").map_err(|e|e.to_string())?;
+    for column in ["fbo_quantity INTEGER NOT NULL DEFAULT 0","fbs_quantity INTEGER NOT NULL DEFAULT 0","overseas_remaining_quantity INTEGER NOT NULL DEFAULT 0","loss_quantity INTEGER NOT NULL DEFAULT 0","other_quantity INTEGER NOT NULL DEFAULT 0","settled INTEGER NOT NULL DEFAULT 0","settlement_note TEXT NOT NULL DEFAULT ''","settled_at TEXT NOT NULL DEFAULT ''"] { let _=c.execute(&format!("ALTER TABLE shipment_sku_allocations ADD COLUMN {column}"),[]); }
     c.execute_batch("CREATE TABLE IF NOT EXISTS campaign_action_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL,action TEXT NOT NULL,requested_value TEXT NOT NULL DEFAULT '',before_state TEXT NOT NULL DEFAULT '',before_budget REAL NOT NULL DEFAULT 0,after_state TEXT NOT NULL DEFAULT '',after_budget REAL NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'pending',message TEXT NOT NULL DEFAULT '',before_from TEXT NOT NULL DEFAULT '',before_to TEXT NOT NULL DEFAULT '',before_spend REAL NOT NULL DEFAULT 0,before_revenue REAL NOT NULL DEFAULT 0,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_campaign_action_logs_campaign ON campaign_action_logs(campaign_id,created_at DESC);").map_err(|e|e.to_string())?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS competitor_collection_runs(run_id TEXT PRIMARY KEY,workflow TEXT NOT NULL DEFAULT 'product_snapshot',platform TEXT NOT NULL DEFAULT 'ozon',locale TEXT NOT NULL DEFAULT 'ru-RU',started_at TEXT NOT NULL,finished_at TEXT NOT NULL DEFAULT '',search_context TEXT NOT NULL DEFAULT '',requested_scope TEXT NOT NULL DEFAULT '',completed_scope TEXT NOT NULL DEFAULT '',requested INTEGER NOT NULL DEFAULT 0,completed INTEGER NOT NULL DEFAULT 0,ok INTEGER NOT NULL DEFAULT 0,blocked INTEGER NOT NULL DEFAULT 0,changed_layout INTEGER NOT NULL DEFAULT 0,inaccessible INTEGER NOT NULL DEFAULT 0,ambiguous_match INTEGER NOT NULL DEFAULT 0,incomplete INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'running',notes TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS competitor_observations(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,competitor_id INTEGER NOT NULL,observed_at TEXT NOT NULL,status TEXT NOT NULL,retry_count INTEGER NOT NULL DEFAULT 0,source_url TEXT NOT NULL DEFAULT '',final_url TEXT NOT NULL DEFAULT '',locale TEXT NOT NULL DEFAULT 'ru-RU',search_context TEXT NOT NULL DEFAULT '',price_raw TEXT NOT NULL DEFAULT '',sales_raw TEXT NOT NULL DEFAULT '',evidence TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',FOREIGN KEY(run_id) REFERENCES competitor_collection_runs(run_id),FOREIGN KEY(competitor_id) REFERENCES competitor_products(id),UNIQUE(run_id,competitor_id));CREATE TABLE IF NOT EXISTS competitor_manual_metrics(competitor_id INTEGER PRIMARY KEY,daily_sales INTEGER,weekly_sales INTEGER,monthly_sales INTEGER,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(competitor_id) REFERENCES competitor_products(id));CREATE INDEX IF NOT EXISTS idx_competitor_observations_competitor ON competitor_observations(competitor_id,observed_at DESC);").map_err(|e|e.to_string())?;
     let _ = c.execute(
@@ -2282,6 +2354,17 @@ mod migration_tests {
             vec!["SKU-1", "备注,含逗号", "双\"引号"]
         );
     }
+    #[test]
+    fn installed_build_initializes_writable_local_data_from_template() {
+        let root=std::env::temp_dir().join(format!("ozon-local-install-{}",chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()));
+        let exe_dir=root.join("program"); let local=root.join("local"); let resources=root.join("resources");
+        fs::create_dir_all(&exe_dir).unwrap(); fs::create_dir_all(resources.join("data-next-template")).unwrap();
+        fs::write(resources.join("data-next-template/shops.json"),r#"{"active_shop_id":"default","shops":[]}"#).unwrap();
+        fs::write(resources.join("data-next-template/database-generation.json"),"{}").unwrap();
+        let result=locate_data_dir(&exe_dir.join("app.exe"),&local,&resources).unwrap();
+        assert_eq!(result,local.join("data-next")); assert!(result.join("shops.json").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[tauri::command]
@@ -2648,10 +2731,25 @@ fn canonical_ozon_product_url(value: &str) -> Result<(String, String), String> {
 struct ParsedCompetitorPage {
     name: String,
     image: String,
+    gallery_images: Vec<String>,
+    gallery_mode: String,
+    collector_source: String,
     price: Option<f64>,
     sales: Option<i64>,
     price_raw: String,
     sales_raw: String,
+}
+fn competitor_page_needs_browser(parsed: &ParsedCompetitorPage) -> bool {
+    parsed.image.is_empty()
+}
+fn capture_json_string_array(html: &str, key: &str) -> Vec<String> {
+    let pattern = format!(r#"\"{}\"\s*:\s*(\[[^\]]*\])"#, regex::escape(key));
+    regex::Regex::new(&pattern)
+        .ok()
+        .and_then(|re| re.captures(html))
+        .and_then(|captures| captures.get(1))
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value.as_str()).ok())
+        .unwrap_or_default()
 }
 fn parse_competitor_html(html: &str) -> Result<ParsedCompetitorPage, String> {
     let lower = html.to_lowercase();
@@ -2715,9 +2813,24 @@ fn parse_competitor_html(html: &str) -> Result<ParsedCompetitorPage, String> {
     if name.is_empty() && image.is_empty() && price.is_none() {
         return Err("changed_layout: 页面可访问，但未返回可识别的商品结构".into());
     }
+    let mut gallery_images = capture_json_string_array(html, "codexGalleryImages");
+    if gallery_images.is_empty() && !image.is_empty() {
+        gallery_images.push(image.clone());
+    }
+    let gallery_mode = first_capture(
+        html,
+        &[r#"\"codexGalleryMode\"\s*:\s*\"([^\"]*)"#],
+    );
+    let collector_source = first_capture(
+        html,
+        &[r#"\"codexCollectorSource\"\s*:\s*\"([^\"]*)"#],
+    );
     Ok(ParsedCompetitorPage {
         name,
         image,
+        gallery_images,
+        gallery_mode,
+        collector_source,
         price,
         sales,
         price_raw,
@@ -2740,7 +2853,12 @@ fn save_competitor_html(
     let (_, code) = canonical_ozon_product_url(&url)?;
     let parsed = parse_competitor_html(html)?;
     c.execute("UPDATE competitor_products SET product_code=CASE WHEN ?2='' THEN product_code ELSE ?2 END,name=CASE WHEN ?3='' THEN name ELSE ?3 END,image_url=CASE WHEN ?4='' THEN image_url ELSE ?4 END,updated_at=CURRENT_TIMESTAMP WHERE id=?1",params![id,code,parsed.name,parsed.image]).map_err(|e|e.to_string())?;
-    c.execute("INSERT INTO competitor_snapshots(competitor_id,captured_at,price,sales_total,source) VALUES(?1,CURRENT_TIMESTAMP,?2,?3,?4)",params![id,parsed.price,parsed.sales,source]).map_err(|e|e.to_string())?;
+    let snapshot_source = if parsed.collector_source.is_empty() {
+        source
+    } else {
+        parsed.collector_source.as_str()
+    };
+    c.execute("INSERT INTO competitor_snapshots(competitor_id,captured_at,price,sales_total,source) VALUES(?1,CURRENT_TIMESTAMP,?2,?3,?4)",params![id,parsed.price,parsed.sales,snapshot_source]).map_err(|e|e.to_string())?;
     Ok(parsed)
 }
 fn validate_competitor_identity(html: &str, expected_code: &str) -> Result<(), String> {
@@ -2751,32 +2869,47 @@ fn validate_competitor_identity(html: &str, expected_code: &str) -> Result<(), S
             r#"<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)"#,
         ],
     );
-    if !observed_url.is_empty() {
-        if let Ok((_, observed_code)) = canonical_ozon_product_url(&observed_url) {
-            if observed_code != expected_code {
-                return Err(format!(
-                    "ambiguous_match: 目标商品 {expected_code}，页面商品 {observed_code}"
-                ));
-            }
+    validate_competitor_url_identity(&observed_url, expected_code)?;
+    Ok(())
+}
+fn validate_competitor_url_identity(observed_url: &str, expected_code: &str) -> Result<(), String> {
+    if let Ok((_, observed_code)) = canonical_ozon_product_url(observed_url) {
+        if observed_code != expected_code {
+            return Err(format!(
+                "ambiguous_match: 目标商品 {expected_code}，页面商品 {observed_code}"
+            ));
         }
     }
     Ok(())
 }
-fn installed_competitor_browser() -> Result<std::path::PathBuf, String> {
-    for path in [
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+fn installed_competitor_browsers() -> Vec<std::path::PathBuf> {
+    [
+        // Normal Chrome has been observed to reach Ozon when an isolated Edge
+        // session receives the synthetic "no connection" page. Keep browsers
+        // in separate profiles and try Chrome first.
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    ] {
-        let candidate = std::path::PathBuf::from(path);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err("未找到 Edge 或 Chrome 可执行文件".into())
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    ]
+    .into_iter()
+    .map(std::path::PathBuf::from)
+    .filter(|candidate| candidate.is_file())
+    .collect()
 }
 
+// Kept as a migration reference only. The release path below is Rust-only;
+// this legacy helper and its Python/extension callers are excluded from the
+// compiled application so a stale sidecar cannot be selected accidentally.
+#[cfg(any())]
+fn installed_competitor_browser() -> Result<std::path::PathBuf, String> {
+    installed_competitor_browsers()
+        .into_iter()
+        .next()
+        .ok_or_else(|| "未找到 Chrome 或 Edge 可执行文件".into())
+}
+
+#[cfg(any())]
 fn collect_competitor_python_html(
     url: &str,
     expected_code: &str,
@@ -2830,7 +2963,20 @@ fn collect_competitor_python_html(
     let value: serde_json::Value = serde_json::from_str(payload)
         .map_err(|e| format!("Python 采集器返回格式无效：{e}"))?;
     if !value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return Err(format!("blocked: {}", value.get("error").and_then(|v|v.as_str()).unwrap_or("Python 采集失败")));
+        let status = match value.get("status").and_then(|v| v.as_str()) {
+            Some("incomplete") => "incomplete",
+            Some("inaccessible") => "inaccessible",
+            Some("ambiguous_match") => "ambiguous_match",
+            Some("changed_layout") => "changed_layout",
+            _ => "blocked",
+        };
+        return Err(format!(
+            "{status}: {}",
+            value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Python 采集失败")
+        ));
     }
     let final_url=value.get("url").and_then(|v|v.as_str()).unwrap_or(url);
     let name=value.get("name").and_then(|v|v.as_str()).unwrap_or("");
@@ -2850,6 +2996,7 @@ fn collect_competitor_python_html(
     Ok(html)
 }
 
+#[cfg(any())]
 fn collect_competitor_public_extension_html(
     url: &str,
     expected_code: &str,
@@ -3020,137 +3167,248 @@ const read=()=>{{
     Ok(best)
 }
 
-fn collect_competitor_browser_html(
+fn collect_competitor_browser_channel(
     url: &str,
     expected_code: &str,
     data_dir: &Path,
     competitor_id: i64,
+    browser_path: &Path,
 ) -> Result<String, String> {
     use headless_chrome::{Browser, LaunchOptions};
-    let browser_path = installed_competitor_browser()?;
-    let is_chrome = browser_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.eq_ignore_ascii_case("chrome.exe"))
-        .unwrap_or(false);
-    let profile = data_dir.join(if is_chrome {
-        "competitor_chrome_profile"
-    } else {
-        "competitor_edge_profile"
-    });
+
+    let channel = browser_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("browser")
+        .to_lowercase();
+    let profile = data_dir.join(format!("competitor_rust_{channel}_profile"));
     fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
-    // Pass the product URL to Edge/Chrome itself. This creates the visible first
-    // tab on the Ozon product instead of leaving the user on Edge's MSN new-tab.
-    let launch_url = OsString::from(url);
-    // Keep the explicit automation marker. Only restore normal foreground page
-    // networking that the library disables by default.
+
+    // headless_chrome adds --enable-automation and disables foreground page
+    // networking by default.  Both are counterproductive for this public,
+    // user-visible workflow, and the former is what caused the warning shown
+    // in the old screenshot.  Keep the normal browser sandbox and remove only
+    // those library defaults; no stealth or challenge-bypass flags are used.
     let background_networking = OsString::from("--disable-background-networking");
     let network_service =
         OsString::from("--enable-features=NetworkService,NetworkServiceInProcess");
+    let automation = OsString::from("--enable-automation");
+    let language = OsString::from("--lang=ru-RU");
     let options = LaunchOptions::default_builder()
         .headless(false)
-        .path(Some(browser_path))
+        .sandbox(true)
+        .path(Some(browser_path.to_path_buf()))
         .user_data_dir(Some(profile))
         .window_size(Some((1360, 900)))
-        .args(vec![launch_url.as_os_str()])
         .ignore_default_args(vec![
             background_networking.as_os_str(),
             network_service.as_os_str(),
+            automation.as_os_str(),
         ])
+        .args(vec![language.as_os_str()])
         .idle_browser_timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| format!("浏览器启动参数错误：{e}"))?;
-    let browser = Browser::new(options).map_err(|e| format!("无法启动竞品专用浏览器：{e}"))?;
+    let browser = Browser::new(options)
+        .map_err(|e| format!("无法启动 {channel} 竞品浏览器：{e}"))?;
     let tab = browser
-        .wait_for_initial_tab()
-        .map_err(|e| format!("无法取得竞品浏览器页面：{e}"))?;
-    tab.navigate_to(url)
-        .map_err(|e| format!("无法打开竞品页：{e}"))?;
-    tab.bring_to_front()
-        .map_err(|e| format!("无法激活竞品页标签：{e}"))?;
-    let navigation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while std::time::Instant::now() < navigation_deadline {
-        if competitor_task_stop_requested(competitor_id) {
-            return Err("cancelled: 用户已停止竞品采集".into());
+        .new_tab()
+        .map_err(|e| format!("无法取得 {channel} 竞品浏览器页面：{e}"))?;
+    if let Err(error) = tab.navigate_to(url) {
+        if tab.get_url().is_empty() {
+            return Err(format!("blocked: {channel} 导航失败：{error}"));
         }
-        let actual = tab.get_url();
-        if actual.contains("ozon.ru/") {
-            break;
-        }
-        let _ = tab.navigate_to(url);
-        let _ = tab.bring_to_front();
-        std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    if !tab.get_url().contains("ozon.ru/") {
-        return Err(format!(
-            "inaccessible: 专用浏览器未能跳转到 Ozon，当前地址为 {}",
-            tab.get_url()
-        ));
-    }
-    let script = r#"(()=>{
+    let _ = tab.bring_to_front();
+
+    let script = r###"(()=>{
       const visible=(el)=>{if(!el)return false;const r=el.getBoundingClientRect();const s=getComputedStyle(el);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'};
+      const meta=(key)=>document.querySelector(`meta[property="${key}"],meta[name="${key}"]`)?.content||'';
+      const source=(image)=>{
+        const set=String(image.getAttribute('srcset')||'').split(',').map(x=>x.trim().split(/\s+/)[0]).filter(Boolean);
+        return set.at(-1)||image.currentSrc||image.src||image.getAttribute('data-src')||'';
+      };
+      const normalize=(raw)=>{
+        let value=String(raw||'').trim();
+        if(value.startsWith('//')) value=`https:${value}`;
+        if(!/^https:\/\//i.test(value)||!/ozone\.ru/i.test(value)||/captcha|abt-challenge|\/icons?\//i.test(value)) return '';
+        try { const u=new URL(value); u.pathname=u.pathname.replace(/\/wc\d+\//i,'/wc2000/'); return u.toString(); } catch (_) { return value; }
+      };
+      let product={};
+      for(const script of document.querySelectorAll('script[type="application/ld+json"]')){
+        try{
+          const raw=JSON.parse(script.textContent||'{}'), queue=Array.isArray(raw)?raw:[raw];
+          for(const item of queue){
+            if(item&&String(item['@type']||'').toLowerCase()==='product') product=item;
+            if(item&&Array.isArray(item['@graph'])) queue.push(...item['@graph']);
+          }
+        }catch (_) {}
+      }
+      const elements=new Set();
+      for(const selector of ['[data-widget="webGallery"] img','[data-widget*="Gallery"] img','[data-widget*="gallery"] img'])
+        for(const image of document.querySelectorAll(selector)) elements.add(image);
+      const records=[...elements].map((image,order)=>{const r=image.getBoundingClientRect();return {value:normalize(source(image)),order,x:r.x,y:r.y,w:r.width,h:r.height};}).filter(x=>x.value);
+      const shown=records.filter(x=>x.w>0&&x.h>0);
+      const preview=shown.reduce((a,x)=>!a||x.w*x.h>a.w*a.h?x:a,null);
+      const small=shown.filter(x=>Math.max(x.w,x.h)<=180);
+      const rail=preview?small.filter(x=>x.x+x.w<=preview.x+Math.max(24,preview.w*.12)):[];
+      const slots=(rail.length?rail:(small.length?small:records)).sort((a,b)=>Math.abs(a.y-b.y)>2?a.y-b.y:(a.x-b.x||a.order-b.order));
+      let images=slots.map(x=>x.value);
+      if(!images.length){
+        const raw=product.image||[];
+        images=(Array.isArray(raw)?raw:[raw]).map(normalize).filter(Boolean);
+        const og=normalize(meta('og:image')); if(og) images.push(og);
+      }
+      const heading=document.querySelector('h1')?.innerText?.trim()||'';
+      if(images.length<2) for(const image of document.querySelectorAll('img[src],img[srcset],img[data-src]')){
+        const r=image.getBoundingClientRect(), alt=String(image.alt||'').trim(), value=normalize(source(image));
+        if(r.width>0&&r.height>0&&value&&alt&&(alt===heading||heading.includes(alt)||alt.includes(heading))) images.push(value);
+      }
+      const unique=[],seen=new Set();
+      for(const value of images){
+        let key=value;
+        try{const u=new URL(value),m=u.pathname.match(/\/s3\/multimedia[^/]*\/wc\d+\/([^/]+)$/i);key=m?m[1]:u.origin+u.pathname;}catch (_) {}
+        if(!seen.has(key)){seen.add(key);unique.push(value);}
+      }
       const priceRoots=[...document.querySelectorAll('[data-widget*="Price"],[data-widget*="price"],[class*="price"],[class*="Price"]')].filter(visible);
-      const priceText=(priceRoots.map(x=>x.innerText||'').join('\n')||document.body?.innerText||'');
-      const priceMatch=priceText.match(/(?:^|\s)(\d[\d\s\u00a0\u202f]{0,12})\s*₽/);
-      const gallery=[...document.querySelectorAll('[data-widget*="Gallery"] img,[data-widget*="gallery"] img,img')].filter(visible);
-      const main=gallery.find(x=>{const r=x.getBoundingClientRect();const u=x.currentSrc||x.src||'';return /^https?:/i.test(u)&&r.width>=250&&r.height>=250})||gallery.find(x=>/^https?:/i.test(x.currentSrc||x.src||''));
-      return JSON.stringify({url:location.href,title:document.title||'',visibleText:(document.body?.innerText||'').slice(0,20000),html:document.documentElement?.outerHTML||'',price:priceMatch?priceMatch[1]:'',image:main?(main.currentSrc||main.src||''):''});
-    })()"#;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+      const priceText=priceRoots.map(x=>x.innerText||'').join('\n')||document.body?.innerText||'';
+      const visiblePrice=priceText.match(/(?:^|\s)(\d[\d\s\u00a0\u202f]{0,12})\s*₽/);
+      const structuredPrice=product.offers?.price||product.offers?.lowPrice||'';
+      const main=unique[0]||'';
+      return JSON.stringify({
+        url:location.href,
+        title:String(product.name||meta('og:title')||heading||'').trim(),
+        pageTitle:document.title||'',
+        visibleText:String(document.body?.innerText||'').slice(0,8000),
+        price:String(visiblePrice?visiblePrice[1].replace(/[\s\u00a0\u202f]/g,''):structuredPrice).replace(',','.'),
+        image:main,
+        images:unique.slice(0,20),
+        galleryMode:rail.length?'fixed-left-thumbnail-rail':(small.length?'thumbnail-size-fallback':'gallery-dom-fallback'),
+        html:document.documentElement?.outerHTML||''
+      });
+    })()"###;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     let mut best = String::new();
     let mut stable = 0;
     let mut last_signature = String::new();
+    let mut last_blocked_reason = String::new();
+    let mut hydration_started = false;
     while std::time::Instant::now() < deadline {
         if competitor_task_stop_requested(competitor_id) {
             return Err("cancelled: 用户已停止竞品采集".into());
         }
-        if let Ok(remote) = tab.evaluate(script, false) {
-            if let Some(raw) = remote.value.and_then(|v| v.as_str().map(str::to_string)) {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    let current_url = value.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    let title = value
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    let html = value.get("html").and_then(|v| v.as_str()).unwrap_or("");
-                    let visible_text = value
-                        .get("visibleText")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    let challenged = ["captcha", "access denied", "доступ ограничен", "проверка безопасности"]
-                        .iter()
-                        .any(|marker| {
-                            title.contains(marker) || visible_text.contains(marker)
-                        });
-                    if !challenged && !html.is_empty() {
-                        let identity = canonical_ozon_product_url(current_url)
-                            .map(|(_, code)| code == expected_code)
-                            .unwrap_or(false);
-                        if identity {
-                            let harvested = serde_json::json!({
-                                "codexVisiblePrice": value.get("price").and_then(|v| v.as_str()).unwrap_or(""),
-                                "codexMainImage": value.get("image").and_then(|v| v.as_str()).unwrap_or("")
-                            });
-                            let enriched = format!("<script type=\"application/json\">{harvested}</script>{html}");
-                            if let Ok(parsed) = parse_competitor_html(&enriched) {
-                                let signature = format!(
-                                    "{}|{}|{}",
-                                    parsed.price_raw, parsed.sales_raw, parsed.name
-                                );
-                                if signature == last_signature {
-                                    stable += 1;
-                                } else {
-                                    stable = 0;
-                                    last_signature = signature;
-                                }
-                                best = enriched;
-                                if stable >= 2 {
-                                    break;
-                                }
-                            }
-                        }
+        let remote = match tab.evaluate(script, false) {
+            Ok(value) => value,
+            Err(error) => {
+                let detail = error.to_string();
+                let lower = detail.to_lowercase();
+                if lower.contains("closed") || lower.contains("target") {
+                    return Err(format!(
+                        "blocked: {channel} 浏览器页面在采集期间关闭：{detail}"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                continue;
+            }
+        };
+        let Some(raw) = remote.value.and_then(|value| value.as_str().map(str::to_string)) else {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            continue;
+        };
+        let value: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                continue;
+            }
+        };
+        let current_url = value.get("url").and_then(|item| item.as_str()).unwrap_or("");
+        let title = value
+            .get("title")
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .trim();
+        let page_title = value
+            .get("pageTitle")
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let visible_text = value
+            .get("visibleText")
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let html = value.get("html").and_then(|item| item.as_str()).unwrap_or("");
+        let blocked_reason = [
+            "похоже, нет соединения",
+            "нет соединения",
+            "antibot captcha",
+            "captcha",
+            "access denied",
+            "verify you are human",
+            "доступ ограничен",
+            "проверка безопасности",
+        ]
+        .iter()
+        .find(|marker| page_title.contains(**marker) || visible_text.contains(**marker))
+        .copied()
+        .unwrap_or("");
+        if !blocked_reason.is_empty() {
+            last_blocked_reason = blocked_reason.to_string();
+            // A synthetic offline page is not actionable in the window. Return
+            // so the caller can try the other browser; captcha/security pages
+            // stay open until timeout for the user to complete verification.
+            if blocked_reason == "похоже, нет соединения" || blocked_reason == "нет соединения" {
+                return Err(format!(
+                    "blocked: {channel} Ozon 返回‘似乎没有连接’受阻页"
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
+        }
+        last_blocked_reason.clear();
+        let identity = canonical_ozon_product_url(current_url)
+            .map(|(_, code)| code == expected_code)
+            .unwrap_or(false);
+        if identity && !html.is_empty() && !title.is_empty() {
+            if !hydration_started {
+                let _ = tab.evaluate(
+                    "(()=>{const d=document.querySelector('[data-widget=\\\"webDescription\\\"]'); if(d)d.scrollIntoView({block:'center'}); else window.scrollTo(0, Math.min(document.body.scrollHeight*.55,3500));})()",
+                    false,
+                );
+                hydration_started = true;
+                std::thread::sleep(std::time::Duration::from_millis(1200));
+                continue;
+            }
+            let harvested = serde_json::json!({
+                "codexVisiblePrice": value.get("price").and_then(|item| item.as_str()).unwrap_or(""),
+                "codexMainImage": value.get("image").and_then(|item| item.as_str()).unwrap_or(""),
+                "codexGalleryImages": value.get("images").cloned().unwrap_or_else(|| serde_json::json!([])),
+                "codexGalleryMode": value.get("galleryMode").cloned().unwrap_or(serde_json::Value::Null),
+                "codexCollectorSource": format!("rust_headless_chrome_{channel}"),
+            });
+            let enriched = format!(
+                "<meta property=\"og:url\" content=\"{}\"><meta property=\"og:title\" content=\"{}\"><meta property=\"og:image\" content=\"{}\"><script type=\"application/json\">{harvested}</script>{html}",
+                escape_html_attribute(current_url),
+                escape_html_attribute(title),
+                escape_html_attribute(value.get("image").and_then(|item| item.as_str()).unwrap_or("")),
+            );
+            if let Ok(parsed) = parse_competitor_html(&enriched) {
+                let signature = format!(
+                    "{}|{}|{}|{}|{}",
+                    parsed.price_raw,
+                    parsed.image,
+                    parsed.name,
+                    parsed.gallery_images.len(),
+                    parsed.gallery_mode
+                );
+                stable = if signature == last_signature { stable + 1 } else { 0 };
+                last_signature = signature;
+                if parsed.price.is_some() && !parsed.image.is_empty() {
+                    best = enriched;
+                    if stable >= 2 {
+                        break;
                     }
                 }
             }
@@ -3158,10 +3416,58 @@ fn collect_competitor_browser_html(
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
     if best.is_empty() {
-        return Err("blocked: 专用浏览器在 240 秒内未得到可校验的商品页；如 Ozon 显示验证，请在弹出窗口完成后等待自动继续".into());
+        let detail = if last_blocked_reason.is_empty() {
+            format!("{channel} 未在限定时间内得到可校验的商品页")
+        } else {
+            format!("{channel} 页面持续显示 {last_blocked_reason}")
+        };
+        return Err(format!("blocked: {detail}；请完成 Ozon 验证后重试"));
     }
     validate_competitor_identity(&best, expected_code)?;
     Ok(best)
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn collect_competitor_browser_html(
+    url: &str,
+    expected_code: &str,
+    data_dir: &Path,
+    competitor_id: i64,
+) -> Result<String, String> {
+    let browsers = installed_competitor_browsers();
+    if browsers.is_empty() {
+        return Err("inaccessible: 未找到 Chrome 或 Edge 可执行文件".into());
+    }
+    let mut diagnostics = Vec::new();
+    for browser_path in browsers {
+        let channel = browser_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("browser")
+            .to_lowercase();
+        match collect_competitor_browser_channel(
+            url,
+            expected_code,
+            data_dir,
+            competitor_id,
+            &browser_path,
+        ) {
+            Ok(html) => return Ok(html),
+            Err(error) if error.starts_with("cancelled:") => return Err(error),
+            Err(error) => diagnostics.push(format!("{channel}: {error}")),
+        }
+    }
+    Err(format!(
+        "blocked: Rust Chrome/Edge 采集均未完成；{}",
+        diagnostics.join("；")
+    ))
 }
 fn begin_competitor_run(c: &Connection, requested: i64, scope: &str) -> Result<String, String> {
     let now = chrono::Local::now();
@@ -3177,7 +3483,7 @@ fn observation_status(error: &str) -> &'static str {
         "changed_layout"
     } else if lower.starts_with("ambiguous_match:") {
         "ambiguous_match"
-    } else if lower.contains("401") || lower.contains("404") {
+    } else if lower.starts_with("inaccessible:") || lower.contains("401") || lower.contains("404") {
         "inaccessible"
     } else {
         "incomplete"
@@ -3186,7 +3492,10 @@ fn observation_status(error: &str) -> &'static str {
 
 #[cfg(test)]
 mod competitor_monitoring_tests {
-    use super::{observation_status, parse_competitor_html, validate_competitor_identity};
+    use super::{
+        competitor_page_needs_browser, observation_status,
+        parse_competitor_html, validate_competitor_identity,
+    };
 
     #[test]
     fn missing_public_sales_stays_null_instead_of_zero() {
@@ -3226,6 +3535,38 @@ mod competitor_monitoring_tests {
         .expect_err("wrong product HTML must be rejected");
         assert_eq!(observation_status(&error), "ambiguous_match");
     }
+
+    #[test]
+    fn direct_page_main_image_is_complete_without_gallery() {
+        let parsed = parse_competitor_html(
+            r#"<meta property="og:title" content="商品"><meta property="og:image" content="https://cdn1.ozone.ru/item.jpg"><script>{"codexVisiblePrice":"1 686"}</script>"#,
+        )
+        .expect("partial direct page");
+        assert!(!competitor_page_needs_browser(&parsed));
+    }
+
+    #[test]
+    fn browser_gallery_mode_accepts_single_image_products() {
+        let parsed = parse_competitor_html(
+            r#"<title>商品</title><script>{"codexVisiblePrice":"1 686","codexMainImage":"https://cdn1.ozone.ru/item.jpg","codexGalleryImages":["https://cdn1.ozone.ru/item.jpg"],"codexGalleryMode":"gallery-dom-fallback"}</script>"#,
+        )
+        .expect("browser page");
+        assert!(!competitor_page_needs_browser(&parsed));
+    }
+
+    #[test]
+    fn browser_channel_is_preserved_in_evidence_fields() {
+        let parsed = parse_competitor_html(
+            r#"<title>商品</title><script>{"codexVisiblePrice":"1686","codexMainImage":"https://cdn1.ozone.ru/item.jpg","codexGalleryImages":["https://cdn1.ozone.ru/item.jpg"],"codexGalleryMode":"gallery-dom-fallback","codexCollectorSource":"rust_headless_chrome_chrome"}</script>"#,
+        )
+        .expect("browser capture");
+        assert_eq!(parsed.collector_source, "rust_headless_chrome_chrome");
+    }
+
+    #[test]
+    fn inaccessible_prefix_is_not_reported_as_incomplete() {
+        assert_eq!(observation_status("inaccessible: browser missing"), "inaccessible");
+    }
 }
 fn record_competitor_observation(
     c: &Connection,
@@ -3240,10 +3581,19 @@ fn record_competitor_observation(
 ) -> Result<(), String> {
     let evidence = parsed
         .map(|p| {
-            format!(
-                "title={}; price_raw={}; sales_raw={}",
-                p.name, p.price_raw, p.sales_raw
-            )
+            serde_json::json!({
+                "title": p.name,
+                "priceRaw": p.price_raw,
+                "salesRaw": p.sales_raw,
+                "galleryImages": p.gallery_images,
+                "galleryMode": p.gallery_mode,
+                "collectorSource": if p.collector_source.is_empty() {
+                    source
+                } else {
+                    p.collector_source.as_str()
+                },
+            })
+            .to_string()
         })
         .unwrap_or_default();
     c.execute("INSERT INTO competitor_observations(run_id,competitor_id,observed_at,status,retry_count,source_url,final_url,search_context,price_raw,sales_raw,evidence,notes)VALUES(?1,?2,?3,?4,?5,?6,?6,?7,?8,?9,?10,?11) ON CONFLICT(run_id,competitor_id) DO UPDATE SET observed_at=excluded.observed_at,status=excluded.status,retry_count=excluded.retry_count,price_raw=excluded.price_raw,sales_raw=excluded.sales_raw,evidence=excluded.evidence,notes=excluded.notes",params![run_id,id,chrono::Local::now().to_rfc3339(),status,retries,source_url,format!("language=ru-RU; device=desktop; login=anonymous; source={source}"),parsed.map(|p|p.price_raw.as_str()).unwrap_or(""),parsed.map(|p|p.sales_raw.as_str()).unwrap_or(""),evidence,notes]).map_err(|e|e.to_string())?;
@@ -3303,25 +3653,27 @@ fn refresh_competitor_for_run(
         let result = (|| -> Result<ParsedCompetitorPage, String> {
             let (html, source) = if attempt == 0 {
                 let response = ureq::get(&canonical_url).set("User-Agent","Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36").set("Accept-Language", "ru-RU,ru;q=0.9").timeout(std::time::Duration::from_secs(35)).call().map_err(|e|format!("竞品页面直连读取失败：{e}"))?;
+                let final_url = response.get_url().to_string();
+                validate_competitor_url_identity(&final_url, &canonical_code)?;
                 (
                     response.into_string().map_err(|e| e.to_string())?,
                     "ozon_public_page",
                 )
             } else {
                 (
-                    collect_competitor_python_html(
+                    collect_competitor_browser_html(
                         &canonical_url,
                         &canonical_code,
                         data_dir,
                         id,
                     )?,
-                    "dedicated_browser",
+                    "dedicated_browser_rust",
                 )
             };
             validate_competitor_identity(&html, &canonical_code)?;
             let parsed = parse_competitor_html(&html)?;
-            if attempt == 0 && (parsed.price.is_none() || parsed.image.is_empty()) {
-                return Err("直连页面缺少售价或主图，转入专用浏览器读取可见页面".into());
+            if attempt == 0 && competitor_page_needs_browser(&parsed) {
+                return Err("直连页面缺少可校验主图，转入专用浏览器读取可见页面".into());
             }
             save_competitor_html(c, id, &html, source)
         })();
@@ -3333,10 +3685,9 @@ fn refresh_competitor_for_run(
                         progress.message = format!("竞品 {} 已校验，正在写入快照", canonical_code);
                     }
                 }
-                // Public Ozon pages do not reliably expose cumulative sales.
-                // Price + main image is a complete public-page capture; sales
-                // remains nullable and may be entered manually by the user.
-                let status = if parsed.price.is_some() && !parsed.image.is_empty() {
+                // The competitor board only requires a verified main image.
+                // Price and public sales remain optional evidence when present.
+                let status = if !parsed.image.is_empty() {
                     "ok"
                 } else {
                     "incomplete"
@@ -3344,7 +3695,7 @@ fn refresh_competitor_for_run(
                 let notes = if status == "ok" {
                     ""
                 } else {
-                    "页面售价或主图不完整；销量未公开时保持为空，可手工填写"
+                    "页面主图不完整；售价和销量仅在公开可核验时附带保存"
                 };
                 record_competitor_observation(
                     c,
@@ -3356,7 +3707,7 @@ fn refresh_competitor_for_run(
                     if attempt == 0 {
                         "ozon_public_page"
                     } else {
-                        "dedicated_browser"
+                        "dedicated_browser_rust"
                     },
                     Some(&parsed),
                     notes,
@@ -3387,7 +3738,7 @@ fn refresh_competitor_for_run(
                     status,
                     attempt,
                     &canonical_url,
-                    "dedicated_browser",
+                    "dedicated_browser_rust",
                     None,
                     &last_error,
                 )?;
@@ -3665,7 +4016,6 @@ fn add_competitor_blocking(product_url: String, state: &AppState) -> Result<i64,
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
-    refresh_competitor_inner(&c, id, &state.data_dir)?;
     Ok(id)
 }
 #[tauri::command]
@@ -4162,6 +4512,27 @@ fn start_competitors_collection(state: State<AppState>) -> Result<(), String> {
         ids,
         "manual_all_competitors",
         "竞品采集任务已加入队列",
+    )
+}
+
+#[tauri::command]
+fn start_competitor_collection_task(id: i64, state: State<AppState>) -> Result<(), String> {
+    let owned = background_state(&state)?;
+    let exists = db(&owned)?
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM competitor_products WHERE id=?1 AND active=1)",
+            [id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if exists == 0 {
+        return Err("竞品任务不存在或已经删除".into());
+    }
+    start_competitor_ids_collection(
+        owned,
+        vec![id],
+        "manual_single_competitor",
+        "单个竞品采集任务已加入队列",
     )
 }
 
@@ -4669,10 +5040,10 @@ fn missing_cost_rows(
     state: State<AppState>,
 ) -> Result<Vec<MissingCostRow>, String> {
     let c = db(&state)?;
-    // Use the exact same fulfilled-unit base as monthly P&L. Previously this
-    // endpoint inspected ordered units while the report inspected delivered
-    // units, which could produce “missing units > 0 / missing SKU = 0”.
-    let mut stmt = c.prepare("WITH sales AS(SELECT sku,MAX(product_name) product_name FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) units FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) units FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),base AS(SELECT s.sku,s.product_name,COALESCE(d.units,fd.units,0) units FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku) SELECT b.sku,COALESCE(MAX(p.offer_id),''),COALESCE(MAX(NULLIF(p.name,'')),MAX(b.product_name),''),MAX(b.units),MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)),MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)),MAX(pc.weight_kg),MAX(pc.length_cm),MAX(pc.width_cm),MAX(pc.height_cm),COALESCE(MAX(pc.note),'') FROM base b LEFT JOIN products p ON p.sku=b.sku LEFT JOIN product_costs pc ON pc.sku=b.sku WHERE b.units>0 GROUP BY b.sku HAVING MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)) IS NULL OR MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)) IS NULL ORDER BY MAX(b.units) DESC,b.sku").map_err(|e|e.to_string())?;
+    // Finance is the canonical settled-unit source for the Finance P&L. A
+    // posting event is only a fallback when that SKU has no attributable
+    // Finance delivery, because migrated posting history can be partial.
+    let mut stmt = c.prepare("WITH sales AS(SELECT sku,MAX(product_name) product_name FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) units FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) units FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),base AS(SELECT s.sku,s.product_name,COALESCE(fd.units,d.units,0) units FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku) SELECT b.sku,COALESCE(MAX(p.offer_id),''),COALESCE(MAX(NULLIF(p.name,'')),MAX(b.product_name),''),MAX(b.units),MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)),MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)),MAX(pc.weight_kg),MAX(pc.length_cm),MAX(pc.width_cm),MAX(pc.height_cm),COALESCE(MAX(pc.note),'') FROM base b LEFT JOIN products p ON p.sku=b.sku LEFT JOIN product_costs pc ON pc.sku=b.sku WHERE b.units>0 GROUP BY b.sku HAVING MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)) IS NULL OR MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)) IS NULL ORDER BY MAX(b.units) DESC,b.sku").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map(params![range.from, range.to], |r| {
             let length: Option<f64> = r.get(7)?;
@@ -4710,7 +5081,7 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
     let c = db(&state)?;
     let rate = rub_per_cny_for(&state, &c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS business_report_cache(range_key TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
-    let fingerprint:String=c.query_row("SELECT 'finance-v5-consistent-missing-cost|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let fingerprint:String=c.query_row("SELECT 'finance-v6-finance-delivered-first|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     let cache_key = format!("{}|{}", range.from, range.to);
     if let Ok(payload) = c.query_row(
         "SELECT payload FROM business_report_cache WHERE range_key=?1 AND fingerprint=?2",
@@ -4721,11 +5092,10 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
             return Ok(report);
         }
     }
-    // Match the audited legacy P&L: COGS belongs to fulfilled units, never all
-    // orders. Prefer posting delivery events; older/newly migrated databases
-    // may not have those rows, so use the auditable Finance delivered operation
-    // count per SKU. A SKU without either source has zero settled cost units.
-    let(revenue,orders,purchase,first_mile,missing,costed_units,missing_cost_skus):(f64,i64,f64,f64,i64,i64,i64)=c.query_row("WITH sales AS(SELECT sku,SUM(revenue) revenue,SUM(ordered_units) ordered FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) delivered FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) delivered FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),cost_base AS(SELECT s.sku,s.revenue,s.ordered,COALESCE(d.delivered,fd.delivered,0) cost_units,pc.unit_cost_cny,pc.unit_cost,pc.first_mile_cost,pc.first_mile_cost_cny FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku LEFT JOIN product_costs pc ON pc.sku=s.sku) SELECT COALESCE(SUM(revenue),0),COALESCE(SUM(ordered),0),COALESCE(SUM(cost_units*COALESCE(unit_cost_cny*?3,unit_cost,0)),0),COALESCE(SUM(cost_units*COALESCE(first_mile_cost,first_mile_cost_cny*?3,0)),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)THEN cost_units ELSE 0 END),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NOT NULL OR unit_cost IS NOT NULL)AND(first_mile_cost IS NOT NULL OR first_mile_cost_cny IS NOT NULL)THEN cost_units ELSE 0 END),0),COALESCE(COUNT(DISTINCT CASE WHEN cost_units>0 AND ((unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)) THEN sku END),0) FROM cost_base",params![range.from,range.to,rate],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).map_err(|e|e.to_string())?;
+    // Match the Finance-settled P&L: Finance delivered operations are the
+    // canonical per-SKU quantity. Posting delivery events are a fallback only
+    // when Finance has no attributable delivery row for that SKU.
+    let(revenue,orders,purchase,first_mile,missing,costed_units,missing_cost_skus):(f64,i64,f64,f64,i64,i64,i64)=c.query_row("WITH sales AS(SELECT sku,SUM(revenue) revenue,SUM(ordered_units) ordered FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) delivered FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) delivered FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),cost_base AS(SELECT s.sku,s.revenue,s.ordered,COALESCE(fd.delivered,d.delivered,0) cost_units,pc.unit_cost_cny,pc.unit_cost,pc.first_mile_cost,pc.first_mile_cost_cny FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku LEFT JOIN product_costs pc ON pc.sku=s.sku) SELECT COALESCE(SUM(revenue),0),COALESCE(SUM(ordered),0),COALESCE(SUM(cost_units*COALESCE(unit_cost_cny*?3,unit_cost,0)),0),COALESCE(SUM(cost_units*COALESCE(first_mile_cost,first_mile_cost_cny*?3,0)),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)THEN cost_units ELSE 0 END),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NOT NULL OR unit_cost IS NOT NULL)AND(first_mile_cost IS NOT NULL OR first_mile_cost_cny IS NOT NULL)THEN cost_units ELSE 0 END),0),COALESCE(COUNT(DISTINCT CASE WHEN cost_units>0 AND ((unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)) THEN sku END),0) FROM cost_base",params![range.from,range.to,rate],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).map_err(|e|e.to_string())?;
     let ad_spend = c
         .query_row(
             "SELECT COALESCE(SUM(spend),0) FROM ad_daily WHERE day BETWEEN ?1 AND ?2 AND sku=''",
@@ -5542,7 +5912,7 @@ fn inventory_blocking(
 ) -> Result<Vec<InventoryRow>, String> {
     let c = db(state)?;
     let needle = format!("%{}%", query.trim());
-    let mut stmt = c.prepare("WITH inv AS(SELECT sku,MAX(offer_id)offer_id,MAX(product_name)product_name,SUM(available_stock)available,SUM(transit_stock)transit,SUM(requested_stock)requested,COUNT(DISTINCT warehouse_id)warehouses,MAX(updated_at)updated FROM inventory_stock GROUP BY sku),feishu AS(SELECT sku,SUM(production_qty)production,SUM(domestic_stock_qty)domestic_stock,SUM(overseas_transit_qty)overseas_transit,SUM(overseas_arrived_qty)overseas_arrived FROM shipment_tracking WHERE sku<>'' GROUP BY sku),sales AS(SELECT sku,SUM(CASE WHEN day>=date('now','-29 day') THEN ordered_units ELSE 0 END)/30.0 daily30,SUM(CASE WHEN day>=date('now','-6 day') THEN ordered_units ELSE 0 END)/7.0 daily7,SUM(CASE WHEN day>=date('now','-29 day') THEN ordered_units ELSE 0 END) ordered30 FROM sales_daily WHERE day>=date('now','-29 day') GROUP BY sku),return_count AS(SELECT sku,SUM(quantity) returns30 FROM return_events WHERE day>=date('now','-29 day') GROUP BY sku),return_cost AS(SELECT sku,SUM(ABS(amount)) cost FROM finance_transactions WHERE substr(operation_date,1,10)>=date('now','-29 day') AND sku<>'' AND (lower(operation_type)LIKE'%return%' OR lower(operation_type)LIKE'%возврат%') GROUP BY sku),plans AS(SELECT sku,SUM(planned_qty)planned FROM replenishment_plan GROUP BY sku) SELECT i.sku,i.offer_id,i.product_name,i.available,t.present_stock,t.reserved_stock,i.transit,i.requested,COALESCE(f.production,0),COALESCE(f.domestic_stock,0),COALESCE(f.overseas_transit,0),COALESCE(f.overseas_arrived,0),i.warehouses,COALESCE(s.daily30,0),COALESCE(s.daily7,0),COALESCE(s.ordered30,0),COALESCE(rr.returns30,0),COALESCE(rc.cost,0),COALESCE(p.planned,0),i.updated FROM inv i LEFT JOIN inventory_totals t ON t.sku=i.sku LEFT JOIN feishu f ON f.sku=i.sku LEFT JOIN sales s ON s.sku=i.sku LEFT JOIN return_count rr ON rr.sku=i.sku LEFT JOIN return_cost rc ON rc.sku=i.sku LEFT JOIN plans p ON p.sku=i.sku WHERE ?1='%%' OR i.sku LIKE ?1 OR i.offer_id LIKE ?1 OR i.product_name LIKE ?1 ORDER BY i.available,i.offer_id LIMIT 2000").map_err(|e|e.to_string())?;
+    let mut stmt = c.prepare("WITH inv AS(SELECT sku,MAX(offer_id)offer_id,MAX(product_name)product_name,SUM(available_stock)available,SUM(transit_stock)transit,SUM(requested_stock)requested,COUNT(DISTINCT warehouse_id)warehouses,MAX(updated_at)updated FROM inventory_stock GROUP BY sku),feishu AS(SELECT a.sku,SUM(CASE WHEN s.cargo_status='未送仓' THEN a.quantity ELSE 0 END)production,0 domestic_stock,SUM(CASE WHEN s.cargo_status='在途' THEN a.quantity ELSE 0 END)overseas_transit,SUM(CASE WHEN s.cargo_status='到达海外仓' OR (s.cargo_status IN('已送仓','已申请') AND a.settled=0) THEN a.quantity ELSE 0 END)overseas_arrived FROM shipment_sku_allocations a JOIN shipment_tracking s ON s.tracking_id=a.tracking_id GROUP BY a.sku),sales AS(SELECT sku,SUM(CASE WHEN day>=date('now','-29 day') THEN ordered_units ELSE 0 END)/30.0 daily30,SUM(CASE WHEN day>=date('now','-6 day') THEN ordered_units ELSE 0 END)/7.0 daily7,SUM(CASE WHEN day>=date('now','-29 day') THEN ordered_units ELSE 0 END) ordered30 FROM sales_daily WHERE day>=date('now','-29 day') GROUP BY sku),return_count AS(SELECT sku,SUM(quantity) returns30 FROM return_events WHERE day>=date('now','-29 day') GROUP BY sku),return_cost AS(SELECT sku,SUM(ABS(amount)) cost FROM finance_transactions WHERE substr(operation_date,1,10)>=date('now','-29 day') AND sku<>'' AND (lower(operation_type)LIKE'%return%' OR lower(operation_type)LIKE'%возврат%') GROUP BY sku),plans AS(SELECT sku,SUM(planned_qty)planned FROM replenishment_plan GROUP BY sku) SELECT i.sku,i.offer_id,i.product_name,i.available,t.present_stock,t.reserved_stock,i.transit,i.requested,COALESCE(f.production,0),COALESCE(f.domestic_stock,0),COALESCE(f.overseas_transit,0),COALESCE(f.overseas_arrived,0),i.warehouses,COALESCE(s.daily30,0),COALESCE(s.daily7,0),COALESCE(s.ordered30,0),COALESCE(rr.returns30,0),COALESCE(rc.cost,0),COALESCE(p.planned,0),i.updated FROM inv i LEFT JOIN inventory_totals t ON t.sku=i.sku LEFT JOIN feishu f ON f.sku=i.sku LEFT JOIN sales s ON s.sku=i.sku LEFT JOIN return_count rr ON rr.sku=i.sku LEFT JOIN return_cost rc ON rc.sku=i.sku LEFT JOIN plans p ON p.sku=i.sku WHERE ?1='%%' OR i.sku LIKE ?1 OR i.offer_id LIKE ?1 OR i.product_name LIKE ?1 ORDER BY i.available,i.offer_id LIMIT 2000").map_err(|e|e.to_string())?;
     let raw = stmt
         .query_map([needle], |r| {
             Ok((
@@ -6840,13 +7210,22 @@ fn feishu_date(c: &Connection, value: Option<&serde_json::Value>) -> String {
 #[tauri::command]
 fn shipment_tracking(state: State<AppState>) -> Result<Vec<ShipmentRow>, String> {
     let c = db(&state)?;
+    let mut allocations = std::collections::HashMap::<String, Vec<ShipmentSkuAllocation>>::new();
+    {
+        let mut allocation_stmt=c.prepare("SELECT tracking_id,sku,quantity FROM shipment_sku_allocations ORDER BY tracking_id,sku").map_err(|e|e.to_string())?;
+        let allocation_rows=allocation_stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,ShipmentSkuAllocation{sku:r.get(1)?,quantity:r.get(2)?}))).map_err(|e|e.to_string())?;
+        for row in allocation_rows { let (tracking_id,item)=row.map_err(|e|e.to_string())?; allocations.entry(tracking_id).or_default().push(item); }
+    }
     let mut stmt=c.prepare("SELECT tracking_id,product_name,batch_no,shop_name,quantity,cargo_status,channel,domestic_arrival,foreign_arrival,notified_foreign_arrival,source,updated_at FROM shipment_tracking ORDER BY CASE WHEN foreign_arrival<>'' AND foreign_arrival<>notified_foreign_arrival THEN 0 ELSE 1 END,updated_at DESC").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
             let foreign: String = r.get(8)?;
             let notified: String = r.get(9)?;
+            let tracking_id: String = r.get(0)?;
+            let settlement_completed = c.query_row("SELECT COUNT(*)>0 AND MIN(settled)=1 FROM shipment_sku_allocations WHERE tracking_id=?1",[&tracking_id],|row|row.get(0)).unwrap_or(false);
             Ok(ShipmentRow {
-                tracking_id: r.get(0)?,
+                sku_allocations: allocations.get(&tracking_id).cloned().unwrap_or_default(),
+                tracking_id,
                 product_name: r.get(1)?,
                 batch_no: r.get(2)?,
                 shop_name: r.get(3)?,
@@ -6859,6 +7238,7 @@ fn shipment_tracking(state: State<AppState>) -> Result<Vec<ShipmentRow>, String>
                 source: r.get(10)?,
                 updated_at: r.get(11)?,
                 needs_notification: !foreign.is_empty() && foreign != notified,
+                settlement_completed,
             })
         })
         .map_err(|e| e.to_string())?
@@ -6869,16 +7249,48 @@ fn shipment_tracking(state: State<AppState>) -> Result<Vec<ShipmentRow>, String>
 
 fn sync_feishu_shipments_blocking(state: &AppState) -> Result<i64, String> {
     let mut c = db(state)?;
-    let token = feishu_token(&c)?;
-    let app = setting(&c, "feishu_app_token");
-    let table = setting(&c, "feishu_tracking_table_id");
-    if app.is_empty() || table.is_empty() {
-        return Err("请先配置飞书 App Token 和发货跟踪 Table ID".into());
+    let source = resolve_feishu_supply_source(state)?;
+    let token = feishu_token_for_source(&source)?;
+    let path = format!("{}/bitable/v1/apps/{}/tables/{}", source.base_url, source.app_token, source.tracking_table_id);
+    let records = feishu_records(&token, &path).map_err(|error| {
+        if error.contains("1254041") || error.contains("TableIdNotFound") {
+            format!("发货跟踪表不存在或不属于当前 App Token。请在飞书打开正确的发货跟踪多维表格，复制链接中 /base/ 后的 App Token，以及 table= 后以 tbl 开头的 Table ID；不要填写 view= 后的视图 ID。配置来源店铺：{}。原始错误：{error}", source.shop_name)
+        } else {
+            error
+        }
+    })?;
+    let mut sku_candidates = std::collections::HashMap::<String, Option<String>>::new();
+    {
+        let mut stmt = c.prepare("SELECT sku,offer_id,name FROM products WHERE sku<>''").map_err(|e|e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).map_err(|e|e.to_string())?;
+        for row in rows {
+            let (sku, offer, name) = row.map_err(|e|e.to_string())?;
+            add_unique_sku_candidate(&mut sku_candidates, &sku, &sku);
+            add_unique_sku_candidate(&mut sku_candidates, &offer, &sku);
+            add_unique_sku_candidate(&mut sku_candidates, &name, &sku);
+        }
+        let mut stmt = c.prepare("SELECT product_name,sku FROM feishu_supply_chain_product_mappings WHERE sku<>''").map_err(|e|e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(|e|e.to_string())?;
+        for row in rows {
+            let (name, sku) = row.map_err(|e|e.to_string())?;
+            add_unique_sku_candidate(&mut sku_candidates, &name, &sku);
+        }
     }
-    let path = format!("{}/bitable/v1/apps/{app}/tables/{table}", feishu_base(&c));
-    let records = feishu_records(&token, &path)?;
+    if !source.product_table_id.is_empty() {
+        let product_path = format!("{}/bitable/v1/apps/{}/tables/{}", source.base_url, source.app_token, source.product_table_id);
+        if let Ok(product_records) = feishu_records(&token, &product_path) {
+            for record in product_records {
+                let fields = record.get("fields");
+                let sku = first_feishu_field(fields, &["SKU", "Ozon SKU", "商品SKU"]);
+                let name = first_feishu_field(fields, &["品名", "产品名称", "商品名称"]);
+                add_unique_sku_candidate(&mut sku_candidates, &name, &sku);
+            }
+        }
+    }
     let tx = c.transaction().map_err(|e| e.to_string())?;
     let mut count = 0;
+    let mut matched = 0;
+    let mut status_totals = [0i64; 4];
     for record in records {
         let fields = record.get("fields");
         let tracking = first_feishu_field(fields, &["采购单号", "跟踪单号", "物流单号", "单号"]);
@@ -6901,25 +7313,31 @@ fn sync_feishu_shipments_blocking(state: &AppState) -> Result<i64, String> {
                 .and_then(|v| v.get("国外到库"))
                 .or_else(|| fields.and_then(|v| v.get("国外到仓"))),
         );
-        let sku = first_feishu_field(fields, &["SKU", "Ozon SKU", "商品SKU"]);
-        let cargo_status = first_feishu_field(fields, &["货物状态", "状态"]);
-        let number = |names: &[&str]| -> i64 {
-            names.iter().find_map(|name| feishu_field_number(fields.and_then(|v| v.get(*name)))).unwrap_or(0.0).round() as i64
+        let foreign_appointment = feishu_date(
+            &tx,
+            fields.and_then(|v| v.get("国外约仓")),
+        );
+        let product_name = first_feishu_field(fields,&["品名","产品名称","商品名称"]);
+        let explicit_sku = first_feishu_field(fields, &["SKU", "Ozon SKU", "商品SKU"]);
+        let sku = if !explicit_sku.is_empty() {
+            explicit_sku
+        } else {
+            sku_candidates.get(&normalized_product_key(&product_name)).and_then(|value| value.clone()).unwrap_or_default()
         };
-        let mut production = number(&["在生产数量", "生产中数量", "国内在生产"]);
-        let mut domestic_stock = number(&["国内仓数量", "国内仓库数量", "国内库存"]);
-        let mut overseas_transit = number(&["海外仓在途数量", "发海外仓在途", "国际在途数量"]);
-        let mut overseas_arrived = number(&["海外仓到仓数量", "到达海外仓数量", "海外仓库存"]);
-        if production + domestic_stock + overseas_transit + overseas_arrived == 0 {
-            let status = cargo_status.to_lowercase();
-            if status.contains("生产") { production = quantity; }
-            else if !foreign.is_empty() || status.contains("到达海外") || status.contains("海外仓已到") { overseas_arrived = quantity; }
-            else if status.contains("在途") || status.contains("发海外") || (!domestic.is_empty() && foreign.is_empty()) { overseas_transit = quantity; }
-            else if status.contains("国内仓") || status.contains("国内到库") { domestic_stock = quantity; }
+        if !sku.is_empty() { matched += 1; }
+        let cargo_status = first_feishu_field(fields, &["货物状态", "状态"]);
+        let (production, domestic_stock, overseas_transit, overseas_arrived) = supply_quantities_for_status(&cargo_status, quantity);
+        match cargo_status.trim() {
+            "未送仓" => status_totals[0] += quantity,
+            "在途" => status_totals[1] += quantity,
+            "到达海外仓" => status_totals[2] += quantity,
+            "已送仓" => status_totals[3] += quantity,
+            _ => {}
         }
-        tx.execute("INSERT INTO shipment_tracking(tracking_id,product_name,batch_no,shop_name,quantity,cargo_status,channel,domestic_arrival,foreign_arrival,source,remote_record_id,sku,production_qty,domestic_stock_qty,overseas_transit_qty,overseas_arrived_qty)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'feishu',?10,?11,?12,?13,?14,?15) ON CONFLICT(tracking_id) DO UPDATE SET product_name=excluded.product_name,batch_no=excluded.batch_no,shop_name=excluded.shop_name,quantity=excluded.quantity,cargo_status=excluded.cargo_status,channel=excluded.channel,domestic_arrival=excluded.domestic_arrival,foreign_arrival=excluded.foreign_arrival,source='feishu',remote_record_id=excluded.remote_record_id,sku=excluded.sku,production_qty=excluded.production_qty,domestic_stock_qty=excluded.domestic_stock_qty,overseas_transit_qty=excluded.overseas_transit_qty,overseas_arrived_qty=excluded.overseas_arrived_qty,updated_at=CURRENT_TIMESTAMP",params![tracking,first_feishu_field(fields,&["品名","产品名称","商品名称"]),first_feishu_field(fields,&["批次号","批次"]),first_feishu_field(fields,&["店铺","店铺名称"]),quantity,cargo_status,first_feishu_field(fields,&["渠道","物流渠道"]),domestic,foreign,json_text(record.get("record_id")),sku,production,domestic_stock,overseas_transit,overseas_arrived]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO shipment_tracking(tracking_id,product_name,batch_no,shop_name,quantity,cargo_status,channel,domestic_arrival,foreign_arrival,foreign_appointment,source,remote_record_id,sku,production_qty,domestic_stock_qty,overseas_transit_qty,overseas_arrived_qty,supply_source_shop_id,status_formula_version)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'feishu',?11,?12,?13,?14,?15,?16,?17,?18) ON CONFLICT(tracking_id) DO UPDATE SET product_name=excluded.product_name,batch_no=excluded.batch_no,shop_name=excluded.shop_name,quantity=excluded.quantity,cargo_status=excluded.cargo_status,channel=excluded.channel,domestic_arrival=excluded.domestic_arrival,foreign_arrival=excluded.foreign_arrival,foreign_appointment=excluded.foreign_appointment,source='feishu',remote_record_id=excluded.remote_record_id,sku=excluded.sku,production_qty=excluded.production_qty,domestic_stock_qty=excluded.domestic_stock_qty,overseas_transit_qty=excluded.overseas_transit_qty,overseas_arrived_qty=excluded.overseas_arrived_qty,supply_source_shop_id=excluded.supply_source_shop_id,status_formula_version=excluded.status_formula_version,updated_at=CURRENT_TIMESTAMP",params![tracking,product_name,first_feishu_field(fields,&["批次号","批次"]),first_feishu_field(fields,&["店铺","店铺名称"]),quantity,cargo_status,first_feishu_field(fields,&["渠道","物流渠道"]),domestic,foreign,foreign_appointment,json_text(record.get("record_id")),sku,production,domestic_stock,overseas_transit,overseas_arrived,source.shop_id,FEISHU_CARGO_STATUS_FORMULA_VERSION]).map_err(|e|e.to_string())?;
         count += 1;
     }
+    tx.execute("INSERT INTO feishu_supply_chain_sync_runs(source_shop_id,source_shop_name,records_count,matched_count,unmatched_count,unshipped_qty,transit_qty,overseas_arrived_qty,delivered_qty,status_formula_version)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![source.shop_id,source.shop_name,count,matched,count-matched,status_totals[0],status_totals[1],status_totals[2],status_totals[3],FEISHU_CARGO_STATUS_FORMULA_VERSION]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(count)
 }
@@ -6961,6 +7379,169 @@ fn notify_feishu_shipment(tracking_id: String, state: State<AppState>) -> Result
     } else {
         format!("到库通知已发送，消息 ID：{id}")
     })
+}
+
+#[tauri::command]
+fn supply_cluster_plans(target_days: i64, query: String, state: State<AppState>) -> Result<Vec<SupplyClusterPlanRow>, String> {
+    let target_days = target_days.clamp(1, 365);
+    let pattern = format!("%{}%", query.trim());
+    let c = db(&state)?;
+    let mut stmt = c.prepare("WITH stock AS(SELECT sku,MAX(offer_id) offer_id,MAX(product_name) product_name,macrolocal_cluster_id,MAX(cluster_name) cluster_name,SUM(available_stock) available_stock,SUM(transit_stock) transit_stock,SUM(requested_stock) requested_stock,MAX(ads_cluster) daily_sales FROM inventory_stock WHERE macrolocal_cluster_id<>'' GROUP BY sku,macrolocal_cluster_id) SELECT s.sku,s.offer_id,s.product_name,s.macrolocal_cluster_id,COALESCE(NULLIF(s.cluster_name,''),'未命名集群'),s.available_stock,s.transit_stock,s.requested_stock,COALESCE(s.daily_sales,0),rp.planned_qty FROM stock s LEFT JOIN replenishment_plan rp ON rp.sku=s.sku AND rp.macrolocal_cluster_id=s.macrolocal_cluster_id WHERE ?1='%%' OR s.sku LIKE ?1 OR s.offer_id LIKE ?1 OR s.product_name LIKE ?1 OR s.cluster_name LIKE ?1 ORDER BY s.offer_id,s.daily_sales DESC,s.cluster_name LIMIT 1000").map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([pattern], |row| {
+        let available = row.get::<_, i64>(5)?;
+        let transit = row.get::<_, i64>(6)?;
+        let requested = row.get::<_, i64>(7)?;
+        let daily = row.get::<_, f64>(8)?;
+        let saved = row.get::<_, Option<i64>>(9)?;
+        let recommended = ((daily * target_days as f64).ceil() as i64 - available - transit - requested).max(0);
+        Ok(SupplyClusterPlanRow { sku: row.get(0)?, offer_id: row.get(1)?, product_name: row.get(2)?, macrolocal_cluster_id: row.get(3)?, cluster_name: row.get(4)?, available_stock: available, transit_stock: transit, requested_stock: requested, daily_sales: daily, recommended_qty: recommended, planned_qty: saved.unwrap_or(recommended), target_days, plan_saved: saved.is_some() })
+    }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+fn shipment_settlement(tracking_id: String, state: State<AppState>) -> Result<Vec<ShipmentSettlementItem>, String> {
+    let c=db(&state)?;
+    let mut stmt=c.prepare("SELECT a.sku,a.quantity,COALESCE((SELECT SUM(requested_stock) FROM inventory_stock i WHERE i.sku=a.sku),0),a.fbo_quantity,a.fbs_quantity,a.overseas_remaining_quantity,a.loss_quantity,a.other_quantity,a.settlement_note FROM shipment_sku_allocations a WHERE a.tracking_id=?1 ORDER BY a.sku").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([tracking_id],|r|Ok(ShipmentSettlementItem{sku:r.get(0)?,batch_quantity:r.get(1)?,requested_stock:r.get(2)?,fbo_quantity:r.get(3)?,fbs_quantity:r.get(4)?,overseas_remaining_quantity:r.get(5)?,loss_quantity:r.get(6)?,other_quantity:r.get(7)?,note:r.get(8)?})).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    if rows.is_empty(){Err("该批次尚未配置 SKU 明细，不能结算".into())}else{Ok(rows)}
+}
+
+#[tauri::command]
+fn settle_shipment(tracking_id: String, items: Vec<ShipmentSettlementItem>, state: State<AppState>) -> Result<(), String> {
+    let mut c=db(&state)?;
+    let status:String=c.query_row("SELECT cargo_status FROM shipment_tracking WHERE tracking_id=?1",[tracking_id.trim()],|r|r.get(0)).map_err(|_|"未找到该批次".to_string())?;
+    if !matches!(status.trim(),"已送仓"|"已申请"){return Err("只有状态为“已申请/已送仓”的批次才能审核完结".into())}
+    let tx=c.transaction().map_err(|e|e.to_string())?;
+    let expected:i64=tx.query_row("SELECT COUNT(*) FROM shipment_sku_allocations WHERE tracking_id=?1",[tracking_id.trim()],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if expected!=items.len() as i64{return Err("必须审核该批次的全部 SKU".into())}
+    for item in items {
+        let values=[item.fbo_quantity,item.fbs_quantity,item.overseas_remaining_quantity,item.loss_quantity,item.other_quantity];
+        if values.iter().any(|v|*v<0){return Err(format!("{} 的处置数量不能为负数",item.sku))}
+        if values.iter().sum::<i64>()!=item.batch_quantity{return Err(format!("{} 的处置合计必须等于批次数量 {}",item.sku,item.batch_quantity))}
+        tx.execute("UPDATE shipment_sku_allocations SET fbo_quantity=?3,fbs_quantity=?4,overseas_remaining_quantity=?5,loss_quantity=?6,other_quantity=?7,settlement_note=?8,settled=1,settled_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE tracking_id=?1 AND sku=?2 AND quantity=?9",params![tracking_id.trim(),item.sku,item.fbo_quantity,item.fbs_quantity,item.overseas_remaining_quantity,item.loss_quantity,item.other_quantity,item.note,item.batch_quantity]).map_err(|e|e.to_string())?;
+    }
+    tx.commit().map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+fn shipment_sku_options(query: String, state: State<AppState>) -> Result<Vec<ShipmentSkuOption>, String> {
+    let c = db(&state)?;
+    let pattern = format!("%{}%", query.trim());
+    let mut stmt=c.prepare("SELECT sku,offer_id,name FROM products WHERE sku<>'' AND (?1='%%' OR sku LIKE ?1 OR offer_id LIKE ?1 OR name LIKE ?1) ORDER BY offer_id,sku LIMIT 300").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([pattern],|r|Ok(ShipmentSkuOption{sku:r.get(0)?,offer_id:r.get(1)?,name:r.get(2)?})).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+fn save_shipment_sku_allocations(tracking_id: String, allocations: Vec<ShipmentSkuAllocation>, state: State<AppState>) -> Result<(), String> {
+    let tracking_id = tracking_id.trim();
+    if tracking_id.is_empty() { return Err("跟踪单号不能为空".into()); }
+    let mut c = db(&state)?;
+    let shipment_qty: i64 = c.query_row("SELECT quantity FROM shipment_tracking WHERE tracking_id=?1",[tracking_id],|r|r.get(0)).map_err(|_|"未找到该发货批次".to_string())?;
+    let mut merged=std::collections::HashMap::<String,i64>::new();
+    for item in allocations {
+        let sku=item.sku.trim();
+        if sku.is_empty() || item.quantity<=0 { return Err("每条明细必须选择 SKU，补货数量必须大于 0".into()); }
+        if c.query_row("SELECT EXISTS(SELECT 1 FROM products WHERE sku=?1)",[sku],|r|r.get::<_,i64>(0)).unwrap_or(0)==0 { return Err(format!("SKU {sku} 不存在于当前店铺商品资料")); }
+        *merged.entry(sku.to_string()).or_default() += item.quantity;
+    }
+    let total: i64=merged.values().sum();
+    if total>shipment_qty { return Err(format!("SKU 明细合计 {total} 件，不能超过该批次总数量 {shipment_qty} 件")); }
+    let tx=c.transaction().map_err(|e|e.to_string())?;
+    tx.execute("DELETE FROM shipment_sku_allocations WHERE tracking_id=?1",[tracking_id]).map_err(|e|e.to_string())?;
+    for (sku,quantity) in merged { tx.execute("INSERT INTO shipment_sku_allocations(tracking_id,sku,quantity)VALUES(?1,?2,?3)",params![tracking_id,sku,quantity]).map_err(|e|e.to_string())?; }
+    tx.commit().map_err(|e|e.to_string())
+}
+
+const FEISHU_CARGO_STATUS_FORMULA_VERSION: &str = "cargo-status-v1:fldcysFTRb";
+
+#[derive(Clone)]
+struct FeishuSupplySource {
+    shop_id: String,
+    shop_name: String,
+    base_url: String,
+    app_id: String,
+    app_secret: String,
+    app_token: String,
+    tracking_table_id: String,
+    product_table_id: String,
+}
+
+fn resolve_feishu_supply_source(state: &AppState) -> Result<FeishuSupplySource, String> {
+    let registry = read_registry(&state.data_dir)?;
+    let active_id = state.active_shop_id.lock().map_err(|e| e.to_string())?.clone();
+    let mut shops = registry.shops.iter().collect::<Vec<_>>();
+    shops.sort_by_key(|shop| if shop.id == active_id { 0 } else { 1 });
+    for shop in shops {
+        let path = state.data_dir.join(&shop.database_file);
+        let Ok(conn) = Connection::open(&path) else { continue };
+        let app_id = setting(&conn, "feishu_app_id");
+        let app_token = setting(&conn, "feishu_app_token");
+        let tracking_table_id = setting(&conn, "feishu_tracking_table_id");
+        if app_id.is_empty() || app_token.is_empty() || tracking_table_id.is_empty() {
+            continue;
+        }
+        let Ok(app_secret) = secret_setting(&conn, "feishu_app_secret") else { continue };
+        if app_secret.is_empty() { continue; }
+        return Ok(FeishuSupplySource {
+            shop_id: shop.id.clone(),
+            shop_name: shop.name.clone(),
+            base_url: feishu_base(&conn),
+            app_id,
+            app_secret,
+            app_token,
+            tracking_table_id,
+            product_table_id: setting(&conn, "feishu_product_table_id"),
+        });
+    }
+    Err("当前店铺及其他店铺均未找到完整的飞书供应链配置（App ID、App Secret、App Token、发货跟踪 Table ID）".into())
+}
+
+fn feishu_token_for_source(source: &FeishuSupplySource) -> Result<String, String> {
+    let payload = feishu_raw(
+        "POST",
+        &format!("{}/auth/v3/tenant_access_token/internal/", source.base_url),
+        None,
+        Some(&serde_json::json!({"app_id":source.app_id,"app_secret":source.app_secret})),
+    )?;
+    let token = json_text(payload.get("tenant_access_token"));
+    if token.is_empty() { Err("飞书认证响应缺少 tenant_access_token".into()) } else { Ok(token) }
+}
+
+fn normalized_product_key(value: &str) -> String {
+    value.chars().filter(|ch| !ch.is_whitespace()).flat_map(char::to_lowercase).collect()
+}
+
+fn add_unique_sku_candidate(
+    candidates: &mut std::collections::HashMap<String, Option<String>>,
+    product_name: &str,
+    sku: &str,
+) {
+    let key = normalized_product_key(product_name);
+    let sku = sku.trim();
+    if key.is_empty() || sku.is_empty() { return; }
+    candidates.entry(key).and_modify(|current| {
+        if current.as_deref() != Some(sku) { *current = None; }
+    }).or_insert_with(|| Some(sku.to_string()));
+}
+
+fn supply_quantities_for_status(status: &str, quantity: i64) -> (i64, i64, i64, i64) {
+    match status.trim() {
+        "未送仓" => (quantity, 0, 0, 0),
+        "在途" => (0, 0, quantity, 0),
+        "到达海外仓" => (0, 0, 0, quantity),
+        "已送仓" => (0, 0, 0, 0),
+        _ => (0, 0, 0, 0),
+    }
+}
+
+#[tauri::command]
+fn save_supply_cluster_plan(sku: String, macrolocal_cluster_id: String, planned_qty: i64, target_days: i64, state: State<AppState>) -> Result<(), String> {
+    if sku.trim().is_empty() || macrolocal_cluster_id.trim().is_empty() { return Err("SKU 和集群 ID 不能为空".into()); }
+    if planned_qty < 0 || !(1..=365).contains(&target_days) { return Err("计划数量不能小于 0，目标天数必须在 1–365 之间".into()); }
+    db(&state)?.execute("INSERT INTO replenishment_plan(sku,macrolocal_cluster_id,planned_qty,target_days,updated_at) VALUES(?1,?2,?3,?4,CURRENT_TIMESTAMP) ON CONFLICT(sku,macrolocal_cluster_id) DO UPDATE SET planned_qty=excluded.planned_qty,target_days=excluded.target_days,updated_at=CURRENT_TIMESTAMP", params![sku.trim(),macrolocal_cluster_id.trim(),planned_qty,target_days]).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn supply_orders_blocking(state: &AppState) -> Result<Vec<SupplyOrderRow>, String> {
@@ -7617,13 +8198,73 @@ mod shop_cost_isolation_tests {
     }
 }
 
+#[cfg(test)]
+mod feishu_supply_chain_tests {
+    use super::*;
+
+    #[test]
+    fn cargo_status_formula_maps_without_double_counting_delivered_stock() {
+        assert_eq!(supply_quantities_for_status("未送仓", 12), (12, 0, 0, 0));
+        assert_eq!(supply_quantities_for_status("在途", 12), (0, 0, 12, 0));
+        assert_eq!(supply_quantities_for_status("到达海外仓", 12), (0, 0, 0, 12));
+        assert_eq!(supply_quantities_for_status("已送仓", 12), (0, 0, 0, 0));
+        assert_eq!(supply_quantities_for_status("未知", 12), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn product_name_mapping_rejects_ambiguous_skus() {
+        let mut candidates = std::collections::HashMap::new();
+        add_unique_sku_candidate(&mut candidates, "测试 商品", "SKU-1");
+        assert_eq!(candidates.get("测试商品").and_then(|v| v.as_deref()), Some("SKU-1"));
+        add_unique_sku_candidate(&mut candidates, "测试商品", "SKU-2");
+        assert_eq!(candidates.get("测试商品"), Some(&None));
+    }
+}
+
+#[cfg(test)]
+mod monthly_profit_settled_units_tests {
+    use rusqlite::{params, Connection};
+
+    #[test]
+    fn finance_delivery_wins_over_partial_posting_history_per_sku() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE sales_daily(sku TEXT, day TEXT);
+             CREATE TABLE delivery_events(sku TEXT, day TEXT, quantity INTEGER);
+             CREATE TABLE finance_transactions(sku TEXT, operation_date TEXT, operation_id TEXT, operation_type TEXT);",
+        )
+        .unwrap();
+        c.execute("INSERT INTO sales_daily VALUES('A','2026-07-01')", []).unwrap();
+        c.execute("INSERT INTO sales_daily VALUES('B','2026-07-01')", []).unwrap();
+        c.execute("INSERT INTO delivery_events VALUES('A','2026-07-01',2)", []).unwrap();
+        c.execute("INSERT INTO delivery_events VALUES('B','2026-07-01',1)", []).unwrap();
+        for id in 1..=5 {
+            c.execute(
+                "INSERT INTO finance_transactions VALUES('A','2026-07-01',?1,'OperationAgentDeliveredToCustomer')",
+                params![format!("op-{id}")],
+            )
+            .unwrap();
+        }
+        let units: i64 = c
+            .query_row(
+                "WITH sales AS(SELECT sku FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) units FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) units FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),base AS(SELECT s.sku,COALESCE(fd.units,d.units,0) units FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku) SELECT SUM(units) FROM base",
+                params!["2026-07-01", "2026-07-31"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(units, 6, "five Finance deliveries plus one posting fallback");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let exe = std::env::current_exe()?;
-            let data_dir = locate_data_dir(&exe).map_err(std::io::Error::other)?;
+            let local_app_dir=app.path().app_local_data_dir()?;
+            let resource_dir=app.path().resource_dir()?;
+            let data_dir = locate_data_dir(&exe,&local_app_dir,&resource_dir).map_err(std::io::Error::other)?;
             let registry = read_registry(&data_dir).map_err(std::io::Error::other)?;
             app.manage(AppState {
                 data_dir,
@@ -7672,6 +8313,7 @@ pub fn run() {
             refresh_competitors_due,
             refresh_competitors_all,
             start_competitors_collection,
+            start_competitor_collection_task,
             rerun_competitors_collection,
             retry_failed_competitors_collection,
             competitor_collection_progress,
@@ -7691,6 +8333,8 @@ pub fn run() {
             prune_cache,
             missing_cost_rows,
             supply_orders,
+            supply_cluster_plans,
+            save_supply_cluster_plan,
             supply_timeslots,
             book_supply_timeslot,
             sync_logs,
@@ -7702,6 +8346,10 @@ pub fn run() {
             sync_feishu_products,
             send_feishu_weekly,
             shipment_tracking,
+            shipment_sku_options,
+            save_shipment_sku_allocations,
+            shipment_settlement,
+            settle_shipment,
             sync_feishu_shipments,
             notify_feishu_shipment,
             wb::wb_settings,

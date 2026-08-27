@@ -696,6 +696,21 @@ export interface SupplyTimeslot {
   from: string;
   to: string;
 }
+export interface SupplyClusterPlan {
+  sku: string;
+  offerId: string;
+  productName: string;
+  macrolocalClusterId: string;
+  clusterName: string;
+  availableStock: number;
+  transitStock: number;
+  requestedStock: number;
+  dailySales: number;
+  recommendedQty: number;
+  plannedQty: number;
+  targetDays: number;
+  planSaved: boolean;
+}
 export interface SyncLog {
   id: number;
   startedAt: string;
@@ -719,6 +734,15 @@ export interface ShipmentTracking {
   source: string;
   updatedAt: string;
   needsNotification: boolean;
+  skuAllocations: ShipmentSkuAllocation[];
+  settlementCompleted: boolean;
+}
+export interface ShipmentSkuAllocation { sku: string; quantity: number }
+export interface ShipmentSkuOption { sku: string; offerId: string; name: string }
+export interface ShipmentSettlementItem {
+  sku: string; batchQuantity: number; requestedStock: number;
+  fboQuantity: number; fbsQuantity: number; overseasRemainingQuantity: number;
+  lossQuantity: number; otherQuantity: number; note: string;
 }
 export interface WbSettings {
   storeName: string;

@@ -584,3 +584,128 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 测试和构建结果：
 - 尚存风险/下一步：
 ```
+
+### 2026-08-27：同步 GitHub 正式版 1.0.0 并重建启动器
+
+- 目的：从 `https://github.com/heibaiyuanfen/ozon` 获取后续更新，重新构建桌面启动器和 Windows 安装程序。
+- Git 节点：本地 `main` 已从 `7d811bb` 快进至 `da5770c`；包含 `2e32e31 fix: restore compatibility after upstream update` 与 `da5770c release: Ozon Analytics desktop 1.0.0`。拉取前的临时 Rust 调试修改单独保存在 `stash@{0}`（`local pre-da5770c compile fix`），未覆盖正式版源码。
+- 修改模块/文件：本次主要接收远端 28 个文件的更新，包括新版本数据隔离、竞品 Python/Playwright 采集器及构建脚本、经营增长/商品差异化/跨境运营页面、Finance 与月度盈亏修复；本地仅追加本条迁移记录，没有改写业务数据。
+- 数据口径或数据库变化：沿用正式版 `data-next/` 独立数据库方案；原 `data/`、`node_modules/` 与用户运行数据均保留。首次运行时按正式版迁移规则建立新版数据库快照。
+- 测试和构建结果：`tests/test_competitor_collector.py` 2/2 通过；Vite 正式前端构建通过；Tauri 1.0.0 Release 构建通过；NSIS 安装包构建通过。根目录启动器已更新为本次构建，SHA-256 `9AF05A54EE68D17BB82A06215673E8EB00B19B07F1B2E51D8647305E4E330EC7`；配套采集器 SHA-256 `C54516F33BB80BEEE94EE419032B351AE5CCAEA1AA841F81F87864C28D3821BE`；安装包 SHA-256 `AF2E5C1359BC433746B9842B163BA9127E5903928A08DA6820038179569D6C1D`。
+- 交付位置：根目录 `ozon-analytics-next.exe`；采集器 `competitor-collector.exe`；安装包 `desktop-next/src-tauri/target/release/bundle/nsis/Ozon Analytics_1.0.0_x64-setup.exe`。
+- 尚存风险/下一步：当前机器未安装 `uv`，所以本轮没有从 Python 源码重新打包采集器，而是继续配套仓库现有且已通过 IPC 修复构建的采集器。后续修改 `competitor_collector.py` 后，必须先运行 `scripts/build-competitor-collector.ps1` 再发布。
+
+### 2026-08-27：清理重复构建产物并完成旧库到新库迁移核验
+
+- 目的：缩减项目体积，同时保留源码、开发依赖、业务数据、正式程序和可安装发布包；确认旧版 `data/` 的数据完整进入新版 `data-next/`。
+- 清理范围：删除可重新生成的 Rust `desktop-next/src-tauri/target/`（其中 Debug 约 6.23 GB、Release 中间产物约 2.45 GB）、PyInstaller `build/`/`dist/`、Python 缓存、6 张运行诊断截图、10 个历史候选启动器，以及旧竞品采集测试产生的 10 组临时浏览器 profile。正式安装包已先复制到根目录 `release/`，没有随 Target 缓存删除。
+- 保留内容：`desktop-next/node_modules/`、所有源码和锁文件、旧版 `data/` 业务数据库、新版 `data-next/` 业务数据库、根目录正式 `ozon-analytics-next.exe`、`competitor-collector.exe` 和 `release/Ozon Analytics_1.0.0_x64-setup.exe`。
+- 数据迁移结果：正式版在 2026-08-27 首次启动时通过 SQLite `VACUUM INTO` 将 4 个店铺数据库和 WB 数据库建立到 `data-next/`，并生成 `database-generation.json`。逐店核对后，旧库与新库共有业务表的行数一致；差异仅为设计上主动清空的 `business_report_cache`、`analytics_detail_cache`、`sync_progress`，以及新版自动新增的扩展表 `competitor_manual_metrics`。
+- 店铺映射：`data/ozon_analytics.db` → `data-next/ozon_next_default.db`；三个 `data/shops/shop_<id>.db` → 对应的 `data-next/shops/shop_next_<id>.db`。旧库仍完整保留，作为只读回退副本，不再被新版运行时打开。
+- 体积变化：项目约从 10 GB 降至约 552 MB；其中旧数据约 141 MB、新数据约 140 MB、`node_modules` 约 193 MB。后续构建会重新生成 `target/`，完成发布后可再次安全清理。
+- 尚存风险/下一步：不要手工把两个数据库目录混合使用。新增业务数据只写入 `data-next/`；如需重新执行全量迁移，应先关闭程序、备份两个目录，并明确采用覆盖还是增量合并策略。
+
+### 2026-08-27：竞品逐任务手动采集与库存—约仓集群联动
+
+- 目的：根据用户提供的 `新建文件夹(2).rar` 和旧版 `RFBS上品工具` 源码，恢复“任务由用户明确启动、每项可单独停止”的采集控制；迁移旧版库存集群配送量与 FBO 约仓计划的联动。
+- 旧版逻辑核对：竞品能力来自 `app.py` 的任务队列/协作式取消和 `core.py` 的 `scrape_reference` 持久浏览器、页面稳定等待、商品身份校验与图库水合。新版保留可核验来源、时间、状态、重试和证据字段；验证码、访问限制或不公开销量仍标记为受阻/空值，不绕过限制或使用 AI 猜测。
+- 竞品变化：打开竞品模块只读取本地任务和最近进度，不再启动采集，也不再每小时自动采集；添加链接只创建待采集任务。后端新增 `start_competitor_collection_task`，每张卡片提供“开始采集/停止采集/停止中”，原全量运行仍需用户主动点击。采集器移除隐藏自动化特征的浏览器参数。
+- 约仓变化：约仓页新增库存集群计划表，按 SKU/货号/商品/集群检索，展示可售、在途、已申请、集群日均销量、目标天数建议量和实际约仓数量；保存到共享 `replenishment_plan` 后，库存管理与约仓读取同一条 `SKU + macrolocal_cluster_id` 计划记录。
+- 模式区分：`CROSSDOCK/越库` 明确要求选择 Ozon 越库发货点，由平台转运到目的仓；`DIRECT/直送` 直接送往草稿计算出的目的仓，不选择越库发货点。本节点完成数量计划与模式选择迁移；真实创建草稿、选择目的仓和预约时段仍沿用严格确认、写操作不自动重试的安全边界。
+- 修改模块/文件：`competitor_collector.py`、`desktop-next/src-tauri/src/lib.rs`、`desktop-next/src/bridge.ts`、`desktop-next/src/types.ts`、`desktop-next/src/OperationsPages.tsx`、本 Markdown。
+- 测试和构建结果：TypeScript/Vite 正式构建通过；竞品采集器单元测试 2/2 通过；Rust `cargo check` 与 Tauri Release 构建通过（仅保留既有未使用/弃用警告）。根目录启动器已更新，SHA-256 为 `FF35FAD391F69D1754FB4901905C4B17928D32117535B05976D6ACE91AA72612`。实际启动后确认“约仓计划”页面正常渲染，真实显示库存集群、已保存配送量、越库/直送说明及现有供应单。
+- 清理：用于阅读 RAR 的 `.legacy-review-20260827/` 和约 4 GB 可再生的 Rust `target/` 已删除；源码、`node_modules/`、`data/`、`data-next/`、根目录正式 EXE 和原始 RAR 均未删除。
+- 尚存风险/下一步：下一节点应把已选集群计划接入旧版四阶段远程流程：创建 DIRECT/CROSSDOCK 草稿 → 读取草稿目的仓 → 查询草稿时段 → 手工确认后创建真实供应单；任何写入都不得在页面打开时触发。
+
+### 2026-08-27：竞品商品信息采集失败复查（候选采集器待验收）
+
+- 目的：根据用户反馈和商品 `4198227898` 的失败截图，重新阅读本文档中竞品跟踪模块的全部更新历史，核对当前 Python/Playwright 源码、随程序运行的 sidecar 二进制以及真实浏览器行为，修复价格、主图和商品身份信息采集。
+- 历史结论复核：本文档此前已经记录“普通 Chrome 以及用户手工输入链接的 Edge 可以访问，隔离自动化 Edge 可能返回 Ozon 的俄文‘Похоже, нет соединения’合成拦截页”；也记录了 Chrome 优先、Edge 回退、独立持久化 profile、最终 URL 商品号校验、右上角可见价格和 Ozon CDN 主图解析策略。销量不是公开可信字段时继续留空，不填 0、不使用 AI 猜测，也不绕过验证码或平台访问限制。
+- 本轮发现的直接问题：项目根目录正式 `competitor-collector.exe` 的时间为 2026-08-26 18:36:59、大小 48,259,645 字节，早于 2026-08-27 修改后的 `competitor_collector.py`。因此应用实际调用的是旧 sidecar，源码中的后续修改并未进入正式程序；截图里的 Edge 启动行为及 `--no-sandbox` 警告不能代表当前 Python 源码的最终行为。
+- 已完成源码调整：`competitor_collector.py` 的浏览器顺序改为 Google Chrome 优先、Microsoft Edge 回退；Chrome 与 Edge 分别使用独立 profile 子目录，避免失败会话或站点状态相互污染；采集结果的 `source` 会记录实际使用的浏览器通道。没有加入隐藏自动化特征、Cookie 导入、验证码处理或其他绕过参数。
+- 候选构建：由于机器没有可直接使用的系统 Python/`uv`，已使用工作区隔离依赖重新打包候选 `.collector-build/dist/competitor-collector.exe`。候选文件大小 48,849,281 字节，SHA-256 为 `35F534A9F1DB9B877151399358221E8343BD60706A33397B43E7D4BD0F12F7C6`。
+- 真实运行结果：已直接以商品链接 `https://www.ozon.ru/product/4198227898/`、期望商品 ID `4198227898` 启动候选采集器。进程没有快速返回成功 JSON，而是持续等待页面达到可解析状态，说明真实链路仍存在页面受阻或稳定等待未结束的问题，尚未取得价格、主图写入 SQLite 的验收证据。
+- 截图检查限制：尝试通过 Windows 界面检查能力读取正在运行的 Chrome 窗口时，工具无法以足够置信度确认当前 URL，按安全规则终止了界面检查。本节点没有尝试绕过页面限制，也没有把不确定页面误报为采集成功。
+- 正式文件状态：**候选采集器尚未覆盖根目录正式 `competitor-collector.exe`，正式启动器也尚未重新构建。** 这是有意保留的安全边界，避免把只完成打包、但未完成真实页面与 SQLite 验收的候选版本作为正式交付。
+- 修改模块/文件：`competitor_collector.py`、本 Markdown；候选构建位于临时 `.collector-build/`，不属于最终交付节点。
+- 尚存风险/下一步：先取得候选进程的最终 stdout/stderr 和退出状态；若 Chrome 返回可识别的受阻页，应把 `status/final_url/page_title/evidence/browser` 明确写入失败 JSON，并有限次回退 Edge，而不是无限等待。只有在单独运行返回正确商品 ID、价格和主图后，才能替换正式 sidecar；随后必须执行 ERP 单任务采集、查询 `competitor_products`/`competitor_snapshots`、重新构建 Tauri Release，并补记正式 EXE 哈希和验收截图。
+
+### 2026-08-27：竞品采集纯 Rust 复现与受阻错误修复
+
+- 目的：解决 GitHub 正式版继续调用旧 `competitor-collector.exe`、浏览器显示 `--no-sandbox` 警告、Ozon 返回俄文“Похоже, нет соединения”后界面只记录 `TargetClosedError` 的问题；同时回答“是否可不用 Python”——正式竞品主流程现已由 Rust 完整复现。
+- 根因确认：历史 SQLite 中商品 `4198227898` 等失败记录确实保存为 `blocked: TargetClosedError: Target page, context or browser has been closed`；截图中的真实页面同时是 Ozon 生成的“似乎没有连接”受阻页。前者只是 Playwright 页面关闭/清理阶段覆盖了更有用的诊断，后者是 Ozon 对独立自动化会话施加的访问限制，不是商品 URL、价格正则或 SQLite 写入错误。仓库根目录 sidecar 曾早于 Python 源码，也是 GitHub 下载后实际逻辑与源码不一致的直接发布问题。
+- Rust 采集逻辑：`refresh_competitor_for_run` 先用 `ureq` 读取公开页并校验最终重定向 URL 的 Артикул；直连缺少价格、主图或完整图库证据时进入 `headless_chrome` 可见浏览器。浏览器按 Chrome → Edge 回退，分别使用持久化 profile，保留正常沙箱并移除库默认的 `--enable-automation`、后台网络禁用参数，使用 `ru-RU` 页面语言；没有导入 Cookie、隐藏自动化特征或绕过验证码。
+- 旧版能力复现：Rust 页面脚本复用了固定左侧缩略图轨道识别、中央预览图排除、Ozon CDN `wc2000` 高清转换、图库去重、页面水合和稳定轮询；同时校验最终商品号、读取可见卢布售价，并保持销量未公开时为 `NULL`。单图商品可用浏览器图库模式证明完整性，普通直连仅有 `og:image` 时不会被误判为完整采集。
+- 错误与证据：Ozon “似乎没有连接”会立即切换另一浏览器；验证码/安全验证页保留窗口等待人工完成。Chrome/Edge 都受阻时记录可读的 `blocked` 原因，页面关闭也转为受控诊断，不再向界面泄漏 `TargetClosedError`。`competitor_observations.evidence` 写入标题、原始价格、完整图库、图库模式和采集来源；`competitor_products`/`competitor_snapshots` 只在校验成功后写入主图与价格。
+- Python 状态：`collect_competitor_python_html` 和旧扩展采集实现被编译条件明确排除，正式 EXE 中不再包含 `competitor-collector` sidecar 路径；根目录 `competitor_collector.py`、打包脚本和 5 个测试仅保留为兼容/迁移参考，不参与正式竞品任务。
+- 修改模块/文件：`desktop-next/src-tauri/src/lib.rs`、`desktop-next/src-tauri/tauri.conf.json`、`competitor_collector.py`、`scripts/build-competitor-collector.ps1`、`tests/test_competitor_collector.py`、竞品任务前端文件及本 Markdown。
+- 测试和构建结果：Rust 全库测试 23/23 通过，`cargo check --locked` 无 dead-code 告警，Python 兼容测试 5/5 通过，TypeScript/Vite 正式构建通过，Tauri Release 构建通过。根目录 `ozon-analytics-next.exe` 已更新，大小 25,680,896 字节，SHA-256 为 `FE6B7D1F75CD96D3BE4407D446F088D3018D6B179BEBBFE69E8764F1C1E2DAE8`。
+- 验收边界：当前机器对真实商品 `4198227898` 的 Chrome/Edge 独立会话均返回 Ozon 受阻页，直接 HTTP 也进入 `__rr` 重定向循环，所以本轮不能诚实声称已取得新价格/主图快照；修复保证的是正确采集链路、正确错误分类和不再依赖旧 Python 二进制。最终线上成功验收仍需 Ozon 允许该会话访问或用户完成可操作验证页后，再从 ERP 单任务启动并查询新生成的 `competitor_observations`、`competitor_products`、`competitor_snapshots`。
+
+### 2026-08-27：飞书供应链与库存管理状态联动
+
+- 目的：让当前活动店铺的库存管理能够读取“飞书协作”中统一维护的供应链发货表，即使飞书供应链配置保存在另一个店铺数据库中，也不再因当前店铺缺少 App Token/Table ID 而断链。
+- 公式核实：发货跟踪表公式字段“货物状态”（Field ID `fldcysFTRb`）按 `国内到库`、`国外到库`、`国外约仓` 与当天日期依次产生 `未送仓`、`在途`、`到达海外仓`、`已送仓`。同步改为严格使用这四个公式结果，不再用日期优先和状态文字模糊匹配。
+- 库存口径：`未送仓`计入在生产；`在途`计入海外运输在途；`到达海外仓`计入海外已到仓；`已送仓`的供应链四个数量桶全部为 0，防止与 Ozon 已入仓库存重复计算。国内库存桶保留兼容字段，但当前公式没有独立“国内仓”状态，因此不虚构数量。
+- 共享配置：同步优先读取当前店铺配置；若不完整，则只读扫描 `data-next/shops.json` 所列店铺数据库，选择第一套完整的飞书供应链凭证。远程读取使用来源店铺配置，记录仍写入当前活动店铺自己的 `shipment_tracking`，不复制密钥、不混写店铺业务库。
+- SKU 关联：优先使用发货表显式 SKU；其次使用本地人工映射、飞书产品表非空的精确“品名→SKU”映射，以及当前店铺 products 中 SKU/货号/精确商品名。候选指向多个 SKU 时判定为歧义并留空，不做模糊猜测或数量分摊。
+- 数据库变化：`shipment_tracking` 新增国外约仓日期、配置来源店铺和公式版本；新增 `feishu_supply_chain_product_mappings` 与 `feishu_supply_chain_sync_runs`，后者记录每次同步的总记录数、已匹配/未匹配数和四种状态数量，便于后续库存页面展示诊断。
+- 修改模块/文件：`desktop-next/src-tauri/src/lib.rs`、本 Markdown。
+- 测试和构建结果：`cargo check --locked` 通过；飞书供应链状态映射与 SKU 歧义保护测试 2/2 通过。
+- 尚存风险/下一步：飞书产品基础信息表当前样例中的 SKU 多为空，未关联品名仍需在产品表补齐 SKU 或通过后续库存界面维护人工映射。代码未改写飞书表格；真实同步需要应用所在机器可访问飞书 API，完成后应核对 `feishu_supply_chain_sync_runs` 的未匹配统计。
+
+### 2026-08-27：飞书发货批次一对多 SKU 补货明细
+
+- 目的：修正“一条采购/跟踪批次只对应一个 SKU”的错误假设。类似批次 `CZ7046-OZON-0706-93` 可同时包含 `GJYB001-GREEN`、`GJYB001-BLUE`、`GJYB001-RED` 等多个 SKU，并分别记录补货数量。
+- 交互：飞书协作的发货跟踪表新增“SKU 明细”列；点击“配置 SKU”弹出窗口，可按 SKU、货号或商品名搜索当前店铺产品，添加/删除多条 SKU 并填写每条补货数量。窗口实时展示批次总数、已分配和未分配数量。
+- 校验：SKU 必须存在于当前店铺产品资料，数量必须为正整数；同一 SKU 重复填写时后端合并；明细总数不得超过飞书批次总数量。允许保留未分配数量，便于批次资料尚未录完时分阶段维护。
+- 数据口径：新增 `shipment_sku_allocations(tracking_id, sku, quantity)`。库存管理的飞书供应链数量改为将该明细与 `shipment_tracking.cargo_status` 关联后汇总：未送仓→在生产、在途→海外在途、到达海外仓→海外已到、已送仓→不计入供应链库存。因此同一批次中的每个 SKU 都能获得自己的准确供应链数量。
+- 飞书边界：SKU 拆分明细当前保存在各店铺本地数据库，没有改写飞书多维表格；再次从飞书同步批次状态和日期时不会删除已配置的 SKU 明细。
+- 修改模块/文件：`desktop-next/src-tauri/src/lib.rs`、`desktop-next/src/types.ts`、`desktop-next/src/bridge.ts`、`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/phase2.css`、本 Markdown。
+- 测试和构建结果：`cargo check --locked` 通过；TypeScript 与 Vite 正式构建通过。
+
+### 2026-08-27：固定正式构建与覆盖交付准则
+
+- 问题：一次修改后使用了单独的 `cargo build --release` 并直接覆盖根目录 EXE，该构建没有通过 Tauri CLI 的正式构建上下文重新嵌入前端，启动后 WebView 仍访问 `localhost:1420`，因此显示 `ERR_CONNECTION_REFUSED`。
+- 修复：关闭错误进程，改用唯一正式入口 `desktop-next/scripts/build-tauri-release.cmd`。该入口通过 Tauri CLI 执行 `beforeBuildCommand`，重新生成 Vite `dist` 并将正式资源嵌入 EXE。
+- 开发准则：新增根目录 `DEVELOPMENT_RULES.md` 和 `AGENTS.md`，明确任何代码修改完成后都必须测试、使用 Tauri 正式构建入口、覆盖根目录 EXE、校验哈希、启动并做可见验收；禁止把单独的 Cargo Release 当作最终程序交付。
+
+### 2026-08-27：飞书 TableIdNotFound 诊断与 SKU 列对齐
+
+- 原因：飞书错误 `1254041 TableIdNotFound` 表示发货跟踪 Table ID 不存在，或该 Table ID 不属于当前填写的 App Token；常见误填是复制了 `view=` 后的视图 ID，或者组合了不同多维表格的 App Token 与 Table ID。
+- 界面修复：SKU 配置按钮原先被插入到第二个单元格，导致后续“品名/店铺/状态/日期/通知”整行错位；已移动到表格最后的“SKU 明细”列，与表头一一对应。
+- 错误提示：同步遇到 `TableIdNotFound` 时，界面现在明确提示从同一飞书 `/base/` 链接提取 App Token 和 `table=tbl...`，并显示实际使用的配置来源店铺，便于排查共享配置。
+
+### 2026-08-27：FBO/FBS 批次差额审核与完结
+
+- 业务规则：飞书批次进入“已申请/已送仓”后不再直接从供应链库存归零。未审核批次继续按各 SKU 的批次数量计入“海外到仓”，避免交货状态更新后数量无依据地消失。
+- 审核交互：飞书协作的 SKU 明细列对待结算批次显示“审核差额并完结”。弹窗按 SKU 展示批次数量和 Ozon 当前已申请汇总，并要求填写本批次实际进入 FBO、转入 FBS、海外仓留存、短少/损耗、其他及备注。
+- 平衡约束：每个 SKU 的五类处置数量必须全部非负且合计严格等于该 SKU 在本批次的数量；必须审核全部 SKU 才能确认完结。Ozon 已申请数量是 SKU 当前汇总，只作为人工核对参考，不自动猜测它属于哪个历史批次。
+- 防重复：结算结果写入 `shipment_sku_allocations` 的处置字段并标记 `settled=1`。库存汇总仅对未结算的“已申请/已送仓”批次继续计算海外到仓；确认完结后该批次永久退出供应链库存计算，后续新批次不会与它重复。
+- 修改模块/文件：Rust 数据库与命令、飞书协作结算弹窗、桥接类型、样式及本 Markdown。
+
+### 2026-08-27：可安装的纯本地正式发布包
+
+- 原安装版问题：开发目录旁已有 `data-next`，但 NSIS 安装到新电脑后只有程序文件，没有可用于首次启动的数据库；同时系统安装目录通常不适合直接写业务数据库，因此可能出现 EXE 存在但启动失败。
+- 本地数据架构：正式安装版内嵌不含用户数据和密钥的空白 SQLite 模板。首次启动自动复制到 `%LOCALAPPDATA%\com.ozonanalytics.desktop\data-next`；之后店铺、库存、成本、飞书映射、批次结算和设置均保存在本机。Ozon/飞书/WB 功能仅在用户主动同步时访问平台官方 API，不依赖自建云端服务器。
+- 隐私：空白模板经检查 `settings=0`、`products=0`，不包含开发数据库、店铺数据、API 凭证或业务记录；敏感配置继续由 Windows DPAPI 加密。
+- 发布物：NSIS 安装包、带空白资源模板的便携 ZIP、排除 `data/`、`data-next/`、构建缓存、用户数据库和密钥的源码 ZIP。
+- 验收：在项目目录之外启动便携版，进程正常响应并成功创建本地 `data-next/shops.json` 和 `ozon_next_default.db`；本地初始化回归测试加入 Rust 测试集，全库测试 26/26 通过，前端正式构建通过。
+
+### 2026-08-27：竞品采集收敛为主图与看板图片适配
+
+- 采集口径：竞品跟踪完成条件改为商品身份校验通过且取得主图；不再要求完整图库，也不会仅因缺少第二张图片或图库轨道证据进入专用浏览器。售价和公开销量存在时仍可作为辅助快照保存，但不再阻塞主图任务完成。
+- 浏览器回退：直连页面只有在缺少可验证主图时才进入专用 Chrome/Edge；减少无必要的页面加载、验证等待和采集失败面。
+- 看板显示：竞品卡片主图区域从 88px 提升到 180px，图片统一填满卡片并居中裁切，避免不同宽高比导致卡片高度跳动或主图过小。
+- 修改模块/文件：`desktop-next/src-tauri/src/lib.rs`、`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/phase2.css`、本 Markdown。
+
+### 2026-08-27：月度盈亏已核算销量口径修复与重新安装
+
+- 问题定位：2026 年 7 月月度盈亏显示“已核算销量 1112 件”，原因不是 Finance 只有一千余件，而是 `delivery_events` 仅覆盖 7 月 26–31 日的部分迁移历史。旧查询对每个 SKU 优先使用 Posting 妥投数，只要该 SKU 存在一条 Posting 记录，就会丢弃该 SKU 更完整的 Finance 已交付记录，最终得到 `840 + 272 = 1112` 的混合欠计结果。
+- 修复口径：月度 Finance 盈亏以 `finance_transactions` 中 `OperationAgentDeliveredToCustomer` 的去重 operation ID 作为每个 SKU 的已交付数量；仅当该 SKU 完全没有可归属的 Finance 已交付记录时，才回退 `delivery_events`。缺成本 SKU 检查使用同一口径，避免报表和缺成本窗口再次不一致。
+- 当前数据复核：本土店 2026 年 7 月 Finance 已交付为 5902 件；修复后已核算销量应由 1112 件恢复为 5902 件。按当前成本与汇率缓存，采购成本约为 ₽1,757,698.60、头程约为 ₽559,164.00，税前利润估算约为 ₽1,029,043.25；最终页面结果仍以当前数据库重新计算为准。
+- 缓存：月度报表指纹升级为 `finance-v6-finance-delivered-first`，旧的错误报表缓存会自动失效，无需删除业务数据。
+- 界面说明：已核算销量详情明确标注“Finance 已交付优先；无记录时回退 Posting 妥投”。
+- 测试：`cargo check --locked` 通过；新增 Finance 优先/Posting 回退 SQL 回归测试 1/1 通过；`pnpm build` 通过。`cargo fmt --check` 仍报告 `lib.rs` 中既有的大量全文件格式差异，本次未批量格式化，以免改写无关用户源码。
+- 构建与安装：已使用强制入口 `desktop-next/scripts/build-tauri-release.cmd` 构建正式 EXE，并额外生成 NSIS 安装包。根目录 EXE 与正式 Release 产物 SHA-256 均为 `864FE1C44181BDC7047373C7BEA7AC59B91577AD5862017F07E65FEB89044E4A`；安装包 SHA-256 为 `424564A831B6E4FB69DEB51C9D40B0E87817A3A4F077FDE6981DEE27D7B381B1`。NSIS 已静默安装成功，开始菜单入口指向 `D:\Users\wufeifan\AppData\Local\Ozon Analytics\ozon-analytics-next.exe`。
+- 验收：已安装程序成功启动并出现标题为“Оzon ERP”的本地窗口，说明没有停留在 `localhost` 拒绝连接状态。进一步的可见页面截图检查由用户按 Escape 停止，因此本次记录不声称完成月度盈亏页面的最终人工截图验收。

@@ -24,6 +24,8 @@ import {
   aiAnalysis,
   analyticsDetail,
   bookSupplyTimeslot,
+  supplyClusterPlans,
+  saveSupplyClusterPlan,
   businessReport,
   crossBorderReport,
   calculateListingPrice,
@@ -55,11 +57,10 @@ import {
   missingCostRows,
   notifyShipment,
   pruneCache,
-  refreshCompetitor,
-  refreshCompetitorsDue,
   rerunCompetitorsCollection,
   retryFailedCompetitorsCollection,
   startCompetitorsCollection,
+  startCompetitorCollectionTask,
   stopCompetitorsCollection,
   stopCompetitorCollectionTask,
   setCompetitorManualMetrics,
@@ -75,6 +76,10 @@ import {
   sendFeishuWeekly,
   sendWbWeekly,
   shipmentTracking,
+  shipmentSkuOptions,
+  saveShipmentSkuAllocations,
+  shipmentSettlement,
+  settleShipment,
   supplyOrders,
   supplyTimeslots,
   syncFbsOrders,
@@ -119,7 +124,11 @@ import type {
   ListingSettings,
   MissingCostRow,
   ShipmentTracking,
+  ShipmentSkuAllocation,
+  ShipmentSkuOption,
+  ShipmentSettlementItem,
   SupplyOrder,
+  SupplyClusterPlan,
   SupplyTimeslot,
   SyncLog,
   WarehouseMapping,
@@ -1261,16 +1270,7 @@ export function CompetitorsPage() {
     setSelected((old) => (old.length ? old : data.map((x) => x.id)));
   };
   useEffect(() => {
-    const run = () =>
-      void refreshCompetitorsDue()
-        .catch((e) => {
-          setError(`自动采集失败：${String(e)}`);
-          return 0;
-        })
-        .then(load);
-    run();
-    const timer = window.setInterval(run, 60 * 60 * 1000);
-    return () => window.clearInterval(timer);
+    void load().catch((e) => setError(`无法读取竞品任务：${String(e)}`));
   }, []);
   useEffect(() => {
     const poll = async () => {
@@ -1300,16 +1300,13 @@ export function CompetitorsPage() {
       setBusy(false);
     }
   };
-  const refresh = async (id: number) => {
-    setBusy(true);
+  const startOne = async (id: number) => {
     setError("");
     try {
-      await refreshCompetitor(id);
-      await load();
+      await startCompetitorCollectionTask(id);
+      setCollection(await competitorCollectionProgress());
     } catch (e) {
       setError(String(e));
-    } finally {
-      setBusy(false);
     }
   };
   const refreshAll = async () => {
@@ -1419,7 +1416,7 @@ export function CompetitorsPage() {
         <div>
           <span className="eyebrow">COMPETITOR INTELLIGENCE</span>
           <h1>竞品跟踪</h1>
-          <p>每日价格、可验证销量快照与多竞品动态对比</p>
+          <p>采集并展示竞品主图；售价和公开销量仅作为可选辅助信息</p>
         </div>
       </header>
       <div className="competitor-add">
@@ -1430,7 +1427,7 @@ export function CompetitorsPage() {
         />
         <button className="dark-button" disabled={busy || !url} onClick={add}>
           <Plus size={16} />
-          添加并自动采集
+          添加采集任务
         </button>
       </div>
       {error && (
@@ -1442,9 +1439,9 @@ export function CompetitorsPage() {
       <section className="card migration-note">
         <RefreshCw />
         <div>
-          <h3>自动采集流程</h3>
+          <h3>按任务手动采集</h3>
           <p>
-            软件会先在后台直连采集；如遇 Ozon 验证或字段不完整，会自动打开专用
+            添加任务只保存竞品链接，不会立即采集。点击每张竞品卡片的“开始采集”后，软件采集商品身份和主图；直连缺少主图时才会打开专用
             Edge/Chrome。如页面要求验证，只需在弹出窗口完成验证，之后会自动校验商品、读取数据并入库，无需保存或导入
             HTML。
           </p>
@@ -1793,7 +1790,13 @@ export function CompetitorsPage() {
         </section>
       )}
       <div className="competitor-grid">
-        {rows.map((row) => (
+        {rows.map((row) => {
+          const activeTask = collection?.tasks?.find(
+            (task) =>
+              task.id === row.id &&
+              ["queued", "running", "stopping"].includes(task.status),
+          );
+          return (
           <article
             className={`competitor-card ${selected.includes(row.id) ? "selected" : ""}`}
             key={row.id}
@@ -1963,11 +1966,22 @@ export function CompetitorsPage() {
             )}
             <div className="competitor-actions">
               <button
-                onClick={() => refresh(row.id)}
-                disabled={busy || collection?.running}
+                onClick={async () => {
+                  if (activeTask) {
+                    await stopCompetitorCollectionTask(row.id);
+                    setCollection(await competitorCollectionProgress());
+                  } else {
+                    await startOne(row.id);
+                  }
+                }}
+                disabled={busy || (collection?.running && !activeTask) || activeTask?.status === "stopping"}
               >
                 <RefreshCw size={14} />
-                重新采集
+                {activeTask?.status === "stopping"
+                  ? "停止中"
+                  : activeTask
+                    ? "停止采集"
+                    : "开始采集"}
               </button>
               <button
                 className="remove"
@@ -1980,11 +1994,12 @@ export function CompetitorsPage() {
               </button>
             </div>
           </article>
-        ))}
+          );
+        })}
       </div>
       {!rows.length && (
         <div className="card empty">
-          尚未添加竞品。添加 Ozon 商品链接后，软件会自动获取公开价格与商品图片。
+          尚未添加竞品。添加 Ozon 商品链接后，请在任务卡片中手动开始采集。
         </div>
       )}
       <section className="card migration-note">
@@ -2737,7 +2752,7 @@ export function ReportsPage({
               </button>
               <button
                 onClick={() =>
-                  openMetric("已核算销量", "交付事件与 SKU 成本表", [
+                  openMetric("已核算销量", "Finance 已交付与 SKU 成本表", [
                     [
                       "成本完整",
                       `${data.costedUnits} 件`,
@@ -2751,7 +2766,7 @@ export function ReportsPage({
                     [
                       "交付总量",
                       `${data.costedUnits + data.missingCostUnits} 件`,
-                      "当前月份成本核算口径",
+                      "Finance 已交付优先；无记录时回退 Posting 妥投",
                     ],
                   ])
                 }
@@ -3397,6 +3412,12 @@ export function SupplyPage() {
   const today = new Date().toISOString().slice(0, 10),
     later = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
   const [rows, setRows] = useState<SupplyOrder[]>([]),
+    [plans, setPlans] = useState<SupplyClusterPlan[]>([]),
+    [planQuery, setPlanQuery] = useState(""),
+    [targetDays, setTargetDays] = useState(30),
+    [planDrafts, setPlanDrafts] = useState<Record<string, string>>({}),
+    [chosenPlan, setChosenPlan] = useState<SupplyClusterPlan | null>(null),
+    [supplyMode, setSupplyMode] = useState<"CROSSDOCK" | "DIRECT">("CROSSDOCK"),
     [selected, setSelected] = useState<SupplyOrder | null>(null),
     [slots, setSlots] = useState<SupplyTimeslot[]>([]),
     [from, setFrom] = useState(today),
@@ -3416,9 +3437,19 @@ export function SupplyPage() {
       if (mounted.current) setBusy(false);
     }
   };
+  const loadPlans = async () => {
+    setError("");
+    try {
+      const next = await supplyClusterPlans(targetDays, planQuery);
+      if (mounted.current) setPlans(next);
+    } catch (e) {
+      if (mounted.current) setError(String(e));
+    }
+  };
   useEffect(() => {
     mounted.current = true;
     void load();
+    void loadPlans();
     return () => {
       mounted.current = false;
     };
@@ -3478,6 +3509,49 @@ export function SupplyPage() {
         </div>
       )}
       <div className="supply-layout">
+        <section className="card table-card" style={{ gridColumn: "1 / -1" }}>
+          <div className="card-title">
+            从库存集群生成约仓计划
+            <span>库存管理中保存的配送量会在这里直接作为计划数量</span>
+          </div>
+          <div className="inventory-toolbar">
+            <input value={planQuery} onChange={(e) => setPlanQuery(e.target.value)} placeholder="搜索 SKU、货号、商品或集群" />
+            <label>目标天数 <input type="number" min="1" max="365" value={targetDays} onChange={(e) => setTargetDays(Math.max(1, Number(e.target.value) || 1))} /></label>
+            <button className="outline-button" onClick={() => void loadPlans()}>读取集群计划</button>
+          </div>
+          <table>
+            <thead><tr><th>SKU / 商品</th><th>配送集群</th><th>可售 / 在途 / 已申请</th><th>日均销量</th><th>建议量</th><th>约仓数量</th><th>操作</th></tr></thead>
+            <tbody>{plans.map((plan) => {
+              const key = `${plan.sku}|${plan.macrolocalClusterId}`;
+              const draft = planDrafts[key] ?? String(plan.plannedQty);
+              return <tr key={key} className={chosenPlan && `${chosenPlan.sku}|${chosenPlan.macrolocalClusterId}` === key ? "row-selected" : ""}>
+                <td><b>{plan.offerId || plan.sku}</b><small>{plan.productName} · SKU {plan.sku}</small></td>
+                <td><b>{plan.clusterName}</b><small>{plan.macrolocalClusterId}</small></td>
+                <td>{plan.availableStock} / {plan.transitStock} / {plan.requestedStock}</td>
+                <td>{plan.dailySales.toFixed(1)}</td><td>{plan.recommendedQty}</td>
+                <td><input type="number" min="0" value={draft} onChange={(e) => setPlanDrafts((old) => ({ ...old, [key]: e.target.value }))} /></td>
+                <td><button className="outline-button" onClick={async () => {
+                  const quantity = Number(draft);
+                  if (!Number.isInteger(quantity) || quantity < 0) { setError("约仓数量必须是大于或等于 0 的整数"); return; }
+                  await saveSupplyClusterPlan(plan.sku, plan.macrolocalClusterId, quantity, targetDays);
+                  const saved = { ...plan, plannedQty: quantity, targetDays, planSaved: true };
+                  setChosenPlan(saved); await loadPlans();
+                }}>{plan.planSaved ? "保存并选择" : "采用并选择"}</button></td>
+              </tr>;
+            })}</tbody>
+          </table>
+          {!plans.length && <div className="empty">库存同步后，可按 SKU 与配送集群选择约仓数量。</div>}
+          {chosenPlan && <div className="migration-note">
+            <Truck />
+            <div><h3>已选：{chosenPlan.offerId || chosenPlan.sku} → {chosenPlan.clusterName}，{chosenPlan.plannedQty} 件</h3>
+              <p>{supplyMode === "CROSSDOCK" ? "越库 CROSSDOCK：必须选择 Ozon 发货点，货物先送往越库点，再由平台转运到目的仓。" : "直送 DIRECT：直接送达系统计算出的目的仓，不选择越库发货点。"}</p>
+            </div>
+            <div className="sales-period-switch" role="group" aria-label="约仓模式">
+              <button className={supplyMode === "CROSSDOCK" ? "active" : ""} onClick={() => setSupplyMode("CROSSDOCK")}>越库</button>
+              <button className={supplyMode === "DIRECT" ? "active" : ""} onClick={() => setSupplyMode("DIRECT")}>直送</button>
+            </div>
+          </div>}
+        </section>
         <section className="card table-card">
           <table>
             <thead>
@@ -3909,10 +3983,71 @@ export function SyncPage({ range }: { range: DateRange }) {
   );
 }
 
+const matchesShipmentSettlement=(shipment:ShipmentTracking)=>["已送仓","已申请"].includes(shipment.cargoStatus.trim());
+
+function ShipmentSkuEditor({ shipment, close, saved }: { shipment: ShipmentTracking; close: () => void; saved: () => void }) {
+  const [options, setOptions] = useState<ShipmentSkuOption[]>([]);
+  const [rows, setRows] = useState<ShipmentSkuAllocation[]>(shipment.skuAllocations.length ? shipment.skuAllocations : [{ sku: "", quantity: 1 }]);
+  const [query, setQuery] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { void shipmentSkuOptions(query).then(setOptions); }, [query]);
+  const total = rows.reduce((sum, row) => sum + (Number(row.quantity) || 0), 0);
+  return <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
+    <div className="cost-modal shipment-sku-modal">
+      <button className="modal-close" onClick={close}>×</button>
+      <h2>配置批次 SKU</h2>
+      <p><b>{shipment.trackingId}</b> · {shipment.productName || "未命名批次"} · 批次总数 {shipment.quantity} 件</p>
+      <label>搜索 SKU / 货号 / 商品名<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="例如 GJYB001" /></label>
+      <div className="shipment-sku-rows">
+        {rows.map((row, index) => <div className="shipment-sku-row" key={`${index}-${row.sku}`}>
+          <select value={row.sku} onChange={(e) => setRows(rows.map((item, i) => i === index ? { ...item, sku: e.target.value } : item))}>
+            <option value="">请选择产品 SKU</option>
+            {options.map((option) => <option key={option.sku} value={option.sku}>{option.offerId || option.sku} · {option.sku} · {option.name}</option>)}
+            {row.sku && !options.some((option) => option.sku === row.sku) && <option value={row.sku}>{row.sku}</option>}
+          </select>
+          <input type="number" min="1" step="1" value={row.quantity} onChange={(e) => setRows(rows.map((item, i) => i === index ? { ...item, quantity: Number(e.target.value) } : item))} />
+          <button className="outline-button" onClick={() => setRows(rows.filter((_, i) => i !== index))}><Trash2 size={14} />删除</button>
+        </div>)}
+      </div>
+      <button className="outline-button" onClick={() => setRows([...rows, { sku: "", quantity: 1 }])}><Plus size={14} />添加 SKU</button>
+      <p className={total > shipment.quantity ? "missing-cost" : ""}>已分配 {total} / {shipment.quantity} 件；未分配 {Math.max(0, shipment.quantity - total)} 件</p>
+      <div className="modal-actions">
+        <button className="dark-button" disabled={busy || total > shipment.quantity || rows.some((row) => !row.sku || row.quantity <= 0)} onClick={async () => {
+          setBusy(true);
+          try { await saveShipmentSkuAllocations(shipment.trackingId, rows); saved(); }
+          catch (e) { window.alert(`保存失败：${String(e)}`); }
+          finally { setBusy(false); }
+        }}>{busy ? "保存中…" : "保存 SKU 明细"}</button>
+        <button className="outline-button" onClick={close}>取消</button>
+      </div>
+    </div>
+  </div>;
+}
+
+function ShipmentSettlementEditor({ shipment, close, saved }: { shipment: ShipmentTracking; close: () => void; saved: () => void }) {
+  const [items,setItems]=useState<ShipmentSettlementItem[]>([]),[busy,setBusy]=useState(false),[error,setError]=useState("");
+  useEffect(()=>{void shipmentSettlement(shipment.trackingId).then(setItems).catch((e)=>setError(String(e)));},[shipment.trackingId]);
+  const setValue=(index:number,key:keyof ShipmentSettlementItem,value:string)=>setItems(items.map((item,i)=>i===index?{...item,[key]:key==="note"?value:Math.max(0,Number(value)||0)}:item));
+  return <div className="modal-backdrop"><div className="cost-modal shipment-sku-modal"><button className="modal-close" onClick={close}>×</button>
+    <h2>审核批次交货并完结</h2><p><b>{shipment.trackingId}</b> · 飞书状态 {shipment.cargoStatus}。Ozon“已申请”为当前 SKU 汇总，仅供核对，请填写本批次实际去向。</p>
+    {error&&<div className="sync-message">{error}</div>}
+    <div className="settlement-grid settlement-head"><b>SKU / 批次数</b><b>当前已申请</b><b>本批次 FBO</b><b>转入 FBS</b><b>海外仓留存</b><b>短少/损耗</b><b>其他</b><b>备注</b></div>
+    {items.map((item,index)=>{const total=item.fboQuantity+item.fbsQuantity+item.overseasRemainingQuantity+item.lossQuantity+item.otherQuantity;return <div className="settlement-grid" key={item.sku}>
+      <span><b>{item.sku}</b><small>{item.batchQuantity} 件</small></span><span>{item.requestedStock}</span>
+      {(["fboQuantity","fbsQuantity","overseasRemainingQuantity","lossQuantity","otherQuantity"] as const).map((key)=><input key={key} type="number" min="0" step="1" value={item[key]} onChange={(e)=>setValue(index,key,e.target.value)}/>)}
+      <input value={item.note} onChange={(e)=>setValue(index,"note",e.target.value)} placeholder="差异原因"/>
+      <small className={total===item.batchQuantity?"":"missing-cost"}>已处置 {total}/{item.batchQuantity}</small>
+    </div>})}
+    <div className="modal-actions"><button className="dark-button" disabled={busy||!items.length||items.some((x)=>x.fboQuantity+x.fbsQuantity+x.overseasRemainingQuantity+x.lossQuantity+x.otherQuantity!==x.batchQuantity)} onClick={async()=>{setBusy(true);try{await settleShipment(shipment.trackingId,items);saved();}catch(e){setError(String(e));}finally{setBusy(false);}}}>{busy?"确认中…":"确认平衡并完结批次"}</button><button className="outline-button" onClick={close}>取消</button></div>
+  </div></div>;
+}
+
 export function FeishuPage({ range }: { range: DateRange }) {
   const [busy, setBusy] = useState(""),
     [result, setResult] = useState(""),
-    [shipments, setShipments] = useState<ShipmentTracking[]>([]);
+    [shipments, setShipments] = useState<ShipmentTracking[]>([]),
+    [editingShipment, setEditingShipment] = useState<ShipmentTracking | null>(null),
+    [settlingShipment, setSettlingShipment] = useState<ShipmentTracking | null>(null);
   const loadShipments = async () => setShipments(await shipmentTracking());
   useEffect(() => {
     void loadShipments();
@@ -3995,6 +4130,8 @@ export function FeishuPage({ range }: { range: DateRange }) {
         </section>
       </div>
       {result && <div className="sync-message">{result}</div>}
+      {editingShipment && <ShipmentSkuEditor shipment={editingShipment} close={() => setEditingShipment(null)} saved={() => { setEditingShipment(null); void loadShipments(); }} />}
+      {settlingShipment && <ShipmentSettlementEditor shipment={settlingShipment} close={() => setSettlingShipment(null)} saved={() => { setSettlingShipment(null); void loadShipments(); }} />}
       <section className="card table-card shipment-card">
         <div className="card-title">
           发货跟踪{" "}
@@ -4023,6 +4160,7 @@ export function FeishuPage({ range }: { range: DateRange }) {
               <th>国内到库</th>
               <th>国外到库</th>
               <th>通知</th>
+              <th>SKU 明细</th>
             </tr>
           </thead>
           <tbody>
@@ -4063,6 +4201,13 @@ export function FeishuPage({ range }: { range: DateRange }) {
                       {row.notifiedForeignArrival ? "已通知" : "待到库"}
                     </span>
                   )}
+                </td>
+                <td>
+                  <button className="outline-button" onClick={() => setEditingShipment(row)}>
+                    <PackageSearch size={14} />{row.skuAllocations.length ? `${row.skuAllocations.length} 个 SKU` : "配置 SKU"}
+                  </button>
+                  {!!row.skuAllocations.length && <small>{row.skuAllocations.map((item) => `${item.sku} × ${item.quantity}`).join("；")}</small>}
+                  {matchesShipmentSettlement(row) && <button className={row.settlementCompleted?"outline-button":"dark-button"} disabled={row.settlementCompleted} onClick={()=>setSettlingShipment(row)}>{row.settlementCompleted?"批次已完结":"审核差额并完结"}</button>}
                 </td>
               </tr>
             ))}

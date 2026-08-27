@@ -3,6 +3,9 @@ __pycache__/
 .pytest_cache/
 node_modules/
 .pnpm-store/
+.collector-build/
+.collector-build-deps/
+.collector-python-user/
 desktop-next/src-tauri/target/
 desktop-next/src-tauri/target-*/
 data/

@@ -5,5 +5,5 @@
   "identifier": "com.ozonanalytics.desktop",
   "build": { "beforeDevCommand": "pnpm dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "scripts\\build-frontend.cmd", "frontendDist": "../dist" },
   "app": { "windows": [{ "title": "Ozon ERP", "width": 1500, "height": 920, "minWidth": 1180, "minHeight": 720, "resizable": true }], "security": { "csp": null } },
-  "bundle": { "active": true, "targets": "all", "icon": ["../../app_icon.ico"] }
+  "bundle": { "active": true, "targets": "all", "icon": ["../../app_icon.ico"], "resources": ["resources/data-next-template"] }
 }

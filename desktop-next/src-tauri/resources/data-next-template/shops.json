@@ -1,0 +1,12 @@
+{
+  "active_shop_id": "default",
+  "shops": [
+    {
+      "id": "default",
+      "name": "默认本土店",
+      "kind": "local",
+      "database_file": "ozon_next_default.db",
+      "api_name": ""
+    }
+  ]
+}

@@ -31,8 +31,12 @@ import type {
   ProductDetail,
   ProductRow,
   ShipmentTracking,
+  ShipmentSkuAllocation,
+  ShipmentSkuOption,
+  ShipmentSettlementItem,
   Shop,
   SupplyOrder,
+  SupplyClusterPlan,
   SupplyTimeslot,
   SyncLog,
   SyncAllResult,
@@ -311,6 +315,9 @@ export async function refreshCompetitorsAll(): Promise<number> {
 export async function startCompetitorsCollection(): Promise<void> {
   return invoke("start_competitors_collection");
 }
+export async function startCompetitorCollectionTask(id: number): Promise<void> {
+  return invoke("start_competitor_collection_task", { id });
+}
 export async function competitorAlertSettings(): Promise<CompetitorAlertSettings> {
   return invoke("competitor_alert_settings");
 }
@@ -457,6 +464,12 @@ export async function aiAnalysis(
 export async function supplyOrders(): Promise<SupplyOrder[]> {
   return isTauri() ? invoke("supply_orders") : [];
 }
+export async function supplyClusterPlans(targetDays: number, query: string): Promise<SupplyClusterPlan[]> {
+  return isTauri() ? invoke("supply_cluster_plans", { targetDays, query }) : [];
+}
+export async function saveSupplyClusterPlan(sku: string, macrolocalClusterId: string, plannedQty: number, targetDays: number): Promise<void> {
+  await invoke("save_supply_cluster_plan", { sku, macrolocalClusterId, plannedQty, targetDays });
+}
 export async function supplyTimeslots(
   orderId: number,
   dateFrom: string,
@@ -507,6 +520,18 @@ export async function sendFeishuWeekly(range: DateRange): Promise<string> {
 }
 export async function shipmentTracking(): Promise<ShipmentTracking[]> {
   return invoke("shipment_tracking");
+}
+export async function shipmentSkuOptions(query = ""): Promise<ShipmentSkuOption[]> {
+  return invoke("shipment_sku_options", { query });
+}
+export async function saveShipmentSkuAllocations(trackingId: string, allocations: ShipmentSkuAllocation[]): Promise<void> {
+  return invoke("save_shipment_sku_allocations", { trackingId, allocations });
+}
+export async function shipmentSettlement(trackingId: string): Promise<ShipmentSettlementItem[]> {
+  return invoke("shipment_settlement", { trackingId });
+}
+export async function settleShipment(trackingId: string, items: ShipmentSettlementItem[]): Promise<void> {
+  return invoke("settle_shipment", { trackingId, items });
 }
 export async function syncFeishuShipments(): Promise<number> {
   return invoke("sync_feishu_shipments");
