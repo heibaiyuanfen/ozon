@@ -144,6 +144,23 @@ function currentMonthRange(): DateRange {
     from = new Date(to.getFullYear(), to.getMonth(), 1);
   return { from: iso(from), to: iso(to) };
 }
+function calendarMonthRange(offset: number): DateRange {
+  const today = new Date(),
+    from = new Date(today.getFullYear(), today.getMonth() - offset, 1),
+    monthEnd = new Date(today.getFullYear(), today.getMonth() - offset + 1, 0),
+    to = offset === 0 ? today : monthEnd;
+  return { from: iso(from), to: iso(to) };
+}
+function recentMonthChoices() {
+  const today = new Date();
+  return [0, 1, 2].map((offset) => {
+    const date = new Date(today.getFullYear(), today.getMonth() - offset, 1);
+    return {
+      offset,
+      label: `${date.getFullYear()}年${date.getMonth() + 1}月`,
+    };
+  });
+}
 function money(value: number, currency: string) {
   return `${currency === "CNY" ? "¥" : "₽"}${value.toLocaleString("zh-CN", { minimumFractionDigits: value % 1 ? 1 : 0, maximumFractionDigits: 2 })}`;
 }
@@ -318,9 +335,13 @@ function Header({
 function RangeTabs({
   days,
   setDays,
+  monthOffset,
+  setMonthOffset,
 }: {
   days: number;
   setDays: (days: number) => void;
+  monthOffset?: number | null;
+  setMonthOffset?: (offset: number | null) => void;
 }) {
   return (
     <div className="range-row">
@@ -331,17 +352,30 @@ function RangeTabs({
           [90, "本季度"],
         ].map(([value, label]) => (
           <button
-            className={days === value ? "selected" : ""}
-            onClick={() => setDays(value as number)}
+            className={monthOffset == null && days === value ? "selected" : ""}
+            onClick={() => {
+              setMonthOffset?.(null);
+              setDays(value as number);
+            }}
             key={value}
           >
             {label}
           </button>
         ))}
+        {setMonthOffset &&
+          recentMonthChoices().map((choice) => (
+            <button
+              className={monthOffset === choice.offset ? "selected" : ""}
+              onClick={() => setMonthOffset(choice.offset)}
+              key={`month-${choice.offset}`}
+            >
+              {choice.label}
+            </button>
+          ))}
       </div>
       <div className="date-pill">
         <CalendarDays size={16} />
-        最近 {days} 天
+        {monthOffset == null ? `最近 ${days} 天` : `${calendarMonthRange(monthOffset).from} 至 ${calendarMonthRange(monthOffset).to}`}
       </div>
     </div>
   );
@@ -448,6 +482,8 @@ function Dashboard({
   currency,
   days,
   setDays,
+  monthOffset,
+  setMonthOffset,
   refreshing,
   refresh,
   range,
@@ -457,6 +493,8 @@ function Dashboard({
   currency: string;
   days: number;
   setDays: (n: number) => void;
+  monthOffset: number | null;
+  setMonthOffset: (offset: number | null) => void;
   refreshing: boolean;
   refresh: () => void;
   range: DateRange;
@@ -612,7 +650,7 @@ function Dashboard({
                 销量
               </button>
             </div>
-            <RangeTabs days={days} setDays={setDays} />
+            <RangeTabs days={days} setDays={setDays} monthOffset={monthOffset} setMonthOffset={setMonthOffset} />
           </div>
         </div>
         <div className="metric-strip">
@@ -1188,6 +1226,7 @@ export function App() {
     [wbPage, setWbPage] = useState<"daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings">("daily"),
     [shops, setShops] = useState<Shop[]>([]),
     [days, setDays] = useState(7),
+    [dashboardMonthOffset, setDashboardMonthOffset] = useState<number | null>(null),
     [dash, setDash] = useState(emptyDashboard),
     [orderRows, setOrderRows] = useState<OrderRow[]>([]),
     [ads, setAds] = useState(emptyAds),
@@ -1201,7 +1240,10 @@ export function App() {
     [safetyDays, setSafetyDays] = useState(7);
   const activeShop = shops.find((s) => s.active) ?? shops[0],
     currency = activeShop?.kind === "cross_border" ? "CNY" : "RUB",
-    range = useMemo(() => rangeFor(days), [days]),
+    range = useMemo(
+      () => dashboardMonthOffset == null ? rangeFor(days) : calendarMonthRange(dashboardMonthOffset),
+      [days, dashboardMonthOffset],
+    ),
     monthRange = useMemo(currentMonthRange, []),
     deferredQuery = useDeferredValue(query);
   const load = async () => {
@@ -1266,6 +1308,8 @@ export function App() {
                 currency={currency}
                 days={days}
                 setDays={setDays}
+                monthOffset={dashboardMonthOffset}
+                setMonthOffset={setDashboardMonthOffset}
                 refreshing={refreshing}
                 refresh={load}
                 range={range}

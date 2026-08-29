@@ -1025,6 +1025,12 @@
 .month-toolbar button {
   cursor: pointer;
 }
+.month-toolbar button.selected {
+  color: #fff;
+  background: #3478f6;
+  border-color: #3478f6;
+  box-shadow: 0 4px 10px rgba(52, 120, 246, 0.22);
+}
 .month-toolbar button:disabled {
   opacity: 0.55;
 }

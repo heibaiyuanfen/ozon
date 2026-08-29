@@ -981,6 +981,23 @@ fn initialize_extensions(c: &Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    // Seller Analytics is a valid product source even when the optional
+    // catalog endpoint returns no metadata or the token lacks catalog access.
+    // Backfill both existing databases and newly synchronized shops so the
+    // product center never stays empty while sales_daily already has SKUs.
+    if setting(c, "seller_product_backfill_version") != "1" {
+        c.execute(
+            "INSERT INTO products(sku,name,source,updated_at)
+             SELECT s.sku,COALESCE(MAX(NULLIF(s.product_name,'')),''),'seller_analytics',CURRENT_TIMESTAMP
+             FROM sales_daily s WHERE s.sku<>'' GROUP BY s.sku
+             ON CONFLICT(sku) DO UPDATE SET
+               name=CASE WHEN products.name='' AND excluded.name<>'' THEN excluded.name ELSE products.name END,
+               updated_at=CASE WHEN products.source='seller_analytics' THEN CURRENT_TIMESTAMP ELSE products.updated_at END",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        save_setting(c, "seller_product_backfill_version", "1")?;
+    }
     Ok(())
 }
 fn active_shop_database_path(state: &AppState) -> Result<PathBuf, String> {
@@ -1074,6 +1091,13 @@ fn rub_per_cny_for(state: &AppState, c: &Connection) -> Result<f64, String> {
         } else {
             11.5
         }))
+}
+fn display_amount(value_rub: f64, cross_border: bool, rub_per_cny: f64) -> f64 {
+    if cross_border && rub_per_cny > 0.0 {
+        value_rub / rub_per_cny
+    } else {
+        value_rub
+    }
 }
 fn save_setting(c: &Connection, key: &str, value: &str) -> Result<(), String> {
     c.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,value]).map_err(|e|e.to_string())?;
@@ -1515,6 +1539,8 @@ fn delete_shop(
 #[tauri::command]
 fn dashboard(range: DateRange, state: State<AppState>) -> Result<DashboardData, String> {
     let c = db(&state)?;
+    let cross_border = active_shop_kind(&state)? == "cross_border";
+    let rate = rub_per_cny_for(&state, &c)?;
     let (revenue,orders,views):(f64,i64,i64)=c.query_row("SELECT COALESCE(SUM(revenue),0),COALESCE(SUM(ordered_units),0),COALESCE(SUM(views),0) FROM sales_daily WHERE day BETWEEN ?1 AND ?2",params![range.from,range.to],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|e.to_string())?;
     let return_units: i64 = c.query_row("SELECT CASE WHEN EXISTS(SELECT 1 FROM return_events WHERE day BETWEEN ?1 AND ?2) THEN COALESCE((SELECT SUM(quantity) FROM return_events WHERE day BETWEEN ?1 AND ?2),0) ELSE COALESCE((SELECT SUM(returns) FROM sales_daily WHERE day BETWEEN ?1 AND ?2),0) END",params![range.from,range.to],|r|r.get(0)).map_err(|e|e.to_string())?;
     let cancellation_units: i64 = c.query_row("SELECT CASE WHEN EXISTS(SELECT 1 FROM cancellation_events WHERE day BETWEEN ?1 AND ?2) THEN COALESCE((SELECT SUM(quantity) FROM cancellation_events WHERE day BETWEEN ?1 AND ?2),0) ELSE COALESCE((SELECT SUM(cancellations) FROM sales_daily WHERE day BETWEEN ?1 AND ?2),0) END",params![range.from,range.to],|r|r.get(0)).map_err(|e|e.to_string())?;
@@ -1524,7 +1550,7 @@ fn dashboard(range: DateRange, state: State<AppState>) -> Result<DashboardData, 
         .map_err(|e| e.to_string())?;
     let (ad_spend,ad_revenue,ad_orders,clicks,impressions):(f64,f64,i64,i64,i64)=c.query_row("WITH x AS(SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT COALESCE(SUM(spend),0),COALESCE(SUM(revenue),0),COALESCE(SUM(orders),0),COALESCE(SUM(clicks),0),COALESCE(SUM(impressions),0)FROM x,m WHERE (m.store=1 AND x.sku='')OR(m.store=0 AND x.sku<>'')",params![range.from,range.to],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(|e|e.to_string())?;
     let mut stmt=c.prepare("SELECT s.day,COALESCE(SUM(s.revenue),0),COALESCE(SUM(s.ordered_units),0),COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM ad_daily z WHERE z.day=s.day AND z.sku='') THEN SUM(CASE WHEN a.sku='' THEN a.spend ELSE 0 END) ELSE SUM(CASE WHEN a.sku<>'' THEN a.spend ELSE 0 END) END FROM ad_daily a WHERE a.day=s.day),0) FROM sales_daily s WHERE s.day BETWEEN ?1 AND ?2 GROUP BY s.day ORDER BY s.day").map_err(|e|e.to_string())?;
-    let trend = stmt
+    let mut trend = stmt
         .query_map(params![range.from, range.to], |r| {
             Ok(TrendRow {
                 day: r.get(0)?,
@@ -1536,6 +1562,12 @@ fn dashboard(range: DateRange, state: State<AppState>) -> Result<DashboardData, 
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    if cross_border {
+        for row in &mut trend {
+            row.revenue = display_amount(row.revenue, true, rate);
+            row.ad_spend = display_amount(row.ad_spend, true, rate);
+        }
+    }
     let last_sync = c
         .query_row(
             "SELECT finished_at FROM sync_logs WHERE status='success' ORDER BY id DESC LIMIT 1",
@@ -1544,12 +1576,12 @@ fn dashboard(range: DateRange, state: State<AppState>) -> Result<DashboardData, 
         )
         .ok();
     Ok(DashboardData {
-        revenue,
+        revenue: display_amount(revenue, cross_border, rate),
         orders,
         sold_units,
         active_products,
-        ad_spend,
-        ad_revenue,
+        ad_spend: display_amount(ad_spend, cross_border, rate),
+        ad_revenue: display_amount(ad_revenue, cross_border, rate),
         ad_orders,
         conversion_rate: if clicks > 0 {
             Some(ad_orders as f64 / clicks as f64 * 100.0)
@@ -1602,6 +1634,7 @@ fn orders(
 ) -> Result<Vec<OrderRow>, String> {
     let c = db(&state)?;
     let cross_border = active_shop_kind(&state)? == "cross_border";
+    let rate = rub_per_cny_for(&state, &c)?;
     let needle = format!("%{}%", query.trim());
     let mut stmt = c.prepare(
         "SELECT r.event_id,r.posting_number,r.sku,r.offer_id,r.product_name,r.quantity,r.scheme,r.status,r.order_price,r.day,r.updated_at,r.origin,r.destination,COALESCE(p.image_url,'')
@@ -1686,12 +1719,12 @@ fn orders(
                     quantity,
                     scheme: display_scheme,
                     status,
-                    amount,
+                    amount: display_amount(amount, cross_border, rate),
                     created_at,
                     updated_at,
                     origin,
                     destination,
-                    estimated_delivery: fee,
+                    estimated_delivery: fee.map(|value| display_amount(value, cross_border, rate)),
                     estimate_basis: basis,
                     image_url,
                 }
@@ -1704,6 +1737,8 @@ fn orders(
 #[tauri::command]
 fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingData, String> {
     let c = db(&state)?;
+    let cross_border = active_shop_kind(&state)? == "cross_border";
+    let rate = rub_per_cny_for(&state, &c)?;
     let (impressions,clicks,cart_adds,orders,revenue,spend):(i64,i64,i64,i64,f64,f64)=c.query_row("WITH x AS(SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT COALESCE(SUM(impressions),0),COALESCE(SUM(clicks),0),COALESCE(SUM(cart_adds),0),COALESCE(SUM(orders),0),COALESCE(SUM(revenue),0),COALESCE(SUM(spend),0)FROM x,m WHERE (m.store=1 AND x.sku='')OR(m.store=0 AND x.sku<>'')",params![range.from,range.to],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(|e|e.to_string())?;
     let to_date = chrono::NaiveDate::parse_from_str(&range.to, "%Y-%m-%d")
         .unwrap_or_else(|_| chrono::Local::now().date_naive());
@@ -1712,7 +1747,6 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
         .unwrap_or(to_date)
         .format("%Y-%m-%d")
         .to_string();
-    let rate = rub_per_cny_for(&state, &c)?;
     let (costed_revenue,total_revenue,known_cost):(f64,f64,f64)=c.query_row("SELECT COALESCE(SUM(CASE WHEN pc.sku IS NOT NULL THEN s.revenue ELSE 0 END),0),COALESCE(SUM(s.revenue),0),COALESCE(SUM(CASE WHEN pc.sku IS NOT NULL THEN s.ordered_units*(COALESCE(pc.unit_cost,pc.unit_cost_cny*?3,0)+COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny*?3,0)) ELSE 0 END),0) FROM sales_daily s LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2",params![range.from,range.to,rate],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|e.to_string())?;
     let margin_coverage_percent = if total_revenue > 0.0 {
         costed_revenue / total_revenue * 100.0
@@ -1800,18 +1834,29 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
                 impressions,
                 clicks,
                 orders: campaign_orders,
-                spend,
-                revenue,
+                spend: display_amount(spend, cross_border, rate),
+                revenue: display_amount(revenue, cross_border, rate),
                 roas: campaign_roas,
                 ctr: (impressions > 0).then_some(clicks as f64 / impressions as f64 * 100.0),
-                cpc: (clicks > 0).then_some(spend / clicks as f64),
+                cpc: (clicks > 0).then_some(display_amount(
+                    spend / clicks as f64,
+                    cross_border,
+                    rate,
+                )),
                 conversion_rate: (clicks > 0)
                     .then_some(campaign_orders as f64 / clicks as f64 * 100.0),
-                cpa: (campaign_orders > 0).then_some(spend / campaign_orders as f64),
+                cpa: (campaign_orders > 0).then_some(display_amount(
+                    spend / campaign_orders as f64,
+                    cross_border,
+                    rate,
+                )),
                 acos: campaign_acos,
                 diagnosis_level: diagnosis_level.into(),
                 diagnosis_text: diagnosis_text.into(),
                 recommended_action: recommended_action.into(),
+                // Campaign budgets are editable platform configuration and
+                // remain in Ozon's native RUB unit. Read-only performance
+                // amounts above follow the shop display currency.
                 budget: r.get(9)?,
             })
         })
@@ -1819,7 +1864,7 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     let mut trend_stmt=c.prepare("WITH x AS(SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT a.day,SUM(a.impressions),SUM(a.clicks),SUM(a.orders),SUM(a.spend),SUM(a.revenue)FROM x a CROSS JOIN m WHERE (m.store=1 AND a.sku='')OR(m.store=0 AND a.sku<>'')GROUP BY a.day ORDER BY a.day").map_err(|e|e.to_string())?;
-    let trend = trend_stmt
+    let mut trend = trend_stmt
         .query_map(params![range.from, range.to], |r| {
             Ok(AdvertisingTrendRow {
                 day: r.get(0)?,
@@ -1833,20 +1878,26 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    if cross_border {
+        for row in &mut trend {
+            row.spend = display_amount(row.spend, true, rate);
+            row.revenue = display_amount(row.revenue, true, rate);
+        }
+    }
     Ok(AdvertisingData {
         impressions,
         clicks,
         cart_adds,
         orders,
-        revenue,
-        spend,
+        revenue: display_amount(revenue, cross_border, rate),
+        spend: display_amount(spend, cross_border, rate),
         ctr: if impressions > 0 {
             Some(clicks as f64 / impressions as f64 * 100.0)
         } else {
             None
         },
         cpc: if clicks > 0 {
-            Some(spend / clicks as f64)
+            Some(display_amount(spend / clicks as f64, cross_border, rate))
         } else {
             None
         },
@@ -1856,11 +1907,11 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
             Some(0.0)
         },
         conversion_rate: (clicks > 0).then_some(orders as f64 / clicks as f64 * 100.0),
-        cpa: (orders > 0).then_some(spend / orders as f64),
+        cpa: (orders > 0).then_some(display_amount(spend / orders as f64, cross_border, rate)),
         acos: (revenue > 0.0).then_some(spend / revenue * 100.0),
         break_even_roas,
         target_roas,
-        max_cpa,
+        max_cpa: max_cpa.map(|value| display_amount(value, cross_border, rate)),
         known_cost_margin,
         margin_coverage_percent,
         campaigns,
@@ -6794,6 +6845,7 @@ fn sync_seller_sales_blocking(
             let tx = c.transaction().map_err(|e| e.to_string())?;
             for row in &rows {
                 tx.execute("INSERT INTO sales_daily(day,sku,product_name,revenue,ordered_units,delivered_units,returns,cancellations,views,cart_adds,source)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'api') ON CONFLICT(day,sku) DO UPDATE SET product_name=excluded.product_name,revenue=excluded.revenue,ordered_units=excluded.ordered_units,delivered_units=excluded.delivered_units,returns=excluded.returns,cancellations=excluded.cancellations,views=excluded.views,cart_adds=excluded.cart_adds,source='api',updated_at=CURRENT_TIMESTAMP",params![row.0,row.1,row.2,row.3,row.4,row.5,row.6,row.7,row.8,row.9]).map_err(|e|e.to_string())?;
+                tx.execute("INSERT INTO products(sku,name,source)VALUES(?1,?2,'seller_analytics')ON CONFLICT(sku)DO UPDATE SET name=CASE WHEN products.name='' AND excluded.name<>''THEN excluded.name ELSE products.name END,updated_at=CURRENT_TIMESTAMP",params![row.1,row.2]).map_err(|e|e.to_string())?;
             }
             persisted += page_rows;
             if count < 1000 {
@@ -9046,6 +9098,17 @@ mod monthly_profit_settled_units_tests {
             units, 6,
             "five Finance deliveries plus one posting fallback"
         );
+    }
+}
+
+#[cfg(test)]
+mod cross_border_display_tests {
+    use super::display_amount;
+
+    #[test]
+    fn rub_amounts_are_converted_before_cny_display() {
+        assert!((display_amount(6_075.57, true, 14.0) - 433.969_285_714).abs() < 1e-9);
+        assert_eq!(display_amount(6_075.57, false, 14.0), 6_075.57);
     }
 }
 

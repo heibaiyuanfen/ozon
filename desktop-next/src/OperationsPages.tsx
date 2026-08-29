@@ -2377,6 +2377,21 @@ export function ReportsPage({
   currency: string;
   initialTab?: "summary" | "daily" | "profit" | "series" | "weekly" | "cross";
 }) {
+  const calendarMonth = (offset: number) => {
+      const today = new Date(),
+        fromDate = new Date(today.getFullYear(), today.getMonth() - offset, 1),
+        toDate = offset === 0
+          ? today
+          : new Date(today.getFullYear(), today.getMonth() - offset + 1, 0),
+        format = (date: Date) =>
+          `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      return {
+        key: format(fromDate).slice(0, 7),
+        label: `${fromDate.getFullYear()}年${fromDate.getMonth() + 1}月`,
+        range: { from: format(fromDate), to: format(toDate) },
+      };
+    },
+    recentMonths = [0, 1, 2].map(calendarMonth);
   const latestSunday = (() => {
       const d = new Date();
       d.setDate(d.getDate() - d.getDay());
@@ -2619,6 +2634,15 @@ export function ReportsPage({
           />
           <button onClick={() => shiftMonth(-1)}>上月</button>
           <button onClick={() => shiftMonth(1)}>下月</button>
+          {recentMonths.map((choice) => (
+            <button
+              key={choice.key}
+              className={month === choice.key ? "selected" : ""}
+              onClick={() => setMonth(choice.key)}
+            >
+              {choice.label}
+            </button>
+          ))}
           <button disabled={!!busy} onClick={() => syncMonth("seller")}>
             同步本月销量
           </button>
@@ -2678,7 +2702,15 @@ export function ReportsPage({
           >
             周利润
           </button>
-          <button onClick={() => setCrossRange(monthRange())}>月利润</button>
+          {recentMonths.map((choice) => (
+            <button
+              key={choice.key}
+              className={crossRange.from === choice.range.from && crossRange.to === choice.range.to ? "selected" : ""}
+              onClick={() => setCrossRange(choice.range)}
+            >
+              {choice.label}
+            </button>
+          ))}
         </div>
       )}
       {message && <div className="sync-message">{message}</div>}

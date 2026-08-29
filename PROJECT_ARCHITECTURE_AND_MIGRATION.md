@@ -896,3 +896,30 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 官方接口核对：隐藏/屏蔽商品可由 Seller Analytics `banned-products/blocked` 与 `banned-products/shadowed` 获取；扣款可由 `deductions`、`antifraud-details`、`goods-labeling` 获取；退货移动可由 `goods-return` 获取。上述接口需要 Analytics 权限并受独立限流约束，本节点只建立可见报告映射，尚未在普通“同步 WB API”中自动请求，避免一次经营同步触发低频报告接口限流。
 - 修改文件：`desktop-next/src/App.tsx`、`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/analytics.css`、本 Markdown。
 - 验证：`pnpm build` 通过；正式 Tauri Release 与 NSIS 安装包构建通过。经过 NSIS bundle 标记后的 Release 与根目录 `ozon-analytics-next.exe` 均为 26,383,872 字节，SHA-256 `FB1D3E355CCA0F1B673E3CF06B6154276425E14F9F8DC06606E22FE51ED2D042`；安装包 `Ozon Analytics_1.0.0_x64-setup.exe` 为 6,548,010 字节，SHA-256 `4FE2C456179CC88AA8AE76FA15BE8F39872037B78F0D1860A322ED05064E0351`。
+
+### 2026-08-29：GitHub 最新源码同步与正式安装包重建
+
+- 源码同步：本地 `main` 以 fast-forward 从 `da5770c` 更新到 GitHub `origin/main` 的 `2ee5f36`，拉取前工作区干净，无冲突、无本地源码覆盖。
+- 测试：`cargo fmt --check` 与 `cargo check --locked` 通过；Rust 全库 37 项通过、0 失败、1 项真实浏览器测试按设计忽略；竞品 Python 测试 5/5 通过；正式前端通过 `desktop-next/scripts/build-frontend.cmd` 完成 TypeScript 与 Vite 构建。受限沙箱中的 DPAPI 测试首次因系统凭据目录不可访问失败，在真实 Windows 用户上下文复测通过。
+- 正式构建：使用唯一入口 `desktop-next/scripts/build-tauri-release.cmd` 生成内嵌前端的 Release，再使用 `desktop-next/scripts/build-tauri-package.cmd` 生成 NSIS；以 NSIS bundle 标记后的最终 Release 覆盖根目录 `ozon-analytics-next.exe`。
+- 交付物：Release 与根目录 EXE 均为 26,394,624 字节，SHA-256 `BBC33FEA30997788550502990BD6D94016A93FB6D0FD0EE623E429371F645155`；NSIS 安装包为 6,548,257 字节，SHA-256 `D55CE7B14D38DCBB716A3A5DD1AC0A9A32C4D7C77786C4163A8EBB02A3D286A5`，并复制为 `release/Ozon-Analytics-1.0.0-Setup.exe`。
+- 启动验收：根目录 EXE 启动 8 秒未退出，唯一窗口标题为 `Ozon ERP`，进程 `Responding=True`；测试进程随后关闭，避免锁定正式文件。未使用真实 Ozon/WB Token执行远端数据同步，因此本轮验收范围为源码、测试、正式构建、安装包和本地启动。
+
+### 2026-08-29：跨境新店商品回填与 RUB/CNY 展示修复
+
+- 真实数据诊断：安装版“王总一店”独立数据库已经有 10,000 条 Seller Analytics 日数据、228 条 Performance 数据和 3,182 条 Finance 数据，但 `products` 为 0。商品中心从 `products` 起查，因此错误显示无产品；Seller 数据并未丢失。现有销售缓存中共有 314 个不同 SKU，可恢复商品基础记录。
+- 商品修复：每批 Seller Analytics 写入 `sales_daily` 时同步 UPSERT 商品 SKU 与名称；数据库初始化时再从历史 `sales_daily` 幂等回填 `products`，并记录 `seller_product_backfill_version=1`，保证历史扫描只运行一次。因此已同步但商品表为空的现有跨境店无需重新下载数据，下一次选择店铺即可恢复商品中心。目录 API 后续仍可补充货号、图片和商品 ID。
+- 币种根因：前端根据跨境店类型显示 `¥`，但经营总览后端此前直接返回 RUB 原值，形成“只换符号、不换金额”。现在经营总览销售额、客单价、广告花费、广告销售额和趋势，以及订单金额、预估配送费、广告分析金额，统一按当前店铺 `cross_border_rub_per_cny` 在后端由 RUB 除以汇率后返回；销量、订单、CTR、ROAS、ACOS 等无量纲指标不换算。
+- 样本复核：该店汇率为 14 RUB/CNY；最近 7 天原始销售 ₽50,992.00 应显示约 ¥3,642.29，原始广告费 ₽5,258.37 应显示约 ¥375.60，广告归因销售 ₽45,072.00 应显示约 ¥3,219.43。截图中的 ₽6,075.57 按同一汇率应为约 ¥433.97。
+- 修改文件：`desktop-next/src-tauri/src/lib.rs`、本 Markdown。新增跨境金额换算回归测试；Rust 全库 38 项通过、0 失败、1 项真实浏览器测试按设计忽略；`cargo fmt --check`、`cargo check --locked` 和正式前端构建通过。
+- 正式交付：Release 与根目录 EXE 均为 26,388,992 字节，SHA-256 `B143275C161E3BC61BDE260D7154EC2A624ABD905591F30414DF442CC0576109`；NSIS 安装包为 6,549,060 字节，SHA-256 `45ECB65D733566431895A633580A1FEF7A49D3BF1829E7BF2C495BBB6085D4BD`。
+
+### 2026-08-30：经营总览与利润表自然月快捷选择
+
+- 经营总览的趋势周期新增本月、上月和上上月三个快捷自然月，按钮直接显示具体年月，例如当前为 2026 年 8 月时显示 `2026年8月`、`2026年7月`、`2026年6月`。原“最近 7 天 / 最近 30 天 / 本季度”仍保留；选择自然月后，经营卡片与趋势数据统一使用对应起止日期。
+- 月度盈亏在月份输入和上月/下月按钮之外增加相同的三个具体月份按钮；跨境店铺利润也增加相同按钮，替代含义不明确的“月利润”。日利润与周利润仍可使用。
+- 日期口径：本月从当月 1 日统计至今天；已结束月份从 1 日统计至该月最后一天。日期使用本地时区构造，避免 UTC 转换导致月初/月末偏移；跨年时按钮包含年份，不会把同名月份混淆。
+- 修改文件：`desktop-next/src/App.tsx`、`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/phase2.css`、本 Markdown。
+- 验证：TypeScript 类型检查和 Vite 正式构建通过；`cargo fmt --check`、`cargo check --locked` 通过；Rust 全库 38 项通过、0 失败、1 项真实浏览器测试按设计忽略。受限沙箱中的 DPAPI 测试因系统凭据目录不可访问失败，在真实 Windows 用户上下文复测通过。
+- 正式交付：已使用 `desktop-next/scripts/build-tauri-release.cmd` 和 `build-tauri-package.cmd` 重建并覆盖。Release 与根目录 EXE 均为 26,388,992 字节，SHA-256 `5615B25EC4CA42C4275B259AE844689AE21A82A80766959BEC9E49396F5DE67F`；安装包为 6,551,278 字节，SHA-256 `430B092AF496DCE5C2CC744F29388704C36B1E9414A64AE72D40264E9B4BD6A2`，已复制为 `release/Ozon-Analytics-1.0.0-Setup.exe`。
+- 启动验收：根目录正式 EXE 启动 8 秒未退出，窗口标题为 `Ozon ERP`，`Responding=True`，确认加载内嵌正式前端而不是 `localhost:1420`；验收进程随后关闭，避免锁定交付文件。
