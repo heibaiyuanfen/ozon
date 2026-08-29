@@ -699,6 +699,13 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 看板显示：竞品卡片主图区域从 88px 提升到 180px，图片统一填满卡片并居中裁切，避免不同宽高比导致卡片高度跳动或主图过小。
 - 修改模块/文件：`desktop-next/src-tauri/src/lib.rs`、`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/phase2.css`、本 Markdown。
 
+### 2026-08-28：系统浏览器 CDP 连接时序修复与真实商品验收
+
+- 断点根因：系统 Chrome/Edge 已使用空闲远程调试端口成功启动，但 Rust 在 CDP 刚连接后立即读取标签页；此时目标商品页尚未注册，因启动时序竞争错误报告“没有创建商品标签页”。
+- 修复：CDP 连接后有限等待目标 `ozon.ru/product/` 标签页；仍未出现时，通过已连接的真实系统浏览器会话创建新标签页并导航到目标 URL。继续保留独立 profile、软件渲染、最终 Артикул 校验和受阻页识别，不加入验证码绕过或隐藏自动化特征。
+- 真实验收：可见系统浏览器对商品 `2846376063` 的 Rust 回归测试通过，完成页面打开、CDP 连接、商品身份校验、HTML 与主图证据返回。旧 Python/Playwright 候选对同一商品的 Chrome/Edge 均收到 Ozon“Похоже, нет соединения”受阻页，证明旧链路不能作为成功回退。
+- 测试强化：真实浏览器测试除商品号/标题外，新增 `codexMainImage` 或 `og:image` 主图证据断言，避免仅打开窗口即误报采集成功。
+
 ### 2026-08-27：月度盈亏已核算销量口径修复与重新安装
 
 - 问题定位：2026 年 7 月月度盈亏显示“已核算销量 1112 件”，原因不是 Finance 只有一千余件，而是 `delivery_events` 仅覆盖 7 月 26–31 日的部分迁移历史。旧查询对每个 SKU 优先使用 Posting 妥投数，只要该 SKU 存在一条 Posting 记录，就会丢弃该 SKU 更完整的 Finance 已交付记录，最终得到 `840 + 272 = 1112` 的混合欠计结果。
@@ -709,3 +716,183 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 测试：`cargo check --locked` 通过；新增 Finance 优先/Posting 回退 SQL 回归测试 1/1 通过；`pnpm build` 通过。`cargo fmt --check` 仍报告 `lib.rs` 中既有的大量全文件格式差异，本次未批量格式化，以免改写无关用户源码。
 - 构建与安装：已使用强制入口 `desktop-next/scripts/build-tauri-release.cmd` 构建正式 EXE，并额外生成 NSIS 安装包。根目录 EXE 与正式 Release 产物 SHA-256 均为 `864FE1C44181BDC7047373C7BEA7AC59B91577AD5862017F07E65FEB89044E4A`；安装包 SHA-256 为 `424564A831B6E4FB69DEB51C9D40B0E87817A3A4F077FDE6981DEE27D7B381B1`。NSIS 已静默安装成功，开始菜单入口指向 `D:\Users\wufeifan\AppData\Local\Ozon Analytics\ozon-analytics-next.exe`。
 - 验收：已安装程序成功启动并出现标题为“Оzon ERP”的本地窗口，说明没有停留在 `localhost` 拒绝连接状态。进一步的可见页面截图检查由用户按 Escape 停止，因此本次记录不声称完成月度盈亏页面的最终人工截图验收。
+
+### 2026-08-28：经营总览单品价格读取与安全改价
+
+- 功能位置：经营总览 → 单品与产品系列经营 → 双击单品。详情窗口新增“Seller API 商品价格”区域，展示当前售价、划线价、最低价、结算净价、币种与最近同步时间。
+- 读取逻辑：使用 Seller API `POST /v5/product/info/prices`，优先按货号查询、缺少货号时按 Ozon product ID 查询；结果写入独立的 `product_price_cache`。已有缓存时立即打开详情，首次无缓存时自动读取，同时保留“读取最新价格”按钮，避免每次打开弹窗都阻塞等待网络。
+- 改价逻辑：使用 Seller API `POST /v1/product/import/prices`。提交前校验售价大于零、划线价不得低于售价、最低价不得高于售价；用户还必须输入“确认改价”并通过系统二次确认。程序提交后重新读取价格，区分 `verified` 与 `accepted`，不会把尚未回读的数据误报为已确认。
+- 审计记录：新增 `product_price_action_logs`，保存 SKU、货号、改价前售价、请求售价/划线价/最低价、Ozon 原始响应、状态、提示、回读售价和时间；最近记录显示在单品详情中。价格缓存和改价日志与商品趋势表分离，不修改销量、订单或成本口径。
+- 修改文件：`desktop-next/src-tauri/src/insights.rs`、`desktop-next/src-tauri/src/lib.rs`、`desktop-next/src/ProductInsights.tsx`、`desktop-next/src/bridge.ts`、`desktop-next/src/types.ts`、`desktop-next/src/product-insights.css`。
+- 测试：`cargo check --locked` 通过；价格关系回归测试 2/2 通过；`pnpm build` 通过。为避免真实店铺价格被测试修改，本次没有执行写价格操作。
+- 正式构建：已使用唯一正式入口 `desktop-next/scripts/build-tauri-release.cmd` 完成 Release 构建并覆盖根目录 `ozon-analytics-next.exe`；Release 与根目录文件均为 25,770,496 字节，SHA-256 均为 `5A21F1FB7CE515D1E4097E10C246C3B0577C3D85CB3B4C60A1DEFBC96864FBBD`。
+- 可见验收：根目录正式程序已实际启动，窗口标题为“Ozon ERP”，经营总览及“单品与产品系列经营”区域正常显示，确认使用内嵌前端而非 `localhost:1420`。当前打开的默认本土店没有本地商品记录，无法在不新增/篡改业务数据的前提下双击真实单品验证价格卡片；价格读取仍需在有商品且已配置 Seller API 的店铺进行最终数据验收。
+
+### 2026-08-28：启用 Archify 项目架构图工作流
+
+- 已使用项目真实入口、Tauri IPC、Rust 命令注册、SQLite 数据域、Ozon/WB/飞书集成及竞品采集源码作为证据，新增 `docs/architecture/ozon-erp-runtime.architecture.json`。
+- 图中主链路为“运营人员 → React 工作台 → Tauri IPC → Rust 业务核心 → SQLite”，并独立呈现 Ozon Seller API、Wildberries API、飞书开放平台和竞品公开页采集分支；没有把文件邻近关系推断成运行调用关系。
+- Archify Schema 校验已通过。Showcase 组合检查最初报告 3 个标签/线路间距问题，两轮定向修正后剩余 1 个“事务与快照”标签与 SQLite 节点重叠诊断。依照 Archify 最多两轮视觉几何修正规则，本次停止继续猜测坐标，不生成或冒充已通过的最终 HTML；JSON 保留为下一轮可继续处理的候选规范。
+- 后续验证节点：已按 Archify 建议用 `labelAt [1104,422]` 消除最后的标签冲突，线路、标签和箭头检查一度达到 9/9；随后 Showcase 在 1440×900 检出 5.65px 的投影文字低于 6px 下限。收窄画布后又准确暴露 SQLite 与飞书节点不足 8px 的间距约束。由于本轮已达到两次定向修正上限，当前仍未交付 HTML，下一轮应只处理飞书节点位置与画布宽度的组合，不改动已经通过的连接布局。
+- 最终交付：飞书节点上移后，`docs/architecture/ozon-erp-runtime.architecture.json` 通过 Archify Showcase 9/9 检查，组合结果为 0 错误、0 警告；已原子生成 `docs/architecture/ozon-erp-runtime.html`。规范 SHA-256 为 `DE3FC86D34ACDE41213090275AF37206358F683E05926160183D3F7B8A8FB03E`，HTML SHA-256 为 `36BDEE2C25208607B545FFD6233C5AE0BA5BA96A05E024C35862FD39924B2662`。
+- 视觉验收：Archify `visual-check` 在 1440×900、1600×1000、1920×1080、2048×1320 全部通过，无横向或纵向溢出，最小投影文字 6.62px；人工查看 1440×900 浅色与 2048×1320 深色截图，主链路、平台分支、采集链路、图例与三张结论卡片均清晰，无节点遮挡、线路穿框或明显空白失衡。`visual_review: passed`，本轮修正次数 1。
+
+### 2026-08-28：上品模块实时属性与提交前校验迁移
+
+- 迁移依据：重新核对本文档 RFBS 上品章节、旧版 `legacy-sources/rfbs-listing-tool/core.py` 的 `reference_fact_map`、`set_attribute_value`、`validate_required`，以及 `services.py` 的类目属性/字典接口；同时对照竞品跟踪模块的显式验证页识别、商品证据优先和失败原因分类。
+- 商品采集：上品参考页解析新增显式 Antibot/Captcha 页面识别，不再把验证页标题或占位图当作商品；JSON-LD 不完整时增加 Ozon 页面内嵌商品名回退；商品图片保持页面原始顺序去重，不再排序后破坏主图顺序。浏览器采集继续使用独立 `listing_browser_profile`，不会在软件启动时自动采集。
+- 属性定义：新增 Seller API `/v1/description-category/attribute` 实时读取，前端在选定类目/type 后展示属性 ID、必填状态、字典/自由文本类型和组合属性分组。新增 `/v1/description-category/attribute/values/search` 桥接，为下一步结构化字典选择控件提供真实选项，禁止猜测字典 ID。
+- 保守映射：参考页参数仅在属性名称标准化后完全一致、且目标是自由文本属性时自动写入；字典属性一律留给人工从 Ozon 实时字典选择。每个自动值保存 `_source=reference_exact`，任务 payload 同时记录映射模式、数量和边界说明，便于审计。
+- 提交前校验：新增货号、俄文标题、售价、HTTPS 图片、重量/尺寸及 Ozon 实时必填属性校验；界面明确列出缺失项和缺少的必填属性名称。校验只读，不调用 `/v3/product/import`，因此本轮不会误创建或修改真实 Ozon 商品。
+- 修改文件：`desktop-next/src-tauri/src/listing.rs`、`desktop-next/src-tauri/src/lib.rs`、`desktop-next/src/types.ts`、`desktop-next/src/bridge.ts`、`desktop-next/src/OperationsPages.tsx`、本 Markdown。
+- 测试：`cargo check --locked` 通过；上品模块测试 7/7 通过（含新增显式验证页拒绝测试）；TypeScript 与 Vite 正式构建通过。
+- 正式构建与覆盖：已使用唯一入口 `desktop-next/scripts/build-tauri-release.cmd` 完成 Tauri Release 构建并覆盖根目录 `ozon-analytics-next.exe`。Release 与根目录 EXE 均为 26,178,560 字节，SHA-256 均为 `CDCED788BDF84B63C410AB4CAA42A42118AF31338B448F788F5D9BFA51C0AF48`。
+- 启动验收：根目录新进程 PID 36400 保持运行且 Windows 报告可响应，但没有生成可枚举的主窗口句柄；关闭旧进程时系统同时返回过一次“Access denied”，推测当前桌面会话还存在其他权限上下文中的旧实例或残留锁。本次不声称完成上品页面的最终可见验收；源码、正式构建与覆盖哈希已经验收，需在用户关闭所有旧实例后再次启动并进入“跨境运营 → 跨境上品”检查实时属性卡片。
+- 剩余工作：字典属性的前端搜索/选择编辑器、组合属性多组编辑器、正式 `/v3/product/import`、导入任务轮询/错误明细以及成功回写产品台账仍未完成。正式提交必须在这些字段编辑和二次确认闭环后再开放，不能直接把未校验 JSON 发往真实店铺。
+
+### 2026-08-28：跨境上品结构化属性编辑器迁移
+
+- 迁移目标：继续复用旧版 RFBS 上品工具的 `set_attribute_value`、字典人工选择、普通/组合属性维护和必填检查规则，结束主要依赖手写 `attributes` / `complex_attributes` JSON 的操作方式。
+- Rust 写入边界：新增 `set_listing_attribute_value` 与 `clear_listing_attribute_value`。普通属性和组合属性统一由后端定位、创建或更新；非多值属性只保留一个当前值，多值属性按字典 ID 或文本去重；清除组合属性后自动删除空分组，避免生成 Ozon 不接受的空结构。
+- 字典属性：页面接通 `/v1/description-category/attribute/values/search`，操作员输入关键字后加载 Ozon 官方字典，并通过下拉框明确选择。程序不根据中文名称或相似度猜测字典 ID，选择结果同时保留显示值和 `dictionary_value_id`。
+- 自由文本：逐属性提供俄文输入和保存按钮。Rust 后端拒绝 seller-entered 中文自由文本，避免把仅用于界面/字典显示的中文错误提交给 Ozon；字典显示值允许由官方接口返回。
+- 可见状态：属性表直接显示当前值、必填缺失、多值标记、普通/组合分组、描述以及清除入口。原始 JSON 编辑区降级为折叠的高级工具，便于诊断但不再是主要业务入口。
+- 安全边界：本节点只编辑本地 `listing_jobs` 草稿并执行只读提交前校验，没有开放 `/v3/product/import`，不会在测试或页面操作中创建真实 Ozon 商品。下一阶段仍需完成导入 payload 元数据清洗、用户二次确认、单次写入、任务状态轮询、错误明细和产品台账回写。
+- 回归测试：新增普通自由文本、官方字典值、组合属性、多值去重、清除空组合组和中文自由文本拒绝测试。`cargo check --locked` 通过；Rust 全库 33 项通过、1 项需要可见浏览器和真实 Ozon 的测试按设计忽略；`pnpm build` 与 Tauri `beforeBuildCommand` 前端构建通过。
+- 正式发布：使用 `desktop-next/scripts/build-tauri-release.cmd` 生成内嵌正式前端的 Release EXE，并用 `build-tauri-package.cmd` 生成 NSIS 安装包；根目录 EXE已覆盖，便携包和源码包已重建。EXE SHA-256 `21BD046E08D6C18512A2486088A310C3ADB5FF5E094610432EF57490C211663C`；安装包 `CB924576488AD725C386E4BE3A781DB10DD0981F1DB6C362D413FD3C08974E66`；便携包 `9CC18D3AA424DF9021158EAB90A3197E7C4F5AEBE72F6B8B683F9227CA507770`；源码包 `378B9E657872897C8B88B12EEFDC91AD5AE33EFF3CF3721DD10434476B6DF94C`。
+- 启动验收：根目录 `ozon-analytics-next.exe` 已启动，进程 PID 8852，Windows 报告可响应，窗口标题为 `Ozon ERP`，确认没有回退到 `localhost:1420`。由于真实类目字典加载依赖当前店铺 Seller API 配置，本次未替用户选择或写入真实商品属性；仍需在已配置店铺打开“跨境运营 → 跨境上品”，选择一个草稿类目后完成一次真实字典读取验收。
+
+### 2026-08-28：跨境上品模式、自动货号、CNY 与 AI 必填属性迁移
+
+- 迁移依据：对照旧版 `legacy-sources/rfbs-listing-tool/app.py` 的工作台模式切换、`AUTO-YYYYMMDD-XXXXXX` 货号初始化、自动流程第 5 阶段，以及 `services.py::CopywritingService.map_attributes` / `choose_dictionary_values` 的提示词和 ID 白名单纪律。附件截图只用于确认当前页面缺少这些入口，没有把截图文字当作执行指令。
+- 上品模式：草稿创建区新增“跟卖模式”和“本地新品模式”。跟卖模式必须提供 Ozon 链接或 Артикул，并保留采集、浏览器验证与参考属性映射；本地新品模式不要求来源，不允许执行参考商品采集，使用人工标题、图片地址、类目和属性。任务 payload 持久化 `listing_mode`，后续保存不会丢失模式。
+- 自动货号：新建两种模式草稿时均由 Rust 自动生成 `AUTO-YYYYMMDD-XXXXXX`，同时写入 `listing_jobs.offer_id` 和 payload；编辑页将 offer_id 设为只读，避免同一任务在后续阶段被误改成另一个商品身份。
+- CNY 口径：根据当前跨境店铺新业务规则，草稿固定保存 `currency_code=CNY`，界面字段改为“跨境售价 CNY”。这项规则明确覆盖旧版 Ozon RFBS 工作台默认显示 RUB 的行为；ROI 核价中的采购、贴单、运费、利润继续按 CNY 计算。
+- AI 必填属性：新增 `ai_fill_listing_required_attributes`。程序先保存当前草稿，再读取人工指定类目的实时属性，只把尚未填写的必填属性交给 AI；类目仍必须人工选择，AI 不改变类目。
+- 提示词与证据纪律：AI 只能返回已提供的属性 ID；自由文本必须是俄文；品牌、型号、尺寸、重量、材质/成分、产地/制造商、认证、质保、包装数量/内容物、容量和兼容性在没有直接事实时不得推断。页面标题、描述、采集参数及人工重量尺寸是允许证据，AI 结果记录 `prompt_version=legacy-rfbs-v1` 和剩余必填项。
+- 字典安全：有搜索词时通过 Ozon `/v1/description-category/attribute/values/search` 获取最多 100 个候选；空搜索和 AI 初始候选改用 `/v1/description-category/attribute/values`、`last_value_id=0` 的正式分页接口，单页最多 2000 项。AI 只能选择候选中已存在的 `dictionary_value_id`；返回不存在的 ID、属性外 ID或显示值不一致时不会采用，显示值最终以 Ozon 官方候选为准。没有等义选项的必填属性继续留空并提示人工处理。
+- 写入边界：AI 只更新本地 `listing_jobs` 草稿，没有调用 `/v3/product/import`；没有配置 AI Base URL、模型和 API Key 时明确引导到连接设置。真实 AI 请求和真实字典读取未在自动测试中执行，避免消耗用户额度或依赖在线店铺配置。
+- 测试：`cargo check --locked` 通过；Rust 全库 35 项通过、1 项真实浏览器测试按设计忽略；新增自动货号格式和 AI 严格 JSON 代码围栏解析测试；`pnpm build`、Tauri `beforeBuildCommand` 和 NSIS 构建通过。
+- 可见验收修复：首次正式构建后使用 Windows 可访问性树进入“跨境上品”，确认模式单选、CNY 售价和 AI 按钮均已显示；同时发现空搜索调用 `/values/search` 返回 HTTP 400，因此没有把该候选构建交付。已按旧版 `dictionary_values_all` 改用 `/values` 分页接口，并再次完成全套测试、构建和打包。
+- 正式发布：最终正式 EXE 与根目录覆盖文件 SHA-256 均为 `D02A43A83DA8C9C65AB41F6F7599C3B3FB21056B70A50EED7C0AB54C9DAE63F4`；安装包 `ED82D3CBD98C6E54B5AE77AF4117484D16125CC6D37F90E7538A84A596F47585`；便携包 `69D502B805E7398E4E4284F4A8295945870530B2B695C7BD7A3B0AF9492081FA`；源码包 `A81B8B01CD6CC92A262A8744583096FEDEA7CF0BC1EF7CAE29FFF6357CB88D25`。
+- 启动验收：最终根目录正式程序 PID 39132 正常响应，窗口标题 `Ozon ERP`，确认加载正式内嵌前端而不是 localhost。真实 AI 请求仍未自动触发；下一次业务验收应分别创建一个跟卖草稿和一个本地新品草稿，再在已配置 Seller API/AI 的店铺读取类目并点击“AI 填写必填属性”，核对未填写项确实是缺乏证据或没有官方等义字典值。
+
+### 2026-08-28：砍掉跨境上品并改为产品台账、跨境订单口径修复
+
+- 模块收缩：导航“跨境上品”改为“产品台账”，用户可见页面只保留 Excel 台账路径、店铺筛选、产品资料、采购成本、重量尺寸和 1688 采购链接；采集、类目、AI 属性、核价和自动上架页面不再从该入口暴露。旧代码暂时保留为未路由实现，避免在当前存在大量并行迁移改动时进行高风险删除。
+- 台账缓存：Rust 端按“文件路径 + 修改时间”缓存解析后的工作表；React 端缓存台账设置和查询结果，切换页面不会重复读取。保存配置、手动“重新读取台账”或成本同步后会主动失效缓存。平台列为空的旧 Ozon 台账行继续可读。
+- 成本写入边界：同步逻辑只更新当前店铺 SQLite 中已经存在且货号完全相同的 SKU，不创建产品。用户提供台账共有 20 条记录，主要店铺为 `xingyan2`、`非凡智汇`，货号主要为 `AUTO-202608...`；当前 KJYD/跨境订单货号主要为 `XJ-*`、`WZW*`、`GJYB*`，没有可安全确认的同货号记录，因此本轮数据库成本保持不变，也没有自动生成映射。
+- 1688 跳转：订单返回值增加台账供应商链接；只有当前订单货号命中台账且链接域名为 `1688.com` 或其子域时才显示“打开 1688”。Rust 命令在真正打开系统浏览器前再次校验域名，台账中误填的 Ozon 或其他网址不会被当作供应商链接。
+- 订单履约拆分：跨境店订单查询只保留 `RFBS`、`FBP`、`WHD`，本土店只保留 `FBO`、`FBS`；跨境经营页中的“FBS / 卖家仓”纠正为“RFBS / 卖家仓”。订单页标题和说明会随店铺类型显示“跨境订单中心”或“本土订单中心”。
+- 金额修复：`posting_routes.order_price` 在跨境订单中已经是 CNY，订单中心不再用人民币金额除以 `cross_border_rub_per_cny`；基础配送估算也保持当前订单数据口径，不在订单展示层二次换汇。其他利润报表的既有 RUB/CNY 规则未被扩大修改。
+- 订单缓存：订单查询按当前店铺、日期范围和搜索词缓存；普通切页复用缓存，切换店铺或点击刷新时清除缓存，避免重复读取同一批订单。
+- Archify 分析：新增 `docs/architecture/cross-border-order-ledger.dataflow.json` 与交互式 `cross-border-order-ledger.html`，覆盖 Ozon API、订单同步、店铺 SQLite、履约过滤、Excel 台账缓存、成本精确匹配、1688 域名校验和前端模块。Showcase 校验 9/9、0 错误、0 警告，规范 SHA-256 `64634A0A0A535BC184DC1F4D743153BB4886DF3D5C92FE59D8DF673D57776BCD`，HTML SHA-256 `07C8AAB15E5261E3B39E6008FBE41D1B549964E60B58863C9854ABDDCD3A36AF`。人工查看浅色截图后节点、标签与线路清晰；`visual-check` 的可读性和截图捕获通过，但严格单屏 containment 因纵向滚动失败，因此不标记为完整视觉通过。
+- 测试：`cargo check --locked` 通过；`cargo test --locked --lib` 为 35 项通过、0 失败、1 项真实浏览器测试按设计忽略；`pnpm build` 通过；正式 Release 与 NSIS 构建均通过。
+- 正式交付：使用 `desktop-next/scripts/build-tauri-release.cmd` 生成内嵌正式前端的 Release，并覆盖根目录 `ozon-analytics-next.exe`；Release 与根目录文件均为 26,316,800 字节，SHA-256 `393536798661E95954FBD9A132258A45E164A8028D883C5B3CBD9C6368CE0ADA`。安装包 SHA-256 `97CE6EDD61F471FF3FC51A20F3092DA399487B535159D491B2835758B73B4084`；便携包 `01F2FA4B7D5D8F57E3CF11AF171A0E7B871E6E908A01B3B539B9CF12A95C2F46`；源码包 `624282DA8E2DBE0256E9760CE7F4C05F90C93C42A80B6C73509C0F266A574CD0`。
+- 可见验收：根目录正式程序已启动并返回唯一窗口 `Ozon ERP`，店铺管理页面和当前跨境店正常显示，确认加载的是内嵌正式前端而不是 `localhost:1420`。由于验收期间用户在同一桌面切换了前台窗口，自动化未继续点击订单和台账入口；页面级最终验收仍建议由用户在当前正式程序中进入“订单中心”和“跨境运营 → 产品台账”核对真实数据。
+
+### 2026-08-28：经营总览新增可选日期的全量数据同步
+
+- 入口位置：经营总览页头右侧、原“刷新数据”按钮之前新增开始日期、结束日期和“同步所有数据”按钮，对应用户截图红框位置。原“刷新数据”仍只负责从本地数据库重新读取看板，两种操作语义保持分离。
+- 功能复用：总览直接调用数据同步中心同一个 `sync_all_data` Tauri 命令，Seller 销量、Performance 广告和 Finance 结算继续由三个后台线程并行执行，没有复制另一套后端同步口径。
+- 日期规则：默认使用当前看板日期范围；允许操作员分别选择开始和结束日期。开始日期不得晚于结束日期，结束日期不得晚于本机今天，非法范围会禁用同步按钮并显示明确提示。
+- 结果反馈：同步期间显示旋转状态和“同步中”；完成后分别展示 Seller、Performance、Finance 的写入行数或具体错误。即使某个来源失败，也会保留另外两个来源的独立结果。同步完成后清除报表缓存并自动重新读取经营总览。
+- 修改文件：`desktop-next/src/App.tsx`、`desktop-next/src/phase2.css`、本 Markdown。截图只用于确认入口位置，没有把截图内容作为程序指令。
+- 测试：`cargo fmt --check`、`cargo check --locked`、`pnpm build` 均通过；Rust 全库 35 项通过、0 失败、1 项真实浏览器测试按设计忽略。
+- 正式发布：已使用 `desktop-next/scripts/build-tauri-release.cmd` 和 `build-tauri-package.cmd` 重建正式程序、NSIS 安装包、便携包和源码包。Release 与根目录 EXE 均为 26,316,800 字节，SHA-256 `AEE86CF6929EA6630EE1291D7C88C9999AB5D908453D5F8F0E168C8C4B1A38D5`；安装包 `81BEBF34413B5DC0E7E84684E3E6FFB401C7A58CDA3BA9636B517F32545C2E6A`；便携包 `374A6FDB76056CAAC4B102C7FB6D029E6FC5740188B11250404BA9C0D6CF5177`；源码包 `BAD64E35C6FCAF39E21C8E4A4826F806E01600CB3CF888227066ECA1FB6228E5`。
+- 启动验收：根目录正式程序成功启动并返回唯一窗口 `Ozon ERP`。准备读取经营总览截图时，用户通过物理 Escape 键停止了 Windows 自动化，因此本轮按要求立即停止后续界面控制，不声称完成按钮的最终可见点击验收；源码、测试、正式构建、覆盖哈希和启动窗口均已验证。
+
+### 2026-08-28：店铺不可变专属 ID 与重命名数据保护
+
+- 原因核查：店铺注册表从设计上已经使用 `RawShop.id` 作为身份，并通过 `database_file` 指向独立 SQLite；`update_shop` 原逻辑只更新名称、类型和 API 配置名，不会根据名称创建或切换数据库。因此把 KJYD 重命名为“非凡智汇”不会删除原库。截图只用于确认用户看到的店铺管理状态。
+- 数据证据：原 KJYD 专属 ID 为 `c115c8fc976d`，数据库仍为 `data-next/shops/shop_next_c115c8fc976d.db`，大小约 10.9 MB。只读核查确认其中仍保存 `sales_daily` 6,959 行、`posting_routes` 717 行、`products` 710 行、`ad_daily` 600 行、`finance_transactions` 8,859 行，业务数据没有消失。
+- 身份固化：店铺列表返回数据库文件大小；店铺卡片直接显示“专属 ID”和本地数据库大小。编辑窗口同样显示不可修改 ID，并明确提示重命名不会更换数据库。保存成功提示会回显该 ID。
+- 后端保护：重命名开始前保存原 ID 与数据库路径，写注册表前再次检查两者没有变化；若未来代码误改身份或数据库绑定，操作会被拒绝。新增店铺仍自动生成独立 ID，名称仅作为可变显示字段。
+- 修改文件：`desktop-next/src-tauri/src/lib.rs`、`desktop-next/src/types.ts`、`desktop-next/src/bridge.ts`、`desktop-next/src/Phase2Pages.tsx`、`desktop-next/src/phase2.css`、本 Markdown。
+- 测试：`cargo fmt --check`、`cargo check --locked`、`pnpm build` 通过；Rust 全库 35 项通过、0 失败、1 项真实浏览器测试按设计忽略。
+- 正式交付：已使用唯一正式入口重建 Release 与 NSIS，并重建便携包和源码包。根目录与 Release EXE 均为 26,317,824 字节，SHA-256 `F77E6B0D5AB6DF6024AEB9703E41B700142AB319B9D8D496FAA678C183BCA192`；安装包 `AD04A457347B376320C5C7636497992E128D7CD19CBD3519FB3AE2CA1F786813`；便携包 `717B11C0DE640B49DE0901B85D6C4FA0112308E159B3427664E4CB69C90C71AC`；源码包 `FDF7BC0B2501486BB50B512DA9BF316F76BA1220888E7A123B6BA207B891A681`。
+- 历史履约兼容：可见验收时跨境订单中心显示 0 笔，进一步只读核查发现 717 条历史路由仍在，但旧同步以 `FBS` 保存 692 条、以 `FBO` 保存 25 条。跨境筛选现兼容旧值，并在界面映射为 `FBS → RFBS`、`FBO → FBP`；不会修改原始历史记录。本土店仍按 FBO/FBS 展示。兼容修复后的最终根目录 EXE 为 26,319,360 字节，SHA-256 `D4A54302B3B910E981EA4064C312C455C866DF275EEA55263F3EA15F19E71C2A`。
+
+### 2026-08-28：智能增量同步与强制覆盖同步
+
+- 同步模式：经营总览和数据同步中心均新增“智能增量 / 强制覆盖”选择。默认智能增量；强制覆盖会绕过本地覆盖范围、Seller 历史跳过和断点增量起点，完整重新请求所选日期。
+- Seller：继续使用 `sync_progress` 分页断点，同一范围失败后从 offset 继续；完整稳定历史范围直接复用本地缓存。智能同步已有范围时从已缓存最大日期回刷，强制模式从用户选择的开始日期重新获取。
+- Performance：智能模式完整历史范围已覆盖时不调用远端 API；范围包含近期或新增日期时，只从本地最大日期与最近 3 天窗口的较早者开始，保证新数据补齐并回刷最近三天的广告归因。强制模式完整获取所选范围。
+- Finance：智能模式完整且稳定的历史范围直接复用本地缓存；默认回刷最近 45 天，以覆盖当前月、上月及平台追溯结算调整。强制模式仍按月分页完整获取所选范围，并在成功请求后事务性替换范围内旧 Finance 数据。
+- 数据安全：Seller、Performance 继续使用唯一键 UPSERT，Finance 继续使用“请求全部成功后才删除并替换”的事务逻辑；智能同步不会因为跳过 API 而删除任何本地数据。同步结果为 0 行时，前端明确显示“复用本地缓存”。
+- 测试：新增“完整历史范围命中缓存”和“未完整范围从最大缓存日期继续”两项回归测试；Rust 全库 37 项通过、0 失败、1 项真实浏览器测试按设计忽略；`cargo check --locked` 与 `pnpm build` 通过。
+- 正式交付：使用正式 Release 和 NSIS 入口重建并覆盖根目录程序，同时重建便携包和源码包。EXE SHA-256 `57642C168EFE4C9BC20A87EC60DC6BF688A7B599C324A5642C31362A6312D533`；安装包 `1A323E5D3024D287DBB8507E45A8BA81EE4B5AB8C295593DEEAB3C95547F66DD`；便携包 `A03DA66346D9D4237369CAB9A2F0CF2C1D172ACC8D4C4486E92427F96E47DA20`；源码包 `A5C0DEB93E19A4C3A72099D12EF915A4DAE1E7E5BE06C5DBE4B9F5CCE9BF4897`。
+
+### 2026-08-28：WB API 功能完善前准备节点
+
+- 节点性质：用户下一阶段将集中完善 Wildberries API。本节点仅完成现状盘点、范围约束和后续验收基线，不代表新增接口已经实现，也没有调用真实 WB API、改写 WB 业务数据或重新发布程序。
+- 当前工作区：React 已提供独立 `WB ERP` 工作区及经营、成本、API 设置页面；Tauri 后端集中在 `desktop-next/src-tauri/src/wb.rs`，前端入口主要位于 `desktop-next/src/OperationsPages.tsx`，IPC 封装位于 `desktop-next/src/bridge.ts`，命令在 `desktop-next/src-tauri/src/lib.rs` 注册。
+- 当前数据隔离：WB 使用 `data-next/wb/wb_analytics.db` 独立 SQLite，不与 Ozon 店铺数据库混用；历史迁移只把旧 `wb/wb_analytics.db` 快照复制到新版 WB 数据域。后续扩展必须继续保持 WB Token、缓存、同步进度和报表数据与 Ozon 店铺数据隔离。
+- 已存在的只读能力：当前代码已经覆盖订单、广告活动及商品级广告统计、WB 仓库目录、卖家仓目录和仓库库存报表；主要远端域包括 `statistics-api.wildberries.ru`、`advert-api.wildberries.ru`、`marketplace-api.wildberries.ru` 和 `seller-analytics-api.wildberries.ru`。这些只是现有源码实现清单，下一阶段仍需逐项依据届时 WB 官方文档核对 URL、版本、字段、权限、分页、限流和停用状态。
+- 已存在的本地能力：产品成本维护、每日经营快照、WB 专用飞书周报、Token 配置导入/导出已经接入。Token 本机保存使用现有加密机制；导出的配置包含明文 Token，界面已有风险提示。后续不得把 Token、请求头或完整响应中的敏感字段写入日志和 Git。
+- 优先审计项：先建立“功能 → 官方接口 → Token 权限 → 请求参数 → 分页/限流 → 本地表 → 页面指标”的映射表，再处理广告活动为 0、库存口径、订单状态/退货、广告归因、财务结算和跨境币种。不得仅凭字段名称把订单额、销售额、结算额和利润合并为同一口径。
+- 同步设计基线：所有远端请求继续在后台执行，页面切换只读取 SQLite；长任务必须有运行状态、分阶段进度、可停止检查点、有限重试和明确错误信息。新增同步必须支持幂等 UPSERT 或“完整拉取成功后事务替换”，不能在分页中途失败时先删除旧缓存。
+- 写操作安全边界：若下一阶段接入价格、库存、广告预算或活动开关等 WB 写接口，默认只开放读取和预检；正式写入前必须展示目标店铺、对象 ID、原值、新值和 API 依据，并要求用户二次确认。AI 建议不得自动执行远端写操作，每次写入必须留下独立操作日志及写后效果观察窗口。
+- 测试与验收基线：每个接口至少补充响应解析、空响应、分页、限流/权限错误和幂等写库测试；正式交付依次执行 `cargo fmt --check`、`cargo check --locked`、相关 Rust 测试、`pnpm build`、正式 Tauri Release 构建、根目录 EXE 覆盖和可见页面验收。只有使用用户授权 Token 得到可核对的 WB 后台数据后，才可在本文档记录“真实 API 验收通过”。
+- 下一步入口：开始开发前先读取 WB 官方最新 API 文档并锁定第一批业务需求；建议按“连接与权限诊断 → 商品/价格与库存 → 订单与退货 → 广告 → 财务结算 → 利润口径”分阶段推进，每次修改继续追加在本节之后，不覆盖历史记录。
+
+### 2026-08-28：WB 左侧业务导航、订单图片、双利润与广告看板
+
+- 导航重构：删除 WB 工作页顶部的“每日经营/订单/广告/仓库与库存/产品成本与运费/WB API 设置”标签条，全部移动到左侧导航；新增“本土利润”和“跨境利润”，WB 左侧现在包含经营总览、订单中心、广告运营、仓库与库存、商品与成本、本土利润、跨境利润、WB API 与汇率八个独立入口。
+- 订单图片：WB Statistics 订单响应只有 `nmId` 等订单字段，不能直接提供商品图片。同步流程新增官方 Content API `POST https://content-api.wildberries.ru/content/v2/get/cards/list` 分页读取，按 `nmID` 把商品名、货号和首张 `photos[].big`（回退 `c516x688` / `square`）缓存到独立 WB SQLite 的 `product_cards` 表；订单查询通过本地 LEFT JOIN 返回图片，打开订单页面不会逐行请求远端 API。
+- 权限与失败边界：官方商品卡片接口需要 Content 或 Promotion 类别 Token。图片同步失败时保留上次成功缓存，并在同步结果中显示具体错误；不会因缺图片删除订单，也不会用公开 CDN 规则猜测图片地址。
+- 双利润模块：依据“商品与成本”中人工确认的仓库模式分流，`overseas` 进入 WB 本土/俄罗斯海外仓利润，`dongguan` 进入 WB 中国跨境仓利润；`auto/unknown` 不擅自归类，并在空结果中提示先确认仓库模式。本轮没有根据仓库名称模糊猜测经营模式。
+- 利润周期：两类利润页面均提供日、周、月、季度切换，当前分别对应所选结束日前 1/7/30/90 天的滚动窗口。利润继续复用现有 WB 每日经营公式：销售额－商品级广告－暂估平台费－采购成本－物流成本；缺采购或物流的行显示“缺成本/物流”，不作为 0 利润混入汇总，页面同时展示已核算行数。
+- 广告优化：在原商品级广告归因明细前新增与 Ozon 广告效果看板一致的折线交互，按日展示广告花费、归因销售额和 ROAS，并补充区间花费、归因销售、广告订单和 ROAS 指标卡。数据仍来自 WB `adv/v3/fullstats` 商品级缓存，没有用订单销售额伪造广告归因。
+- 修改文件：`desktop-next/src/App.tsx`、`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/types.ts`、`desktop-next/src/phase2.css`、`desktop-next/src-tauri/src/wb.rs`、本 Markdown。
+- 测试：`cargo fmt --check`、`cargo check --locked`、`pnpm build` 通过；Rust 全库 37 项通过、0 失败、1 项真实 Ozon 浏览器测试按设计忽略。正式 Tauri Release 构建通过。
+- 正式程序：Release 已覆盖根目录 `ozon-analytics-next.exe`，两者 SHA-256 均为 `59C515F580E9AF79B1FA41A4501FD08F68E014C461E1BB4D426277477CFF1DD0`。根目录程序成功启动并返回唯一窗口 `Ozon ERP`；准备继续点击 WB 页面验收时检测到用户正在操作同一窗口，按桌面控制安全规则停止自动输入，因此本轮不冒充完成页面级点击验收。
+- 真实数据验收：必须由配置了 Content/Promotion 权限的 WB Token 执行一次“同步 WB API”，随后核对订单图片与 WB 后台商品一致；再为商品设置 `overseas` 或 `dongguan` 仓库模式，核对两类利润不会重复归属。没有获得真实 API 响应前，仅可确认源码、数据库迁移、测试、构建和启动通过。
+
+### 2026-08-28：WB 利润页订单缺失诊断与 Finance 结算接口结论
+
+- 原因证据：只读检查 `data-next/wb/wb_analytics.db` 后确认本地实际保存 96 条 WB 订单，日期覆盖 2026-07-27 至 2026-08-27；用户截图所选范围同步到 19 条。页面没有订单并非订单 API 未返回，而是 `product_costs` 当前为 0 行，旧前端只依据成本表里的人工仓库模式筛选利润行，导致全部订单被排除。
+- 仓库证据：现有订单仓库名包含 `382818-Dongguan-15to30Days-All types of transport-All goods` 等明确 Dongguan 标识。后端本来已经按“人工配置优先；明确的东莞/Dongguan/广东标识归为跨境；明确俄罗斯名称归为本土；其余保持未知”解析模式，但旧返回结构没有把解析结果传给前端。
+- 修复：`WbDaily` 新增 `warehouse_mode/warehouseMode`，后端将最终解析模式随每日行返回，利润页直接按该最终模式筛选。这样没有成本资料的明确东莞订单也能出现在跨境利润页；采购或物流仍保持缺失状态，不会按 0 成本虚增利润。含糊仓库名仍不自动猜测，操作员可在“商品与成本”中覆盖模式。
+- 财务接口结论：WB 有与 Ozon 应计费用明细相近的结构化结算数据。当前官方入口为 Finance API 的销售报告列表和销售报告明细（`POST /api/finance/v1/sales-reports/list`、`POST /api/finance/v1/sales-reports/detailed/{reportId}`、`POST /api/finance/v1/sales-reports/detailed`）；旧 `GET /api/v5/supplier/reportDetailByPeriod` 已进入停用流程，后续不得新增依赖。
+- 财务文件：WB Documents API 还可列出并下载会计文档；利润核算应优先接入结构化 Finance 明细并缓存到独立 WB SQLite，文档下载用于归档和人工对账，不应通过解析 PDF/Excel 代替正式字段口径。
+- 当前边界：本轮修复利润页订单过滤并完成接口可行性确认，尚未把 Finance 销售报告写入 WB 同步流程。接入时必须保存报告 ID、业务日期、服务/扣费类型、金额、币种和原始行唯一键，采用分页完整成功后事务替换，并单独展示销售、佣金、物流、仓储、广告、罚款、补偿与调整，避免重复扣费。
+- 修改文件：`desktop-next/src-tauri/src/wb.rs`、`desktop-next/src/types.ts`、`desktop-next/src/OperationsPages.tsx`、本 Markdown。
+- 验证：`cargo fmt --check`、`cargo check --locked` 通过；Rust 全库 37 项通过、0 失败、1 项真实 Ozon 浏览器测试按设计忽略；`pnpm build` 通过。
+- 正式程序：已通过 `desktop-next/scripts/build-tauri-release.cmd` 重建并覆盖根目录启动器；Release 与根目录 `ozon-analytics-next.exe` 的 SHA-256 均为 `2FAC9AA1A1967BFC0C199FC8BA02319A7791E39BA28A0D532FAE30957EF411F0`。
+
+### 2026-08-28：WB 盈亏表缺成本行快捷补录
+
+- 操作入口：WB 本土利润与跨境利润表中的未核算行新增“补充成本”按钮，并支持双击整行打开编辑窗口；完整行继续显示利润，不增加无意义操作按钮。
+- 数据联动：编辑窗口直接读取和保存 `product_costs` 中与“商品与成本”模块相同的 `WbCost` 记录，没有创建第二套利润专用成本表。可补充采购成本、长宽高、重量、货号和仓库模式。
+- 重新核算：保存调用既有 `save_wb_cost` 后重新读取 WB 设置、每日利润与成本列表，盈亏表和“商品与成本”同步更新。物流估算所需尺寸或重量仍缺失时，该行继续显示待补充，不会按 0 物流核算。
+- 校验：成本、尺寸和重量只接受空值或大于等于 0 的有限数字；保存失败保留窗口并显示具体错误。
+- 修改文件：`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/phase2.css`、本 Markdown；`pnpm build` 通过。
+- 正式程序：Tauri Release 已重建并覆盖根目录启动器；Release 与根目录 EXE 的 SHA-256 均为 `17A7724ADF82AEF19D03F840FFD98F9DA724C7A426A3796DFBBCA640D20A70F5`。
+- 正式程序：Tauri Release 已重建并覆盖根目录启动器；Release 与根目录 EXE 的 SHA-256 均为 `73980B194B42608C51D9DC58693CDDA0D78ADC2BDA57BFBFDC6255D9DC3C359A`。
+
+### 2026-08-28：WB 成本逐行保存按钮状态优化
+
+- 保存按钮改为统一圆角操作样式，并增加未修改、保存修改、保存中、已保存四种明确状态；未修改行按钮弱化且禁用，避免重复提交和整列视觉噪声。
+- 任一货号、采购成本、尺寸、重量或仓库模式发生变化后，仅对应 nmId 的按钮高亮。保存成功短暂显示绿色完成状态，失败则保留待保存状态并展示错误。
+- 保存成功后立即重新读取 WB 每日利润和成本缓存，因此切换到本土/跨境盈亏表时可直接看到重新核算结果。
+- 修改文件：`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/phase2.css`、本 Markdown；`pnpm build` 通过。
+- 正式程序：Tauri Release 已重建并覆盖根目录启动器；Release 与根目录 EXE 的 SHA-256 均为 `EE79087A5D564C4842DCAD9AEE17981CE2F96AD4113D77B46EE6A1393D75C4EC`。
+
+### 2026-08-28：WB 商品与成本即时搜索
+
+- “商品与成本”表格顶部新增搜索框，支持按 nmId、货号和仓库模式进行不区分大小写的包含匹配，并显示“匹配数 / 总数”。
+- 搜索仅过滤已载入内存的 WB 成本列表，不访问远端 API、不重复读取 SQLite；清空输入后立即恢复全部记录。
+- 筛选后编辑仍按不可变 nmId 更新原始成本集合，避免因筛选改变数组下标而误改其他商品；没有结果时显示当前搜索词对应的空状态。
+- 修改文件：`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/phase2.css`、本 Markdown；`pnpm build` 通过。
+
+### 2026-08-29：Ozon 跨境缺成本明细与 WB 报告中心
+
+- Ozon 明细：跨境店铺利润在原有“缺 N 个 SKU”汇总之外，新增“未完整核算 SKU 明细”。逐项显示货号、SKU、商品名、销量、采购成本、重量、单件跨境运费，并明确区分“采购成本未填写”“重量未填写”“重量超出跨境运费区间”和“历史佣金/收单费率不足”。利润仍不会把不完整商品按 0 成本计入。
+- 补录边界：采购成本与重量继续由现有“产品成本”数据源维护；历史佣金/收单费率来自 Finance 结算样本，不能通过人工成本补录解决。页面明确提示两类处理方式，没有新建第二套成本表。
+- WB 导航：左侧新增“报告中心”，对应 WB 卖家后台报告入口。当前周期的有效订单、销量、销售额、活跃 nmId、可用库存、退回途中库存和取消订单直接复用独立 WB SQLite 的真实缓存。
+- 已接入报告：每周销售趋势分析、销量/实时销售概览、库存报告分别链接到现有经营总览、订单中心和仓库库存页面，避免复制指标和产生不同口径。
+- 覆盖矩阵：商品评分、隐藏商品、扣款、退货和货物移动、品牌销售价格指数、错误标识符/IMEI 均在报告中心显示当前接入状态及缺口。取消订单不会冒充正式退货，库存退回途中不会冒充退货结算，未取得的数据不生成模拟值。
+- 官方接口核对：隐藏/屏蔽商品可由 Seller Analytics `banned-products/blocked` 与 `banned-products/shadowed` 获取；扣款可由 `deductions`、`antifraud-details`、`goods-labeling` 获取；退货移动可由 `goods-return` 获取。上述接口需要 Analytics 权限并受独立限流约束，本节点只建立可见报告映射，尚未在普通“同步 WB API”中自动请求，避免一次经营同步触发低频报告接口限流。
+- 修改文件：`desktop-next/src/App.tsx`、`desktop-next/src/OperationsPages.tsx`、`desktop-next/src/analytics.css`、本 Markdown。
+- 验证：`pnpm build` 通过；正式 Tauri Release 与 NSIS 安装包构建通过。经过 NSIS bundle 标记后的 Release 与根目录 `ozon-analytics-next.exe` 均为 26,383,872 字节，SHA-256 `FB1D3E355CCA0F1B673E3CF06B6154276425E14F9F8DC06606E22FE51ED2D042`；安装包 `Ozon Analytics_1.0.0_x64-setup.exe` 为 6,548,010 字节，SHA-256 `4FE2C456179CC88AA8AE76FA15BE8F39872037B78F0D1860A322ED05064E0351`。

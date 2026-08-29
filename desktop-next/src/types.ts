@@ -29,6 +29,7 @@ export interface Shop {
   kind: "local" | "cross_border";
   apiName: string;
   active: boolean;
+  databaseSizeBytes: number;
 }
 
 export interface DateRange {
@@ -80,6 +81,7 @@ export interface OrderRow {
   estimatedDelivery: number | null;
   estimateBasis: string;
   imageUrl: string;
+  supplierUrl: string;
 }
 
 export interface AdvertisingData {
@@ -260,6 +262,7 @@ export interface CredentialsForm {
 }
 export interface WarehouseMapping {
   warehouseName: string;
+  warehouseMode: string;
   clusterName: string;
   orderCount: number;
 }
@@ -563,6 +566,9 @@ export interface ListingRow {
   platform: string;
   offerId: string;
   productId: string;
+  productTitle: string;
+  supplierUrl: string;
+  currencyCode: string;
   unitCostCny: number | null;
   weightKg: number | null;
   lengthCm: number | null;
@@ -674,6 +680,73 @@ export interface ProductDetail {
     configuredWeight: number;
     orders: number;
   }>;
+  price: ProductPrice | null;
+  priceLogs: ProductPriceLog[];
+}
+export interface ListingAttributeDefinition {
+  id: number;
+  name: string;
+  description: string;
+  attributeComplexId: number;
+  isRequired: boolean;
+  isCollection: boolean;
+  dictionaryId: number;
+  maxValueCount: number;
+  groupName: string;
+}
+export interface ListingValidation {
+  valid: boolean;
+  issues: string[];
+  missingRequired: string[];
+}
+export interface ListingAiFillResult {
+  filled: number;
+  freeTextFilled: number;
+  dictionaryFilled: number;
+  missingRequired: string[];
+}
+export interface ListingAttributeValueInput {
+  id: number;
+  attributeId: number;
+  attributeComplexId: number;
+  attributeName: string;
+  isCollection: boolean;
+  dictionaryValueId: number;
+  value: string;
+}
+export interface ListingDictionaryValue {
+  id: number;
+  value: string;
+  info: string;
+}
+export interface ProductPrice {
+  sku: string;
+  offerId: string;
+  productId: string;
+  currencyCode: string;
+  price: number;
+  oldPrice: number;
+  minPrice: number;
+  marketingSellerPrice: number | null;
+  retailPrice: number | null;
+  netPrice: number | null;
+  syncedAt: string;
+}
+export interface ProductPriceLog {
+  id: number;
+  beforePrice: number;
+  requestedPrice: number;
+  verifiedPrice: number | null;
+  status: string;
+  message: string;
+  createdAt: string;
+}
+export interface ProductPriceUpdate {
+  sku: string;
+  price: number;
+  oldPrice: number;
+  minPrice: number;
+  currencyCode: string;
 }
 export interface SupplyOrder {
   orderId: number;
@@ -768,6 +841,7 @@ export interface WbDaily {
   nmId: number;
   article: string;
   warehouseName: string;
+  warehouseMode: string;
   quantity: number;
   revenueCny: number;
   adSpendCny: number;
@@ -786,6 +860,7 @@ export interface WbOrderRow {
   warehouseName: string;
   revenueCny: number;
   cancelled: boolean;
+  imageUrl: string;
 }
 export interface WbAdRow {
   day: string;

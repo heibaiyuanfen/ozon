@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "Ozon ERP 跨境订单与产品台账模块",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1080, 820],
+    "views": [
+      { "id": "order_boundary", "label": "订单履约边界", "focus": ["ozon_api", "sync", "shop_db", "order_filter", "order_ui"], "note": "跨境仅 RFBS、FBP、WHD；本土仅 FBO、FBS。" },
+      { "id": "ledger_cost", "label": "台账成本匹配", "focus": ["xlsx", "ledger_cache", "ledger_ui", "cost_match", "shop_db"], "note": "只更新数据库中已有的同货号 SKU，不生成未匹配产品。" },
+      { "id": "supplier_jump", "label": "1688 采购跳转", "focus": ["xlsx", "ledger_cache", "order_ui", "url_guard", "browser"], "note": "前后端共同展示，Rust 再校验 1688 域名后调用系统浏览器。" }
+    ]
+  },
+  "stages": [
+    { "label": "外部来源" },
+    { "label": "读取与同步" },
+    { "label": "本地数据" },
+    { "label": "业务规则" },
+    { "label": "用户界面" }
+  ],
+  "nodes": [
+    { "id": "ozon_api", "type": "external", "label": "Ozon Seller API", "sublabel": "订单与履约数据", "stage": 0, "row": 0 },
+    { "id": "xlsx", "type": "external", "label": "产品台账.xlsx", "sublabel": "货号、成本、1688 链接", "stage": 0, "row": 3 },
+    { "id": "sync", "type": "backend", "label": "订单同步", "sublabel": "posting_routes", "stage": 1, "row": 0 },
+    { "id": "ledger_cache", "type": "backend", "label": "台账读取缓存", "sublabel": "路径 + 文件修改时间", "stage": 1, "row": 3 },
+    { "id": "shop_db", "type": "database", "label": "店铺 SQLite", "sublabel": "所有业务数据保存在本地", "stage": 2, "row": 1 },
+    { "id": "order_filter", "type": "backend", "label": "订单履约过滤", "sublabel": "跨境与本土类型隔离", "stage": 3, "row": 0, "width": 150 },
+    { "id": "cost_match", "type": "backend", "label": "成本精确匹配", "sublabel": "货号相同才更新已有 SKU", "stage": 3, "row": 2 },
+    { "id": "url_guard", "type": "security", "label": "1688 域名校验", "sublabel": "仅 http(s)://*.1688.com", "stage": 3, "row": 4 },
+    { "id": "order_ui", "type": "frontend", "label": "跨境订单中心", "sublabel": "CNY 原值与 1688 跳转", "stage": 4, "row": 0 },
+    { "id": "ledger_ui", "type": "frontend", "label": "产品台账", "sublabel": "产品信息、采购成本、缓存", "stage": 2, "row": 3 },
+    { "id": "browser", "type": "external", "label": "系统浏览器", "sublabel": "打开有效 1688 商品页", "stage": 4, "row": 4 }
+  ],
+  "flows": [
+    { "from": "ozon_api", "to": "sync", "label": "同步订单", "classification": "Seller API", "variant": "emphasis", "route": "straight" },
+    { "from": "sync", "to": "shop_db", "label": "写入订单原始币种", "classification": "跨境 CNY", "variant": "emphasis", "route": "vertical-channel" },
+    { "from": "shop_db", "to": "order_filter", "label": "读取店铺订单", "classification": "店铺隔离", "variant": "emphasis", "route": "vertical-channel", "labelDy": 22 },
+    { "from": "order_filter", "to": "order_ui", "label": "分类后的订单", "classification": "不二次换汇", "variant": "emphasis", "route": "straight" },
+    { "from": "xlsx", "to": "ledger_cache", "label": "读取工作表", "classification": "只读", "variant": "default", "route": "straight" },
+    { "from": "ledger_cache", "to": "ledger_ui", "label": "缓存产品资料", "classification": "切页复用", "variant": "emphasis", "route": "straight" },
+    { "from": "ledger_ui", "to": "cost_match", "label": "货号与采购成本", "classification": "精确匹配", "variant": "default", "route": "vertical-channel", "labelDy": -30 },
+    { "from": "cost_match", "to": "shop_db", "label": "更新已有 SKU 成本", "classification": "禁止自动生成", "variant": "security", "route": "vertical-channel" },
+    { "from": "ledger_ui", "to": "url_guard", "label": "候选采购链接", "classification": "不信任输入", "variant": "security", "route": "vertical-channel" },
+    { "from": "url_guard", "to": "browser", "label": "有效链接", "classification": "系统浏览器", "variant": "emphasis", "route": "straight" }
+  ]
+}

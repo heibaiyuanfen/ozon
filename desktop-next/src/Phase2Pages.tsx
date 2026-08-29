@@ -626,7 +626,11 @@ export function ShopsPage({
       await updateShop(editing.id, form.name, form.kind, form.apiName);
     setEditing(null);
     setCreating(false);
-    setMessage("店铺注册表已保存");
+    setMessage(
+      creating
+        ? "店铺已创建并分配不可变专属 ID。"
+        : `店铺名称已更新；专属 ID ${editing?.id} 和原数据库均未改变。`,
+    );
     await reload();
   };
   return (
@@ -666,6 +670,14 @@ export function ShopsPage({
               <p>{shop.apiName || "未命名 API 配置"}</p>
               <small>
                 <Database size={13} /> 独立 SQLite 数据库
+              </small>
+              <small className="shop-identity">
+                专属 ID：<code>{shop.id}</code>
+              </small>
+              <small className="shop-database-size">
+                本地数据库：{shop.databaseSizeBytes >= 1048576
+                  ? `${(shop.databaseSizeBytes / 1048576).toFixed(1)} MB`
+                  : `${Math.max(1, Math.round(shop.databaseSizeBytes / 1024))} KB`}
               </small>
               {shop.id === activeShop?.id && (
                 <b className="current">
@@ -713,6 +725,11 @@ export function ShopsPage({
               <X />
             </button>
             <h2>{creating ? "新增店铺" : "编辑店铺"}</h2>
+            {editing && (
+              <p className="shop-edit-identity">
+                专属 ID：<code>{editing.id}</code>（不可修改，重命名不会更换数据库）
+              </p>
+            )}
             <div className="cost-fields">
               <label>
                 店铺名称
@@ -763,7 +780,7 @@ export function ShopsPage({
           <h3>数据隔离与安全删除</h3>
           <p>
             每个店铺继续使用独立 SQLite
-            数据库。新增店铺只复制数据库结构，不复制业务数据；删除时数据库移动到
+            数据库，并绑定不可变专属 ID。重命名只修改显示名称，不会更换或新建数据库；新增店铺只复制数据库结构，不复制业务数据；删除时数据库移动到
             data/trash，不会永久擦除。
           </p>
         </div>

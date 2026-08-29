@@ -34,6 +34,7 @@ pub struct WbDaily {
     pub nm_id: i64,
     pub article: String,
     pub warehouse_name: String,
+    pub warehouse_mode: String,
     pub quantity: i64,
     pub revenue_cny: f64,
     pub ad_spend_cny: f64,
@@ -54,6 +55,7 @@ pub struct WbOrderRow {
     pub warehouse_name: String,
     pub revenue_cny: f64,
     pub cancelled: bool,
+    pub image_url: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,7 +98,7 @@ fn db(state: &AppState) -> Result<Connection, String> {
     let folder = state.data_dir.join("wb");
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let c = Connection::open(folder.join("wb_analytics.db")).map_err(|e| e.to_string())?;
-    c.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS orders(srid TEXT PRIMARY KEY,day TEXT NOT NULL,changed_at TEXT,nm_id INTEGER NOT NULL DEFAULT 0,article TEXT,warehouse_name TEXT,quantity INTEGER NOT NULL DEFAULT 1,revenue_rub REAL NOT NULL DEFAULT 0,is_cancelled INTEGER NOT NULL DEFAULT 0,raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS ad_daily(day TEXT NOT NULL,nm_id INTEGER NOT NULL,campaign_id INTEGER NOT NULL,spend_rub REAL NOT NULL DEFAULT 0,ad_orders INTEGER NOT NULL DEFAULT 0,ad_sales_rub REAL NOT NULL DEFAULT 0,views INTEGER NOT NULL DEFAULT 0,clicks INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(day,nm_id,campaign_id));CREATE TABLE IF NOT EXISTS product_costs(nm_id INTEGER PRIMARY KEY,article TEXT NOT NULL DEFAULT '',purchase_cost_cny REAL,length_cm REAL,width_cm REAL,height_cm REAL,weight_kg REAL,warehouse_mode TEXT NOT NULL DEFAULT 'auto');CREATE TABLE IF NOT EXISTS warehouses(warehouse_key TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',address TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',country TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL DEFAULT 'unknown',raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS stocks(nm_id INTEGER NOT NULL,chrt_id INTEGER NOT NULL,warehouse_id INTEGER NOT NULL,warehouse_name TEXT NOT NULL DEFAULT '',region_name TEXT NOT NULL DEFAULT '',quantity INTEGER NOT NULL DEFAULT 0,in_way_to_client INTEGER NOT NULL DEFAULT 0,in_way_from_client INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(nm_id,chrt_id,warehouse_id));").map_err(|e|e.to_string())?;
+    c.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS orders(srid TEXT PRIMARY KEY,day TEXT NOT NULL,changed_at TEXT,nm_id INTEGER NOT NULL DEFAULT 0,article TEXT,warehouse_name TEXT,quantity INTEGER NOT NULL DEFAULT 1,revenue_rub REAL NOT NULL DEFAULT 0,is_cancelled INTEGER NOT NULL DEFAULT 0,raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS product_cards(nm_id INTEGER PRIMARY KEY,vendor_code TEXT NOT NULL DEFAULT '',name TEXT NOT NULL DEFAULT '',image_url TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS ad_daily(day TEXT NOT NULL,nm_id INTEGER NOT NULL,campaign_id INTEGER NOT NULL,spend_rub REAL NOT NULL DEFAULT 0,ad_orders INTEGER NOT NULL DEFAULT 0,ad_sales_rub REAL NOT NULL DEFAULT 0,views INTEGER NOT NULL DEFAULT 0,clicks INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(day,nm_id,campaign_id));CREATE TABLE IF NOT EXISTS product_costs(nm_id INTEGER PRIMARY KEY,article TEXT NOT NULL DEFAULT '',purchase_cost_cny REAL,length_cm REAL,width_cm REAL,height_cm REAL,weight_kg REAL,warehouse_mode TEXT NOT NULL DEFAULT 'auto');CREATE TABLE IF NOT EXISTS warehouses(warehouse_key TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',address TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',country TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL DEFAULT 'unknown',raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS stocks(nm_id INTEGER NOT NULL,chrt_id INTEGER NOT NULL,warehouse_id INTEGER NOT NULL,warehouse_name TEXT NOT NULL DEFAULT '',region_name TEXT NOT NULL DEFAULT '',quantity INTEGER NOT NULL DEFAULT 0,in_way_to_client INTEGER NOT NULL DEFAULT 0,in_way_from_client INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(nm_id,chrt_id,warehouse_id));").map_err(|e|e.to_string())?;
     Ok(c)
 }
 fn setting(c: &Connection, key: &str, default: &str) -> String {
@@ -350,6 +352,7 @@ pub fn wb_daily(range: DateRange, state: State<AppState>) -> Result<Vec<WbDaily>
                 nm_id: r.get(1)?,
                 article: r.get(2)?,
                 warehouse_name: warehouse,
+                warehouse_mode: resolved.to_string(),
                 quantity: qty,
                 revenue_cny: revenue,
                 ad_spend_cny: ad,
@@ -386,7 +389,7 @@ pub fn wb_orders(range: DateRange, state: State<AppState>) -> Result<Vec<WbOrder
         .parse::<f64>()
         .unwrap_or(12.0)
         .max(0.0001);
-    let mut stmt = c.prepare("SELECT srid,day,COALESCE(changed_at,''),nm_id,COALESCE(article,''),COALESCE(warehouse_name,''),revenue_rub,is_cancelled FROM orders WHERE day BETWEEN ?1 AND ?2 ORDER BY day DESC,changed_at DESC LIMIT 5000").map_err(|e| e.to_string())?;
+    let mut stmt = c.prepare("SELECT o.srid,o.day,COALESCE(o.changed_at,''),o.nm_id,COALESCE(o.article,''),COALESCE(o.warehouse_name,''),o.revenue_rub,o.is_cancelled,COALESCE(p.image_url,'') FROM orders o LEFT JOIN product_cards p ON p.nm_id=o.nm_id WHERE o.day BETWEEN ?1 AND ?2 ORDER BY o.day DESC,o.changed_at DESC LIMIT 5000").map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![range.from, range.to], |r| {
             Ok(WbOrderRow {
@@ -398,6 +401,7 @@ pub fn wb_orders(range: DateRange, state: State<AppState>) -> Result<Vec<WbOrder
                 warehouse_name: r.get(5)?,
                 revenue_cny: r.get::<_, f64>(6)? / rate,
                 cancelled: r.get::<_, i64>(7)? != 0,
+                image_url: r.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -607,6 +611,75 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
         order_count += 1;
     }
     tx.commit().map_err(|e| e.to_string())?;
+    // Product images are not part of the Statistics orders response.  Cache
+    // official card photos separately so opening the order page never makes
+    // one remote request per row.  Promotion tokens are also accepted by this
+    // Content API method; permission failures preserve the previous cache.
+    let card_result = (|| -> Result<i64, String> {
+        let mut cursor_updated_at = String::new();
+        let mut cursor_nm_id = 0_i64;
+        let mut count = 0_i64;
+        loop {
+            let mut cursor = serde_json::json!({"limit":100});
+            if !cursor_updated_at.is_empty() && cursor_nm_id > 0 {
+                cursor["updatedAt"] = serde_json::Value::String(cursor_updated_at.clone());
+                cursor["nmID"] = serde_json::Value::Number(cursor_nm_id.into());
+            }
+            let payload = wb_post(
+                &token,
+                "https://content-api.wildberries.ru/content/v2/get/cards/list",
+                &serde_json::json!({"settings":{"sort":{"ascending":true},"filter":{"withPhoto":-1},"cursor":cursor}}),
+            )?;
+            let cards = payload
+                .get("cards")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            for card in &cards {
+                let nm_id = card
+                    .get("nmID")
+                    .or_else(|| card.get("nmId"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                if nm_id == 0 {
+                    continue;
+                }
+                let image = card
+                    .get("photos")
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|photo| {
+                        ["big", "c516x688", "square"]
+                            .iter()
+                            .find_map(|key| photo.get(*key).and_then(|v| v.as_str()))
+                    })
+                    .unwrap_or_default();
+                c.execute("INSERT INTO product_cards(nm_id,vendor_code,name,image_url,updated_at)VALUES(?1,?2,?3,?4,CURRENT_TIMESTAMP)ON CONFLICT(nm_id)DO UPDATE SET vendor_code=excluded.vendor_code,name=excluded.name,image_url=CASE WHEN excluded.image_url='' THEN product_cards.image_url ELSE excluded.image_url END,updated_at=CURRENT_TIMESTAMP", params![nm_id,card.get("vendorCode").and_then(|v|v.as_str()).unwrap_or_default(),card.get("title").and_then(|v|v.as_str()).unwrap_or_default(),image]).map_err(|e|e.to_string())?;
+                count += 1;
+            }
+            let next = payload.get("cursor");
+            let next_updated = next
+                .and_then(|v| v.get("updatedAt"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let next_nm = next
+                .and_then(|v| v.get("nmID").or_else(|| v.get("nmId")))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            if cards.len() < 100
+                || next_updated.is_empty()
+                || next_nm == 0
+                || (next_updated == cursor_updated_at && next_nm == cursor_nm_id)
+            {
+                break;
+            }
+            cursor_updated_at = next_updated;
+            cursor_nm_id = next_nm;
+            std::thread::sleep(std::time::Duration::from_millis(650));
+        }
+        Ok(count)
+    })();
     let campaigns = wb_get(
         &token,
         "https://advert-api.wildberries.ru/adv/v1/promotion/count",
@@ -738,8 +811,12 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
         Ok(count) => format!("库存 {count}"),
         Err(error) => format!("库存保留原缓存（新 Analytics 接口不可用：{error}）"),
     };
+    let card_text = match card_result {
+        Ok(count) => format!("商品图片 {count}"),
+        Err(error) => format!("商品图片保留原缓存（{error}）"),
+    };
     Ok(format!(
-        "WB 同步完成：订单 {order_count}，广告活动 {campaign_count}，统计活动 {ad_payload_count}，商品广告 {ad_count}，仓库 {warehouse_count}，{stock_text}{}",
+        "WB 同步完成：订单 {order_count}，{card_text}，广告活动 {campaign_count}，统计活动 {ad_payload_count}，商品广告 {ad_count}，仓库 {warehouse_count}，{stock_text}{}",
         if campaign_count == 0 { "；未读取到广告活动，请检查 Token 的“推广”权限或 WB 后台是否存在状态为 7/9/11 的活动".to_string() }
         else if ad_payload_count == 0 { "；WB 统计接口未返回活动（只统计状态 7/9/11，请检查活动状态与所选日期）".to_string() }
         else if ad_count == 0 { format!("；统计接口返回了活动但无商品层数据，顶层字段：{}", ad_payload_keys.into_iter().collect::<Vec<_>>().join(",")) }

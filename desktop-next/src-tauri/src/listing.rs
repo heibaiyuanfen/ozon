@@ -1,12 +1,19 @@
 use crate::{
-    background_state, db, read_registry, save_setting, secret_setting, seller_post, setting,
-    AppState,
+    background_state, chat_endpoint, collect_competitor_browser_html, db, read_registry,
+    save_setting, secret_setting, seller_post, setting, AppState,
 };
 use calamine::{open_workbook_auto, Reader};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, fs, path::Path, process::Command};
+use std::{
+    collections::HashMap,
+    fs,
+    path::Path,
+    process::Command,
+    sync::{Mutex, OnceLock},
+    time::UNIX_EPOCH,
+};
 use tauri::State;
 
 #[derive(Serialize, Deserialize)]
@@ -25,6 +32,9 @@ pub struct ListingRow {
     platform: String,
     offer_id: String,
     product_id: String,
+    product_title: String,
+    supplier_url: String,
+    currency_code: String,
     unit_cost_cny: Option<f64>,
     weight_kg: Option<f64>,
     length_cm: Option<f64>,
@@ -94,6 +104,49 @@ pub struct ListingCategory {
     name: String,
     display: String,
     score: f64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ListingAttributeDefinition {
+    id: i64,
+    name: String,
+    description: String,
+    attribute_complex_id: i64,
+    is_required: bool,
+    is_collection: bool,
+    dictionary_id: i64,
+    max_value_count: i64,
+    group_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListingValidation {
+    valid: bool,
+    issues: Vec<String>,
+    missing_required: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListingAiFillResult {
+    filled: i64,
+    free_text_filled: i64,
+    dictionary_filled: i64,
+    missing_required: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListingAttributeValueInput {
+    id: i64,
+    attribute_id: i64,
+    attribute_complex_id: i64,
+    attribute_name: String,
+    is_collection: bool,
+    dictionary_value_id: i64,
+    value: String,
 }
 
 #[derive(Deserialize)]
@@ -392,12 +445,34 @@ pub async fn search_listing_categories(
         .map_err(|e| e.to_string())?
 }
 
+fn generated_offer_id(now: chrono::DateTime<chrono::Local>) -> String {
+    format!(
+        "AUTO-{}-{:06X}",
+        now.format("%Y%m%d"),
+        now.timestamp_subsec_nanos() & 0xFF_FFFF
+    )
+}
+
 #[tauri::command]
-pub fn create_listing_draft(reference: String, state: State<AppState>) -> Result<i64, String> {
-    let (url, article) = normalize_reference_input(&reference)?;
+pub fn create_listing_draft(
+    reference: String,
+    listing_mode: String,
+    state: State<AppState>,
+) -> Result<i64, String> {
+    let mode = listing_mode.trim().to_ascii_lowercase();
+    if !["follow", "local"].contains(&mode.as_str()) {
+        return Err("上品模式必须是跟卖或本地新品".into());
+    }
+    let (url, article) = if mode == "follow" {
+        normalize_reference_input(&reference)?
+    } else {
+        (String::new(), String::new())
+    };
+    let offer_id = generated_offer_id(chrono::Local::now());
     let c = db(&state)?;
     ensure_listing_jobs(&c)?;
-    c.execute("INSERT INTO listing_jobs(source_url,article,status,stage,payload)VALUES(?1,?2,'draft',0,?3)",params![url,article,json!({"source_url":url,"article":article}).to_string()]).map_err(|e|e.to_string())?;
+    let payload = json!({"listing_mode":mode,"source_url":url,"article":article,"offer_id":offer_id,"currency_code":"CNY","images":[],"attributes":[],"complex_attributes":[]});
+    c.execute("INSERT INTO listing_jobs(source_url,article,offer_id,status,stage,payload)VALUES(?1,?2,?3,'draft',0,?4)",params![url,article,offer_id,payload.to_string()]).map_err(|e|e.to_string())?;
     Ok(c.last_insert_rowid())
 }
 
@@ -440,6 +515,814 @@ fn object_array(value: &Value, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn value_i64(value: Option<&Value>) -> i64 {
+    value
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+        .unwrap_or(0)
+}
+
+fn value_bool(value: Option<&Value>) -> bool {
+    value
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)))
+        .unwrap_or(false)
+}
+
+fn attribute_definitions_blocking(
+    category_id: i64,
+    type_id: i64,
+    state: &AppState,
+) -> Result<Vec<ListingAttributeDefinition>, String> {
+    if category_id <= 0 || type_id <= 0 {
+        return Err("请先选择有效的 Ozon 类目和 type".into());
+    }
+    let c = db(state)?;
+    let response = seller_post(
+        &c,
+        "/v1/description-category/attribute",
+        &json!({"description_category_id":category_id,"type_id":type_id,"language":"ZH_HANS"}),
+    )?;
+    let items = response
+        .get("result")
+        .or_else(|| response.get("items"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(items
+        .into_iter()
+        .filter_map(|item| {
+            let id = value_i64(item.get("id"));
+            if id <= 0 {
+                return None;
+            }
+            Some(ListingAttributeDefinition {
+                id,
+                name: item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                description: item
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                attribute_complex_id: value_i64(item.get("attribute_complex_id")),
+                is_required: value_bool(item.get("is_required")),
+                is_collection: value_bool(item.get("is_collection")),
+                dictionary_id: value_i64(item.get("dictionary_id")),
+                max_value_count: value_i64(item.get("max_value_count")),
+                group_name: item
+                    .get("group_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn listing_attribute_definitions(
+    category_id: i64,
+    type_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<ListingAttributeDefinition>, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        attribute_definitions_blocking(category_id, type_id, &owned)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn listing_dictionary_values(
+    category_id: i64,
+    type_id: i64,
+    attribute_id: i64,
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    if category_id <= 0 || type_id <= 0 || attribute_id <= 0 {
+        return Err("类目、type 和属性 ID 必须有效".into());
+    }
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let c = db(&owned)?;
+        let query = query.trim();
+        let (path, body) = if query.is_empty() {
+            ("/v1/description-category/attribute/values", json!({"description_category_id":category_id,"type_id":type_id,"attribute_id":attribute_id,"last_value_id":0,"limit":2000,"language":"ZH_HANS"}))
+        } else {
+            ("/v1/description-category/attribute/values/search", json!({"description_category_id":category_id,"type_id":type_id,"attribute_id":attribute_id,"value":query,"limit":100,"language":"ZH_HANS"}))
+        };
+        let response = seller_post(&c, path, &body)?;
+        Ok(response.get("result").cloned().unwrap_or_else(|| json!([])))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn normalized_attribute_name(value: &str) -> String {
+    let without_parentheses = regex::Regex::new(r"\([^)]*\)")
+        .unwrap()
+        .replace_all(&value.to_lowercase().replace('ё', "е"), " ")
+        .to_string();
+    regex::Regex::new(r"[^a-zа-я0-9\u{3400}-\u{9fff}]+")
+        .unwrap()
+        .replace_all(&without_parentheses, " ")
+        .split_whitespace()
+        .filter(|word| !["товар", "товара", "товары", "изделие", "продукт"].contains(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn reference_facts(payload: &Value) -> HashMap<String, String> {
+    let mut facts = HashMap::new();
+    let Some(properties) = payload.get("properties").and_then(Value::as_object) else {
+        return facts;
+    };
+    for (name, raw) in properties {
+        if name == "页面商品参数" {
+            continue;
+        }
+        let value = raw.as_str().unwrap_or("").trim();
+        let key = normalized_attribute_name(name);
+        if !key.is_empty() && !value.is_empty() {
+            facts.entry(key).or_insert_with(|| value.to_string());
+        }
+    }
+    facts
+}
+
+#[tauri::command]
+pub async fn map_listing_reference_attributes(
+    id: i64,
+    state: State<'_, AppState>,
+) -> Result<i64, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let c = db(&owned)?;
+        ensure_listing_jobs(&c)?;
+        let raw: String = c.query_row("SELECT payload FROM listing_jobs WHERE id=?1", [id], |r| r.get(0)).map_err(|_| "上品草稿不存在".to_string())?;
+        let mut payload: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let category_id = payload.get("category_id").and_then(Value::as_str).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let type_id = payload.get("type_id").and_then(Value::as_str).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let definitions = attribute_definitions_blocking(category_id, type_id, &owned)?;
+        let facts = reference_facts(&payload);
+        let mut normal = Vec::new();
+        let mut grouped: std::collections::BTreeMap<i64, Vec<Value>> = std::collections::BTreeMap::new();
+        for definition in definitions {
+            if definition.dictionary_id > 0 {
+                continue;
+            }
+            let key = normalized_attribute_name(&definition.name);
+            let Some(value) = facts.get(&key) else { continue };
+            let item = json!({"complex_id":definition.attribute_complex_id,"id":definition.id,"values":[{"value":value}],"_name":definition.name,"_source":"reference_exact"});
+            if definition.attribute_complex_id > 0 {
+                grouped.entry(definition.attribute_complex_id).or_default().push(item);
+            } else {
+                normal.push(item);
+            }
+        }
+        let complex = grouped.into_iter().map(|(id, attributes)| json!({"attributes":attributes,"_complex_id":id})).collect::<Vec<_>>();
+        let count = normal.len() + complex.iter().filter_map(|v| v.get("attributes")?.as_array()).map(Vec::len).sum::<usize>();
+        payload["attributes"] = Value::Array(normal);
+        payload["complex_attributes"] = Value::Array(complex);
+        payload["attribute_mapping"] = json!({"mode":"reference_exact","mapped":count,"note":"仅标准化后同名自由文本属性；字典属性需人工选择"});
+        let stage = if count > 0 { 3 } else { 2 };
+        c.execute("UPDATE listing_jobs SET status=?1,stage=?2,error='',payload=?3,updated_at=CURRENT_TIMESTAMP WHERE id=?4", params![if stage == 3 {"ready"} else {"draft"},stage,payload.to_string(),id]).map_err(|e|e.to_string())?;
+        Ok(count as i64)
+    }).await.map_err(|e|e.to_string())?
+}
+
+fn attribute_has_value(item: &Value) -> bool {
+    item.get("values")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values.iter().any(|v| {
+                value_i64(v.get("dictionary_value_id")) > 0
+                    || v.get("value")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn attribute_value(input: &ListingAttributeValueInput) -> Result<Value, String> {
+    let value = input.value.trim();
+    if input.dictionary_value_id > 0 {
+        if value.is_empty() {
+            return Err("字典值缺少显示名称，请重新选择".into());
+        }
+        Ok(json!({"dictionary_value_id":input.dictionary_value_id,"value":value}))
+    } else {
+        if value.is_empty() {
+            return Err("属性值不能为空".into());
+        }
+        if regex::Regex::new(r"[\u{3400}-\u{9fff}]")
+            .unwrap()
+            .is_match(value)
+        {
+            return Err("Ozon 自由文本属性不能直接提交中文，请填写俄文或选择官方字典值".into());
+        }
+        Ok(json!({"value":value}))
+    }
+}
+
+fn upsert_attribute(items: &mut Vec<Value>, input: &ListingAttributeValueInput, value: Value) {
+    let position = items
+        .iter()
+        .position(|item| value_i64(item.get("id")) == input.attribute_id);
+    if let Some(index) = position {
+        if !items[index]
+            .get("values")
+            .map(Value::is_array)
+            .unwrap_or(false)
+        {
+            items[index]["values"] = json!([]);
+        }
+        if input.is_collection {
+            let values = items[index]
+                .get_mut("values")
+                .and_then(Value::as_array_mut)
+                .unwrap();
+            let duplicate = values.iter().any(|existing| {
+                let old_id = value_i64(existing.get("dictionary_value_id"));
+                let new_id = value_i64(value.get("dictionary_value_id"));
+                (new_id > 0 && old_id == new_id)
+                    || (new_id == 0 && existing.get("value") == value.get("value"))
+            });
+            if !duplicate {
+                values.push(value);
+            }
+        } else {
+            items[index]["values"] = Value::Array(vec![value]);
+        }
+        items[index]["complex_id"] = json!(input.attribute_complex_id);
+        items[index]["_name"] = json!(input.attribute_name.trim());
+        items[index]["_source"] = json!(if input.dictionary_value_id > 0 {
+            "dictionary_manual"
+        } else {
+            "manual"
+        });
+    } else {
+        items.push(json!({
+            "complex_id": input.attribute_complex_id,
+            "id": input.attribute_id,
+            "values": [value],
+            "_name": input.attribute_name.trim(),
+            "_source": if input.dictionary_value_id > 0 { "dictionary_manual" } else { "manual" }
+        }));
+    }
+}
+
+fn set_attribute_in_payload(
+    payload: &mut Value,
+    input: &ListingAttributeValueInput,
+) -> Result<(), String> {
+    if input.attribute_id <= 0 {
+        return Err("属性 ID 必须有效".into());
+    }
+    let value = attribute_value(input)?;
+    if input.attribute_complex_id > 0 {
+        let groups = payload
+            .get_mut("complex_attributes")
+            .and_then(Value::as_array_mut)
+            .ok_or("组合属性数据格式错误")?;
+        let group_index = groups.iter().position(|group| {
+            value_i64(group.get("_complex_id")) == input.attribute_complex_id
+                || group
+                    .get("attributes")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items.iter().any(|item| {
+                            value_i64(item.get("complex_id")) == input.attribute_complex_id
+                        })
+                    })
+                    .unwrap_or(false)
+        });
+        let index = match group_index {
+            Some(index) => index,
+            None => {
+                groups.push(json!({"attributes":[],"_complex_id":input.attribute_complex_id}));
+                groups.len() - 1
+            }
+        };
+        let items = groups[index]
+            .get_mut("attributes")
+            .and_then(Value::as_array_mut)
+            .ok_or("组合属性分组格式错误")?;
+        upsert_attribute(items, input, value);
+    } else {
+        let items = payload
+            .get_mut("attributes")
+            .and_then(Value::as_array_mut)
+            .ok_or("普通属性数据格式错误")?;
+        upsert_attribute(items, input, value);
+    }
+    Ok(())
+}
+
+fn clear_attribute_in_payload(payload: &mut Value, attribute_id: i64) -> bool {
+    let mut removed = false;
+    if let Some(items) = payload.get_mut("attributes").and_then(Value::as_array_mut) {
+        let before = items.len();
+        items.retain(|item| value_i64(item.get("id")) != attribute_id);
+        removed |= before != items.len();
+    }
+    if let Some(groups) = payload
+        .get_mut("complex_attributes")
+        .and_then(Value::as_array_mut)
+    {
+        for group in groups.iter_mut() {
+            if let Some(items) = group.get_mut("attributes").and_then(Value::as_array_mut) {
+                let before = items.len();
+                items.retain(|item| value_i64(item.get("id")) != attribute_id);
+                removed |= before != items.len();
+            }
+        }
+        groups.retain(|group| {
+            group
+                .get("attributes")
+                .and_then(Value::as_array)
+                .map(|items| !items.is_empty())
+                .unwrap_or(false)
+        });
+    }
+    removed
+}
+
+fn mutate_listing_attribute(
+    id: i64,
+    state: &AppState,
+    mutation: impl FnOnce(&mut Value) -> Result<(), String>,
+) -> Result<Value, String> {
+    let c = db(state)?;
+    ensure_listing_jobs(&c)?;
+    let raw: String = c
+        .query_row("SELECT payload FROM listing_jobs WHERE id=?1", [id], |r| {
+            r.get(0)
+        })
+        .map_err(|_| "上品草稿不存在".to_string())?;
+    let mut payload: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    if !payload
+        .get("attributes")
+        .map(Value::is_array)
+        .unwrap_or(false)
+    {
+        payload["attributes"] = json!([]);
+    }
+    if !payload
+        .get("complex_attributes")
+        .map(Value::is_array)
+        .unwrap_or(false)
+    {
+        payload["complex_attributes"] = json!([]);
+    }
+    mutation(&mut payload)?;
+    c.execute("UPDATE listing_jobs SET status='draft',stage=MAX(stage,2),error='',payload=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2", params![payload.to_string(),id]).map_err(|e|e.to_string())?;
+    Ok(payload)
+}
+
+#[tauri::command]
+pub async fn set_listing_attribute_value(
+    form: ListingAttributeValueInput,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = form.id;
+        mutate_listing_attribute(id, &owned, |payload| {
+            set_attribute_in_payload(payload, &form)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn clear_listing_attribute_value(
+    id: i64,
+    attribute_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        mutate_listing_attribute(id, &owned, |payload| {
+            clear_attribute_in_payload(payload, attribute_id);
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn ai_json_content(raw: &str) -> Result<Value, String> {
+    let response: Value =
+        serde_json::from_str(raw).map_err(|e| format!("AI 返回不是有效响应 JSON：{e}"))?;
+    let content = response
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "AI 返回缺少正文：{}",
+                raw.chars().take(300).collect::<String>()
+            )
+        })?;
+    let trimmed = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    serde_json::from_str(trimmed).map_err(|e| format!("AI 正文不是严格 JSON：{e}"))
+}
+
+fn dictionary_rows(value: &Value) -> Vec<Value> {
+    if let Some(rows) = value.as_array() {
+        return rows.clone();
+    }
+    for key in ["result", "items", "values"] {
+        if let Some(child) = value.get(key) {
+            let rows = dictionary_rows(child);
+            if !rows.is_empty() {
+                return rows;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn ai_fill_required_attributes_blocking(
+    id: i64,
+    state: &AppState,
+) -> Result<ListingAiFillResult, String> {
+    let c = db(state)?;
+    ensure_listing_jobs(&c)?;
+    let raw: String = c
+        .query_row("SELECT payload FROM listing_jobs WHERE id=?1", [id], |r| {
+            r.get(0)
+        })
+        .map_err(|_| "上品草稿不存在".to_string())?;
+    let mut payload: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    if !payload
+        .get("attributes")
+        .map(Value::is_array)
+        .unwrap_or(false)
+    {
+        payload["attributes"] = json!([]);
+    }
+    if !payload
+        .get("complex_attributes")
+        .map(Value::is_array)
+        .unwrap_or(false)
+    {
+        payload["complex_attributes"] = json!([]);
+    }
+    let category_id = payload
+        .get("category_id")
+        .and_then(Value::as_str)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let type_id = payload
+        .get("type_id")
+        .and_then(Value::as_str)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let definitions = attribute_definitions_blocking(category_id, type_id, state)?;
+    let mut present = std::collections::HashSet::new();
+    for item in payload
+        .get("attributes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if attribute_has_value(item) {
+            present.insert(value_i64(item.get("id")));
+        }
+    }
+    for group in payload
+        .get("complex_attributes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for item in group
+            .get("attributes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if attribute_has_value(item) {
+                present.insert(value_i64(item.get("id")));
+            }
+        }
+    }
+    let missing = definitions
+        .iter()
+        .filter(|d| d.is_required && !present.contains(&d.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(ListingAiFillResult {
+            filled: 0,
+            free_text_filled: 0,
+            dictionary_filled: 0,
+            missing_required: vec![],
+        });
+    }
+    let base = setting(&c, "ai_base_url");
+    let model = setting(&c, "ai_model");
+    let key = secret_setting(&c, "ai_api_key")?;
+    if base.is_empty() || model.is_empty() || key.is_empty() {
+        return Err("请先在连接设置中配置 AI Base URL、模型和 API Key".into());
+    }
+    let mut allowed = Vec::new();
+    for definition in &missing {
+        let mut item = json!({"id":definition.id,"name":definition.name,"description":definition.description,"dictionary":definition.dictionary_id>0,"collection":definition.is_collection,"max_value_count":definition.max_value_count});
+        if definition.dictionary_id > 0 {
+            let response = seller_post(
+                &c,
+                "/v1/description-category/attribute/values",
+                &json!({"description_category_id":category_id,"type_id":type_id,"attribute_id":definition.id,"last_value_id":0,"limit":2000,"language":"ZH_HANS"}),
+            )?;
+            let options = dictionary_rows(&response)
+                .into_iter()
+                .filter_map(|row| {
+                    let option_id = value_i64(
+                        row.get("id")
+                            .or_else(|| row.get("value_id"))
+                            .or_else(|| row.get("dictionary_value_id")),
+                    );
+                    let value = row
+                        .get("value")
+                        .or_else(|| row.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    (option_id > 0 && !value.is_empty())
+                        .then(|| json!({"id":option_id,"value":value}))
+                })
+                .collect::<Vec<_>>();
+            item["options"] = Value::Array(options);
+        }
+        allowed.push(item);
+    }
+    let facts = json!({
+        "listing_mode": payload.get("listing_mode").cloned().unwrap_or_else(|| json!("follow")),
+        "title": payload.get("title").cloned().unwrap_or(Value::Null),
+        "description": payload.get("description").cloned().unwrap_or(Value::Null),
+        "source_properties": payload.get("properties").cloned().unwrap_or_else(|| json!({})),
+        "weight_g": payload.get("weight").cloned().unwrap_or(Value::Null),
+        "dimensions_mm": {"depth":payload.get("depth"),"width":payload.get("width"),"height":payload.get("height")}
+    });
+    let user_prompt = format!(
+        "Fill only defensible missing required attributes for the already selected Ozon category. Return strict JSON {{\"attributes\":[{{\"id\":integer,\"value\":string,\"dictionary_value_id\":integer_or_0,\"evidence\":string}}]}}. Use only supplied attribute IDs. For dictionary attributes choose only an ID and exact value from that attribute's options; if no equivalent option exists, omit it. For free-text attributes return Russian only. Never invent brand, model, dimensions, weight, material/composition, country/manufacturer, certification, warranty, package quantity/contents, capacity, or compatibility. Omit anything not stated or strongly entailed. Do not use the source seller article as our offer/model ID. Product facts:\n{}\nAllowed missing required attributes and live dictionary options:\n{}",
+        facts, Value::Array(allowed.clone())
+    );
+    let body = json!({"model":model,"temperature":0,"messages":[{"role":"system","content":"You map factual product data to supplied live Ozon attributes. You never invent IDs or unsupported product facts and return strict JSON only."},{"role":"user","content":user_prompt}]});
+    let response = ureq::post(&chat_endpoint(&base))
+        .set("Authorization", &format!("Bearer {key}"))
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|e| format!("AI 属性填写失败：{e}"))?;
+    let response_raw = response.into_string().map_err(|e| e.to_string())?;
+    let answer = ai_json_content(&response_raw)?;
+    let requested = answer
+        .get("attributes")
+        .and_then(Value::as_array)
+        .ok_or("AI 属性结果缺少 attributes 数组")?;
+    let definitions_by_id = missing.iter().map(|d| (d.id, d)).collect::<HashMap<_, _>>();
+    let allowed_options = allowed
+        .iter()
+        .map(|item| {
+            let attr_id = value_i64(item.get("id"));
+            let options = item
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|option| {
+                    (
+                        value_i64(option.get("id")),
+                        option
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            (attr_id, options)
+        })
+        .collect::<HashMap<_, _>>();
+    let mut free_text_filled = 0;
+    let mut dictionary_filled = 0;
+    for item in requested {
+        let attribute_id = value_i64(item.get("id"));
+        let Some(definition) = definitions_by_id.get(&attribute_id) else {
+            continue;
+        };
+        let mut value = item
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let dictionary_value_id = value_i64(item.get("dictionary_value_id"));
+        if definition.dictionary_id > 0 {
+            let Some(official) = allowed_options
+                .get(&attribute_id)
+                .and_then(|options| options.get(&dictionary_value_id))
+            else {
+                continue;
+            };
+            if official != &value {
+                value = official.clone();
+            }
+            dictionary_filled += 1;
+        } else {
+            if dictionary_value_id > 0 {
+                continue;
+            }
+            free_text_filled += 1;
+        }
+        let input = ListingAttributeValueInput {
+            id,
+            attribute_id,
+            attribute_complex_id: definition.attribute_complex_id,
+            attribute_name: definition.name.clone(),
+            is_collection: definition.is_collection,
+            dictionary_value_id,
+            value,
+        };
+        if set_attribute_in_payload(&mut payload, &input).is_err() {
+            if definition.dictionary_id > 0 {
+                dictionary_filled -= 1;
+            } else {
+                free_text_filled -= 1;
+            }
+        }
+    }
+    let mut now_present = std::collections::HashSet::new();
+    for item in payload
+        .get("attributes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if attribute_has_value(item) {
+            now_present.insert(value_i64(item.get("id")));
+        }
+    }
+    for group in payload
+        .get("complex_attributes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for item in group
+            .get("attributes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if attribute_has_value(item) {
+                now_present.insert(value_i64(item.get("id")));
+            }
+        }
+    }
+    let missing_required = definitions
+        .iter()
+        .filter(|d| d.is_required && !now_present.contains(&d.id))
+        .map(|d| d.name.clone())
+        .collect::<Vec<_>>();
+    payload["ai_attribute_fill"] = json!({"mode":"required_only_evidence_bound","filled":free_text_filled+dictionary_filled,"missing_required":missing_required.clone(),"prompt_version":"legacy-rfbs-v1"});
+    c.execute("UPDATE listing_jobs SET status='draft',stage=MAX(stage,2),error='',payload=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2", params![payload.to_string(),id]).map_err(|e|e.to_string())?;
+    Ok(ListingAiFillResult {
+        filled: free_text_filled + dictionary_filled,
+        free_text_filled,
+        dictionary_filled,
+        missing_required,
+    })
+}
+
+#[tauri::command]
+pub async fn ai_fill_listing_required_attributes(
+    id: i64,
+    state: State<'_, AppState>,
+) -> Result<ListingAiFillResult, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || ai_fill_required_attributes_blocking(id, &owned))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn validate_listing_job(
+    id: i64,
+    state: State<'_, AppState>,
+) -> Result<ListingValidation, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let c = db(&owned)?;
+        let raw: String = c
+            .query_row("SELECT payload FROM listing_jobs WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .map_err(|_| "上品草稿不存在".to_string())?;
+        let payload: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let mut issues = Vec::new();
+        for (key, label) in [
+            ("offer_id", "货号 offer_id"),
+            ("title", "俄文标题"),
+            ("price", "售价"),
+        ] {
+            if payload
+                .get(key)
+                .and_then(Value::as_str)
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+            {
+                issues.push(format!("缺少{label}"));
+            }
+        }
+        let images = payload
+            .get("images")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if images.is_empty()
+            || images
+                .iter()
+                .any(|v| !v.as_str().unwrap_or("").starts_with("https://"))
+        {
+            issues.push("至少需要一张可公开访问的 HTTPS 商品图片".into());
+        }
+        for key in ["weight", "depth", "width", "height"] {
+            if payload.get(key).and_then(Value::as_f64).unwrap_or(0.0) <= 0.0 {
+                issues.push(format!("{key} 必须大于 0"));
+            }
+        }
+        let category_id = payload
+            .get("category_id")
+            .and_then(Value::as_str)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let type_id = payload
+            .get("type_id")
+            .and_then(Value::as_str)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let definitions = attribute_definitions_blocking(category_id, type_id, &owned)?;
+        let mut present = std::collections::HashSet::new();
+        for item in payload
+            .get("attributes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if attribute_has_value(item) {
+                present.insert(value_i64(item.get("id")));
+            }
+        }
+        for group in payload
+            .get("complex_attributes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            for item in group
+                .get("attributes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if attribute_has_value(item) {
+                    present.insert(value_i64(item.get("id")));
+                }
+            }
+        }
+        let missing_required = definitions
+            .into_iter()
+            .filter(|d| d.is_required && !present.contains(&d.id))
+            .map(|d| d.name)
+            .collect::<Vec<_>>();
+        if !missing_required.is_empty() {
+            issues.push(format!("缺少 {} 个 Ozon 必填属性", missing_required.len()));
+        }
+        Ok(ListingValidation {
+            valid: issues.is_empty(),
+            issues,
+            missing_required,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn meta_content(page: &str, key: &str) -> String {
     let escaped = regex::escape(key);
     for pattern in [
@@ -465,6 +1348,19 @@ fn meta_content(page: &str, key: &str) -> String {
 }
 
 fn reference_product_from_html(page: &str) -> Result<Value, String> {
+    let lower = page.to_lowercase();
+    if [
+        "<title>antibot challenge page",
+        "<title>captcha",
+        "verify you are human</h",
+        "access denied</h",
+        "проверка безопасности</h",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return Err("blocked: Ozon 返回验证或访问限制页面".into());
+    }
     let script_re = regex::Regex::new(
         r#"(?is)<script[^>]+type=["']application/ld\+json["'][^>]*>(.*?)</script>"#,
     )
@@ -509,6 +1405,16 @@ fn reference_product_from_html(page: &str) -> Result<Value, String> {
     } else {
         title
     };
+    let title = if title.is_empty() {
+        regex::Regex::new(r#"\\\"name\\\"\s*:\s*\\\"([^\\\"]+)"#)
+            .ok()
+            .and_then(|re| re.captures(page))
+            .and_then(|capture| capture.get(1))
+            .map(|value| value.as_str().replace(r#"\""#, "\"").trim().to_string())
+            .unwrap_or_default()
+    } else {
+        title
+    };
     if title.is_empty() {
         return Err("商品页面没有返回可识别标题，可能触发了 Ozon 验证或地区跳转".into());
     }
@@ -531,8 +1437,8 @@ fn reference_product_from_html(page: &str) -> Result<Value, String> {
         }
     }
     images.retain(|v| v.starts_with("http"));
-    images.sort();
-    images.dedup();
+    let mut seen = std::collections::HashSet::new();
+    images.retain(|value| seen.insert(value.clone()));
     let mut properties = serde_json::Map::new();
     let raw = product
         .get("additionalProperty")
@@ -563,6 +1469,7 @@ fn reference_product_from_html(page: &str) -> Result<Value, String> {
     Ok(json!({"title":title,"description":description,"images":images,"properties":properties}))
 }
 
+#[cfg(any())]
 fn installed_browser() -> Result<std::path::PathBuf, String> {
     for path in [
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -578,7 +1485,12 @@ fn installed_browser() -> Result<std::path::PathBuf, String> {
     Err("未找到 Edge 或 Chrome 可执行文件".into())
 }
 
-fn collect_reference_browser(url: &str, article: &str, state: &AppState) -> Result<Value, String> {
+#[cfg(any())]
+fn collect_reference_browser_legacy(
+    url: &str,
+    article: &str,
+    state: &AppState,
+) -> Result<Value, String> {
     use headless_chrome::{Browser, LaunchOptions};
     let profile = state.data_dir.join("listing_browser_profile");
     fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
@@ -656,6 +1568,21 @@ fn collect_reference_browser(url: &str, article: &str, state: &AppState) -> Resu
     )
 }
 
+fn collect_reference_browser(url: &str, article: &str, state: &AppState) -> Result<Value, String> {
+    // Reuse the exact browser channel that powers competitor monitoring:
+    // Chrome first, then Edge; normal sandbox; automation defaults removed;
+    // target URL and final product identity both verified through CDP.
+    let html = collect_competitor_browser_html(url, article, &state.data_dir, -1)?;
+    let mut product = reference_product_from_html(&html)?;
+    if let Some(object) = product.as_object_mut() {
+        object.insert(
+            "collector_source".into(),
+            Value::String("competitor_browser_capability".into()),
+        );
+    }
+    Ok(product)
+}
+
 fn collect_listing_reference_blocking(id: i64, state: &AppState) -> Result<i64, String> {
     let c = db(state)?;
     ensure_listing_jobs(&c)?;
@@ -730,11 +1657,11 @@ pub fn save_listing_draft(form: ListingDraftInput, state: State<AppState>) -> Re
     object_array(&form.complex_attributes, "组合属性")?;
     let c = db(&state)?;
     ensure_listing_jobs(&c)?;
-    let (source_url, article): (String, String) = c
+    let (source_url, article, previous_raw): (String, String, String) = c
         .query_row(
-            "SELECT source_url,article FROM listing_jobs WHERE id=?1",
+            "SELECT source_url,article,payload FROM listing_jobs WHERE id=?1",
             [form.id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(|_| "上品草稿不存在".to_string())?;
     let stage = if !form.category_id.trim().is_empty() && !form.type_id.trim().is_empty() {
@@ -751,7 +1678,12 @@ pub fn save_listing_draft(form: ListingDraftInput, state: State<AppState>) -> Re
         0
     };
     let status = if stage >= 3 { "ready" } else { "draft" };
-    let payload = json!({"source_url":source_url,"article":article,"offer_id":form.offer_id.trim(),"title":form.title.trim(),"category_id":form.category_id.trim(),"category_display":form.category_display.trim(),"type_id":form.type_id.trim(),"price":form.price.trim(),"weight":form.weight,"depth":form.depth,"width":form.width,"height":form.height,"description":form.description,"images":form.images,"attributes":form.attributes,"complex_attributes":form.complex_attributes});
+    let previous: Value = serde_json::from_str(&previous_raw).unwrap_or_else(|_| json!({}));
+    let listing_mode = previous
+        .get("listing_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("follow");
+    let payload = json!({"listing_mode":listing_mode,"source_url":source_url,"article":article,"offer_id":form.offer_id.trim(),"title":form.title.trim(),"category_id":form.category_id.trim(),"category_display":form.category_display.trim(),"type_id":form.type_id.trim(),"price":form.price.trim(),"currency_code":"CNY","weight":form.weight,"depth":form.depth,"width":form.width,"height":form.height,"description":form.description,"images":form.images,"attributes":form.attributes,"complex_attributes":form.complex_attributes});
     c.execute("UPDATE listing_jobs SET offer_id=?1,title=?2,category_id=?3,category_display=?4,status=?5,stage=?6,error='',payload=?7,updated_at=CURRENT_TIMESTAMP WHERE id=?8",params![form.offer_id.trim(),form.title.trim(),form.category_id.trim(),form.category_display.trim(),status,stage,payload.to_string(),form.id]).map_err(|e|e.to_string())?;
     Ok(stage)
 }
@@ -895,6 +1827,71 @@ fn ledger(path: &str) -> Result<Vec<HashMap<String, String>>, String> {
         })
         .collect())
 }
+
+static LEDGER_CACHE: OnceLock<Mutex<HashMap<String, (u64, Vec<HashMap<String, String>>)>>> =
+    OnceLock::new();
+
+fn cached_ledger(path: &str) -> Result<Vec<HashMap<String, String>>, String> {
+    let modified = fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    let cache = LEDGER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((cached_modified, rows)) = cache
+        .lock()
+        .map_err(|_| "产品台账缓存锁异常")?
+        .get(path)
+        .cloned()
+    {
+        if cached_modified == modified {
+            return Ok(rows);
+        }
+    }
+    let rows = ledger(path)?;
+    cache
+        .lock()
+        .map_err(|_| "产品台账缓存锁异常")?
+        .insert(path.to_string(), (modified, rows.clone()));
+    Ok(rows)
+}
+
+fn valid_supplier_url(value: &str) -> String {
+    let value = value.trim();
+    if regex::Regex::new(r"(?i)^https?://(?:[^/]+\.)?1688\.com/")
+        .unwrap()
+        .is_match(value)
+    {
+        value.to_string()
+    } else {
+        String::new()
+    }
+}
+
+pub(crate) fn supplier_link_for_offer(c: &rusqlite::Connection, offer_id: &str) -> String {
+    let path = setting(c, "listing_ledger_path");
+    if path.is_empty() || offer_id.trim().is_empty() {
+        return String::new();
+    }
+    cached_ledger(&path)
+        .ok()
+        .and_then(|rows| {
+            rows.into_iter()
+                .find(|row| field(row, "货号").eq_ignore_ascii_case(offer_id.trim()))
+        })
+        .map(|row| valid_supplier_url(field(&row, "1688采购链接")))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn open_listing_supplier_url(url: String) -> Result<(), String> {
+    let url = valid_supplier_url(&url);
+    if url.is_empty() {
+        return Err("台账中没有有效的 1688 采购链接".into());
+    }
+    open::that(url).map_err(|e| format!("无法打开 1688 采购链接：{e}"))
+}
 fn field<'a>(row: &'a HashMap<String, String>, key: &str) -> &'a str {
     row.get(key).map(String::as_str).unwrap_or("")
 }
@@ -932,19 +1929,21 @@ fn listing_rows_inner(query: &str, state: &AppState) -> Result<Vec<ListingRow>, 
     }
     let selected = setting(&c, "listing_ledger_shop_name");
     let needle = query.trim().to_lowercase();
-    Ok(ledger(&path)?
+    Ok(cached_ledger(&path)?
         .into_iter()
         .filter(|r| {
-            field(r, "平台").to_lowercase().starts_with("ozon")
+            let platform = field(r, "平台").trim().to_lowercase();
+            (platform.is_empty() || platform.starts_with("ozon"))
                 && (selected.is_empty() || field(r, "上品店铺").eq_ignore_ascii_case(&selected))
         })
         .filter(|r| {
             needle.is_empty()
                 || format!(
-                    "{} {} {}",
+                    "{} {} {} {}",
                     field(r, "上品店铺"),
                     field(r, "货号"),
-                    field(r, "Ozon商品ID")
+                    field(r, "Ozon商品ID"),
+                    field(r, "商品标题")
                 )
                 .to_lowercase()
                 .contains(&needle)
@@ -954,6 +1953,9 @@ fn listing_rows_inner(query: &str, state: &AppState) -> Result<Vec<ListingRow>, 
             platform: field(&r, "平台").into(),
             offer_id: field(&r, "货号").into(),
             product_id: field(&r, "Ozon商品ID").into(),
+            product_title: field(&r, "商品标题").into(),
+            supplier_url: valid_supplier_url(field(&r, "1688采购链接")),
+            currency_code: field(&r, "币种").into(),
             unit_cost_cny: number(field(&r, "采购成本")),
             weight_kg: number(field(&r, "包装毛重(g)")).map(|v| v / 1000.0),
             length_cm: number(field(&r, "包装长度(mm)")).map(|v| v / 10.0),
@@ -1072,9 +2074,11 @@ pub fn launch_listing_tool(state: State<AppState>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_listing_price, flatten_categories, normalize_reference_input, number,
-        reference_product_from_html, stem, ListingPriceInput,
+        ai_json_content, calculate_listing_price, clear_attribute_in_payload, flatten_categories,
+        generated_offer_id, normalize_reference_input, number, reference_product_from_html,
+        set_attribute_in_payload, stem, ListingAttributeValueInput, ListingPriceInput,
     };
+    use crate::collect_competitor_browser_html;
 
     #[test]
     fn ledger_number_accepts_grouped_values() {
@@ -1096,6 +2100,15 @@ mod tests {
         assert_eq!(value["title"], "Товар");
         assert_eq!(value["properties"]["Цвет"], "Черный");
         assert_eq!(value["images"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reference_html_rejects_explicit_challenge() {
+        assert!(
+            reference_product_from_html("<title>Antibot Challenge Page</title>")
+                .unwrap_err()
+                .starts_with("blocked:")
+        );
     }
 
     #[test]
@@ -1133,6 +2146,106 @@ mod tests {
     fn russian_stemming_matches_legacy_suffix_rules() {
         assert_eq!(stem("органайзерами"), "органайзер");
         assert_eq!(stem("платья"), "плать");
+    }
+
+    fn attribute_input(
+        attribute_id: i64,
+        complex_id: i64,
+        collection: bool,
+        dictionary_id: i64,
+        value: &str,
+    ) -> ListingAttributeValueInput {
+        ListingAttributeValueInput {
+            id: 1,
+            attribute_id,
+            attribute_complex_id: complex_id,
+            attribute_name: format!("attribute {attribute_id}"),
+            is_collection: collection,
+            dictionary_value_id: dictionary_id,
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn structured_attribute_editor_updates_normal_and_dictionary_values() {
+        let mut payload = serde_json::json!({"attributes":[],"complex_attributes":[]});
+        set_attribute_in_payload(&mut payload, &attribute_input(10, 0, false, 0, "Красный"))
+            .unwrap();
+        set_attribute_in_payload(&mut payload, &attribute_input(11, 0, false, 501, "Хлопок"))
+            .unwrap();
+        assert_eq!(payload["attributes"][0]["values"][0]["value"], "Красный");
+        assert_eq!(
+            payload["attributes"][1]["values"][0]["dictionary_value_id"],
+            501
+        );
+    }
+
+    #[test]
+    fn structured_attribute_editor_groups_collections_and_deduplicates() {
+        let mut payload = serde_json::json!({"attributes":[],"complex_attributes":[]});
+        let input = attribute_input(20, 99, true, 701, "Первый");
+        set_attribute_in_payload(&mut payload, &input).unwrap();
+        set_attribute_in_payload(&mut payload, &input).unwrap();
+        set_attribute_in_payload(&mut payload, &attribute_input(20, 99, true, 702, "Второй"))
+            .unwrap();
+        assert_eq!(payload["complex_attributes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            payload["complex_attributes"][0]["attributes"][0]["values"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(clear_attribute_in_payload(&mut payload, 20));
+        assert!(payload["complex_attributes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn structured_attribute_editor_rejects_chinese_free_text() {
+        let mut payload = serde_json::json!({"attributes":[],"complex_attributes":[]});
+        assert!(
+            set_attribute_in_payload(&mut payload, &attribute_input(30, 0, false, 0, "红色"))
+                .unwrap_err()
+                .contains("不能直接提交中文")
+        );
+    }
+
+    #[test]
+    fn generated_offer_id_matches_legacy_auto_shape() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-28T12:34:56.123456789+08:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let offer = generated_offer_id(now);
+        assert!(regex::Regex::new(r"^AUTO-20260828-[0-9A-F]{6}$")
+            .unwrap()
+            .is_match(&offer));
+    }
+
+    #[test]
+    fn ai_attribute_response_accepts_strict_json_code_fence() {
+        let raw = serde_json::json!({"choices":[{"message":{"content":"```json\n{\"attributes\":[]}\n```"}}]}).to_string();
+        assert!(ai_json_content(&raw).unwrap()["attributes"].is_array());
+    }
+
+    #[test]
+    #[ignore = "requires a visible Chrome/Edge session and live Ozon access"]
+    fn live_listing_browser_opens_target_product() {
+        let root =
+            std::env::temp_dir().join(format!("ozon-listing-browser-smoke-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let result = collect_competitor_browser_html(
+            "https://www.ozon.ru/product/2846376063/",
+            "2846376063",
+            &root,
+            -1,
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let html = result.expect("browser must open and collect the requested Ozon product");
+        assert!(html.contains("2846376063") || html.contains("og:title"));
+        assert!(
+            html.contains("codexMainImage") || html.contains("og:image"),
+            "browser capture must contain verified main-image evidence"
+        );
     }
 }
 

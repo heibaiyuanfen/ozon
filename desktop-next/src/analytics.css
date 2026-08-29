@@ -3,3 +3,16 @@
 .report-detail td b { white-space: nowrap; }
 .report-detail table { min-width: 1500px; width: max-content; }
 .report-detail th, .report-detail td { white-space: nowrap; }
+.missing-cost-detail { margin-top: 18px; border: 1px solid #fed7aa; }
+.missing-cost-detail .section-heading { padding: 20px 20px 8px; }
+.missing-reasons { display: flex; flex-wrap: wrap; gap: 6px; }
+.missing-reasons span { padding: 4px 8px; border-radius: 999px; background: #fff1e7; color: #b45309; font-size: 12px; white-space: nowrap; }
+.wb-report-overview { margin-bottom: 18px; }
+.wb-report-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 18px; }
+.wb-report-card { position: relative; min-height: 190px; padding: 22px; display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
+.wb-report-card h3 { margin: 0 0 6px; font-size: 17px; }
+.wb-report-card p { margin: 0; color: #74839b; line-height: 1.65; }
+.wb-report-card .badge { margin-top: auto; }
+.wb-report-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; color: #3478f6; background: #edf4ff; }
+@media (max-width: 1180px) { .wb-report-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .wb-report-grid { grid-template-columns: 1fr; } }

@@ -9,3 +9,16 @@
 .listing-draft-editor textarea { display: block; width: 100%; min-height: 92px; margin-top: 7px; padding: 10px 12px; resize: vertical; border: 1px solid #dfe6ef; border-radius: 9px; outline: none; font: 12px/1.5 Consolas, monospace; }
 .listing-draft-editor .competitor-actions { margin-top: 14px; }
 .listing-draft-editor td .outline-button { margin: 2px; }
+.listing-attributes-table td { vertical-align: top; }
+.listing-attributes-table td small { display: block; margin-top: 4px; color: #7c899b; line-height: 1.35; }
+.listing-attribute-missing { background: #fffaf4; }
+.listing-attribute-editor { display: flex; align-items: center; gap: 7px; min-width: 340px; }
+.listing-attribute-editor input, .listing-attribute-editor select { min-width: 0; flex: 1; padding: 8px 10px; border: 1px solid #dfe6ef; border-radius: 8px; background: #fff; }
+.listing-attribute-search { display: flex; gap: 7px; flex: 1; }
+.listing-clear-attribute { margin-top: 6px; padding: 0; border: 0; background: transparent; color: #d14b41; cursor: pointer; font-size: 11px; }
+.listing-clear-attribute:disabled { opacity: .5; cursor: default; }
+.listing-advanced-json { margin: 16px 0; border: 1px solid #e4eaf2; border-radius: 10px; padding: 10px 12px; }
+.listing-advanced-json summary { cursor: pointer; color: #718097; font-size: 12px; }
+.listing-mode-switch { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin: 14px 0 4px; padding: 12px 14px; border: 1px solid #dfe6ef; border-radius: 10px; background: #f8fbff; }
+.listing-mode-switch label { display: flex; align-items: center; gap: 6px; color: #26364d; font-weight: 600; cursor: pointer; }
+.listing-mode-switch span { color: #718097; font-size: 12px; }

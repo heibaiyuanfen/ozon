@@ -789,6 +789,62 @@
   object-fit: cover;
   object-position: center;
 }
+
+.cost-editable-row {
+  cursor: pointer;
+}
+
+.cost-editable-row:hover td {
+  background: #fffaf0;
+}
+
+.wb-cost-tools {
+  margin: 0;
+  border: 0;
+  border-bottom: 1px solid #e6ebf2;
+  border-radius: 0;
+  padding: 14px 18px;
+}
+
+.wb-row-save {
+  min-width: 92px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 11px;
+  border: 1px solid #dfe6ef;
+  border-radius: 9px;
+  background: #f7f9fc;
+  color: #98a3b3;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease;
+}
+
+.wb-row-save:disabled {
+  cursor: default;
+  opacity: .76;
+}
+
+.wb-row-save.dirty {
+  border-color: #3478f6;
+  background: #3478f6;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 5px 12px rgba(52, 120, 246, .2);
+}
+
+.wb-row-save.dirty:hover:not(:disabled) {
+  background: #2468df;
+  transform: translateY(-1px);
+}
+
+.wb-row-save.saved {
+  border-color: #9bdfc2;
+  background: #eafaf4;
+  color: #07885c;
+}
 .competitor-card h3 {
   white-space: nowrap;
   overflow: hidden;
@@ -1600,4 +1656,118 @@
 }
 .campaigns .card-title {
   gap: 14px;
+}
+.shop-identity,
+.shop-database-size {
+  display: flex !important;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+}
+.shop-identity code {
+  color: #2563eb;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.shop-edit-identity {
+  margin: -4px 0 16px !important;
+  color: #64748b !important;
+}
+.shop-edit-identity code {
+  color: #2563eb;
+  font-weight: 800;
+}
+.page-header-actions,
+.dashboard-sync-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dashboard-sync-actions {
+  padding: 7px 8px 7px 12px;
+  border: 1px solid #dfe6ef;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 7px 20px rgba(31, 52, 82, 0.05);
+}
+.dashboard-sync-actions label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #71809a;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.dashboard-sync-actions input {
+  width: 124px;
+  border: 1px solid #dfe6ef;
+  border-radius: 8px;
+  padding: 7px 8px;
+  color: #173056;
+  background: #fff;
+}
+.dashboard-sync-actions .sync-all-button {
+  padding: 9px 13px;
+  white-space: nowrap;
+}
+.dashboard-sync-message {
+  margin: -10px 0 16px;
+  padding: 10px 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: 11px;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+.dashboard-sync-message.error {
+  border-color: #fecaca;
+  color: #b91c1c;
+  background: #fef2f2;
+}
+.sync-mode-tabs {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #dfe6ef;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.sync-mode-tabs button {
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 10px;
+  color: #64748b;
+  background: transparent;
+  cursor: pointer;
+}
+.sync-mode-tabs button.selected {
+  color: #1d4ed8;
+  background: #dbeafe;
+  font-weight: 800;
+}
+.sync-mode-tabs button.selected.danger {
+  color: #b91c1c;
+  background: #fee2e2;
+}
+.sync-mode-tabs.compact button { padding: 5px 8px; font-size: 10px; }
+@media (max-width: 1450px) {
+  .page-header { align-items: flex-start; }
+  .dashboard-sync-actions label { font-size: 0; }
+  .dashboard-sync-actions input { width: 116px; font-size: 11px; }
+}
+.wb-order-image {
+  width: 58px;
+  height: 72px;
+  display: block;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid #e7edf5;
+  background: #f5f7fb;
+}
+.wb-order-image.placeholder {
+  display: grid;
+  place-items: center;
+  color: #9aa7b8;
+  font-size: 10px;
+  text-align: center;
 }

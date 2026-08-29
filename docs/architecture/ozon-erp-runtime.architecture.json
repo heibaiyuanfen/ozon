@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Ozon ERP 本地桌面运行架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1390, 760],
+    "repository": {
+      "url": "https://github.com/heibaiyuanfen/ozon",
+      "revision": "2ca33931d6904589c9ea1c6ef96ee0b2e3e6df08"
+    },
+    "views": [
+      {
+        "id": "local-main-path",
+        "label": "本地业务主链路",
+        "focus": ["operator", "react-ui", "tauri-bridge", "rust-core", "sqlite-store"],
+        "note": "从界面操作、Tauri IPC 到 Rust 业务命令和本地持久化。"
+      },
+      {
+        "id": "official-integrations",
+        "label": "官方平台集成",
+        "focus": ["rust-core", "ozon-seller-api", "wb-api", "feishu-api", "sqlite-store"],
+        "note": "同步操作由用户触发，平台响应经过 Rust 校验后写入独立本地数据。"
+      },
+      {
+        "id": "competitor-path",
+        "label": "竞品公开页采集",
+        "focus": ["react-ui", "rust-core", "collector", "ozon-public", "sqlite-store"],
+        "note": "单任务启停、商品身份核验和快照入库形成独立采集链路。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "运营人员",
+      "sublabel": "本机交互与确认",
+      "pos": [40, 330],
+      "size": [150, 72]
+    },
+    {
+      "id": "react-ui",
+      "type": "frontend",
+      "label": "React 经营工作台",
+      "sublabel": "Vite / TypeScript / ECharts",
+      "tag": "WebView UI",
+      "pos": [270, 330],
+      "size": [190, 76],
+      "sources": [
+        {"path": "desktop-next/src/main.tsx", "line": 7, "label": "React 入口"},
+        {"path": "desktop-next/src/App.tsx", "line": 1, "label": "导航与页面装配"}
+      ]
+    },
+    {
+      "id": "tauri-bridge",
+      "type": "backend",
+      "label": "Tauri IPC 桥接",
+      "sublabel": "invoke 命令与类型边界",
+      "pos": [540, 330],
+      "size": [180, 76],
+      "sources": [
+        {"path": "desktop-next/src/bridge.ts", "line": 289, "label": "前端命令桥"}
+      ]
+    },
+    {
+      "id": "rust-core",
+      "type": "backend",
+      "label": "Rust 业务核心",
+      "sublabel": "Tauri Commands / 同步 / 报表",
+      "tag": "本地执行",
+      "pos": [800, 330],
+      "size": [200, 80],
+      "sources": [
+        {"path": "desktop-next/src-tauri/src/lib.rs", "line": 1041, "label": "Seller API 请求"},
+        {"path": "desktop-next/src-tauri/src/lib.rs", "line": 8370, "label": "命令注册"},
+        {"path": "desktop-next/src-tauri/src/insights.rs", "line": 1, "label": "单品洞察"}
+      ]
+    },
+    {
+      "id": "sqlite-store",
+      "type": "database",
+      "label": "SQLite 本地数据域",
+      "sublabel": "Ozon / WB 分库与缓存",
+      "tag": "data-next",
+      "pos": [1100, 330],
+      "size": [190, 78],
+      "sources": [
+        {"path": "desktop-next/src-tauri/src/lib.rs", "line": 1, "label": "rusqlite"},
+        {"path": "desktop-next/src-tauri/src/lib.rs", "line": 829, "label": "旧库迁移"}
+      ]
+    },
+    {
+      "id": "ozon-seller-api",
+      "type": "cloud",
+      "label": "Ozon Seller API",
+      "sublabel": "商品 / 订单 / Finance / 广告",
+      "pos": [800, 90],
+      "size": [200, 76]
+    },
+    {
+      "id": "wb-api",
+      "type": "cloud",
+      "label": "Wildberries API",
+      "sublabel": "独立 Token 与独立数据库",
+      "pos": [1080, 90],
+      "size": [200, 76],
+      "sources": [
+        {"path": "desktop-next/src-tauri/src/wb.rs", "line": 1, "label": "WB 数据域"}
+      ]
+    },
+    {
+      "id": "feishu-api",
+      "type": "cloud",
+      "label": "飞书开放平台",
+      "sublabel": "多维表格 / 周报 / 发货协作",
+      "pos": [1210, 220],
+      "size": [165, 78],
+      "sources": [
+        {"path": "desktop-next/src-tauri/src/lib.rs", "line": 1143, "label": "飞书 API"}
+      ]
+    },
+    {
+      "id": "collector",
+      "type": "backend",
+      "label": "竞品采集执行器",
+      "sublabel": "Rust 浏览器回退 / Python sidecar",
+      "tag": "任务可启停",
+      "pos": [800, 570],
+      "size": [210, 80],
+      "sources": [
+        {"path": "desktop-next/src-tauri/src/lib.rs", "line": 2913, "label": "Python sidecar 调度"},
+        {"path": "desktop-next/src-tauri/src/lib.rs", "line": 3606, "label": "采集任务流程"},
+        {"path": "competitor_collector.py", "line": 1, "label": "可见浏览器采集"}
+      ]
+    },
+    {
+      "id": "ozon-public",
+      "type": "external",
+      "label": "Ozon 公开商品页",
+      "sublabel": "商品身份 / 主图 / 可见价格",
+      "pos": [1100, 570],
+      "size": [190, 78]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Windows 本地安全工作区",
+      "wraps": ["react-ui", "tauri-bridge", "rust-core", "sqlite-store", "collector"],
+      "pad": 28
+    }
+  ],
+  "connections": [
+    {"id": "operate-ui", "from": "operator", "to": "react-ui", "label": "查看与确认", "variant": "emphasis"},
+    {"id": "ui-invoke", "from": "react-ui", "to": "tauri-bridge", "label": "invoke"},
+    {"id": "bridge-command", "from": "tauri-bridge", "to": "rust-core", "label": "typed command"},
+    {"id": "core-sqlite", "from": "rust-core", "to": "sqlite-store", "label": "事务与快照", "variant": "emphasis", "labelAt": [1104, 422]},
+    {"id": "core-ozon", "from": "rust-core", "to": "ozon-seller-api", "label": "HTTPS JSON", "fromSide": "top", "toSide": "bottom", "labelDx": -54},
+    {"id": "core-wb", "from": "rust-core", "to": "wb-api", "label": "独立同步", "fromSide": "top", "toSide": "bottom"},
+    {"id": "core-feishu", "from": "rust-core", "to": "feishu-api", "label": "Open API", "fromSide": "right", "toSide": "left"},
+    {"id": "dispatch-collector", "from": "rust-core", "to": "collector", "label": "启动 / 停止", "variant": "dashed", "fromSide": "bottom", "toSide": "top"},
+    {"id": "collector-public", "from": "collector", "to": "ozon-public", "label": "可见页面读取", "variant": "dashed", "labelDy": 30},
+    {"id": "collector-cache", "from": "collector", "to": "sqlite-store", "label": "校验后写入", "fromSide": "right", "toSide": "bottom"}
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "本地优先",
+      "items": ["Tauri 桌面程序内嵌 React 前端", "业务数据与缓存保存在本机 SQLite", "敏感操作由用户主动触发并确认"]
+    },
+    {
+      "dot": "cyan",
+      "title": "数据边界",
+      "items": ["Ozon 与 WB 使用独立凭证和数据库", "Finance、订单、广告与商品快照按真实来源入库", "飞书用于协作，不替代本地业务主库"]
+    },
+    {
+      "dot": "amber",
+      "title": "采集边界",
+      "items": ["竞品采集与 Seller API 同步分离", "任务支持逐个开始和停止", "受阻或身份不一致时记录证据，不猜测数据"]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
-use crate::{db, AppState};
+use crate::{db, seller_post, AppState};
 use rusqlite::{params, Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::State;
 
@@ -36,6 +36,60 @@ pub struct ProductDetail {
     name: String,
     trend: Vec<ProductTrend>,
     clusters: Vec<ProductWeight>,
+    price: Option<ProductPrice>,
+    price_logs: Vec<ProductPriceLog>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductPrice {
+    sku: String,
+    offer_id: String,
+    product_id: String,
+    currency_code: String,
+    price: f64,
+    old_price: f64,
+    min_price: f64,
+    marketing_seller_price: Option<f64>,
+    retail_price: Option<f64>,
+    net_price: Option<f64>,
+    synced_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductPriceLog {
+    id: i64,
+    before_price: f64,
+    requested_price: f64,
+    verified_price: Option<f64>,
+    status: String,
+    message: String,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductPriceUpdate {
+    sku: String,
+    price: f64,
+    old_price: f64,
+    min_price: f64,
+    currency_code: String,
+}
+
+fn validate_price_update(form: &ProductPriceUpdate) -> Result<(), String> {
+    if !form.price.is_finite() || form.price <= 0.0 || form.old_price < 0.0 || form.min_price < 0.0
+    {
+        return Err("售价必须大于 0，划线价和最低价不能小于 0".into());
+    }
+    if form.old_price > 0.0 && form.old_price <= form.price {
+        return Err("划线价必须高于当前售价；不使用划线价时请填写 0".into());
+    }
+    if form.min_price > 0.0 && form.price < form.min_price {
+        return Err("售价不能低于最低价".into());
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -62,7 +116,206 @@ pub struct InsightRow {
 }
 
 fn ensure(c: &Connection) -> Result<(), String> {
-    c.execute_batch("CREATE TABLE IF NOT EXISTS product_series(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS product_series_members(series_id INTEGER NOT NULL,sku TEXT NOT NULL,PRIMARY KEY(series_id,sku),FOREIGN KEY(series_id)REFERENCES product_series(id)ON DELETE CASCADE);CREATE TABLE IF NOT EXISTS product_cluster_weights(sku TEXT NOT NULL,cluster_name TEXT NOT NULL,weight REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(sku,cluster_name));CREATE INDEX IF NOT EXISTS idx_series_members_sku ON product_series_members(sku);").map_err(|e|e.to_string())
+    c.execute_batch("CREATE TABLE IF NOT EXISTS product_series(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS product_series_members(series_id INTEGER NOT NULL,sku TEXT NOT NULL,PRIMARY KEY(series_id,sku),FOREIGN KEY(series_id)REFERENCES product_series(id)ON DELETE CASCADE);CREATE TABLE IF NOT EXISTS product_cluster_weights(sku TEXT NOT NULL,cluster_name TEXT NOT NULL,weight REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(sku,cluster_name));CREATE INDEX IF NOT EXISTS idx_series_members_sku ON product_series_members(sku);CREATE TABLE IF NOT EXISTS product_price_cache(sku TEXT PRIMARY KEY,offer_id TEXT NOT NULL DEFAULT '',product_id TEXT NOT NULL DEFAULT '',currency_code TEXT NOT NULL DEFAULT 'RUB',price REAL NOT NULL DEFAULT 0,old_price REAL NOT NULL DEFAULT 0,min_price REAL NOT NULL DEFAULT 0,marketing_seller_price REAL,retail_price REAL,net_price REAL,raw_json TEXT NOT NULL DEFAULT '',synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS product_price_action_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,sku TEXT NOT NULL,offer_id TEXT NOT NULL DEFAULT '',before_price REAL NOT NULL DEFAULT 0,requested_price REAL NOT NULL,requested_old_price REAL NOT NULL DEFAULT 0,requested_min_price REAL NOT NULL DEFAULT 0,currency_code TEXT NOT NULL DEFAULT 'RUB',status TEXT NOT NULL DEFAULT 'pending',message TEXT NOT NULL DEFAULT '',response_json TEXT NOT NULL DEFAULT '',verified_price REAL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,verified_at TEXT NOT NULL DEFAULT '');CREATE INDEX IF NOT EXISTS idx_product_price_logs_sku ON product_price_action_logs(sku,created_at DESC);").map_err(|e|e.to_string())
+}
+
+fn number(value: Option<&serde_json::Value>) -> Option<f64> {
+    value.and_then(|v| {
+        v.as_f64()
+            .or_else(|| v.as_str()?.replace(',', ".").parse().ok())
+    })
+}
+
+fn cached_price(c: &Connection, sku: &str) -> Option<ProductPrice> {
+    c.query_row("SELECT sku,offer_id,product_id,currency_code,price,old_price,min_price,marketing_seller_price,retail_price,net_price,synced_at FROM product_price_cache WHERE sku=?1",[sku],|r|Ok(ProductPrice{sku:r.get(0)?,offer_id:r.get(1)?,product_id:r.get(2)?,currency_code:r.get(3)?,price:r.get(4)?,old_price:r.get(5)?,min_price:r.get(6)?,marketing_seller_price:r.get(7)?,retail_price:r.get(8)?,net_price:r.get(9)?,synced_at:r.get(10)?})).ok()
+}
+
+fn price_logs(c: &Connection, sku: &str) -> Vec<ProductPriceLog> {
+    c.prepare("SELECT id,before_price,requested_price,verified_price,status,message,created_at FROM product_price_action_logs WHERE sku=?1 ORDER BY id DESC LIMIT 20").and_then(|mut s|s.query_map([sku],|r|Ok(ProductPriceLog{id:r.get(0)?,before_price:r.get(1)?,requested_price:r.get(2)?,verified_price:r.get(3)?,status:r.get(4)?,message:r.get(5)?,created_at:r.get(6)?}))?.collect()).unwrap_or_default()
+}
+
+fn refresh_price(c: &Connection, sku: &str) -> Result<ProductPrice, String> {
+    let (offer_id, product_id): (String, String) = c
+        .query_row(
+            "SELECT COALESCE(offer_id,''),COALESCE(product_id,'') FROM products WHERE sku=?1",
+            [sku],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "当前产品缺少本地商品标识，请先同步 Seller 商品资料".to_string())?;
+    if offer_id.is_empty() && product_id.is_empty() {
+        return Err("当前产品缺少货号和 Product ID，无法查询价格".into());
+    }
+    let filter = if !offer_id.is_empty() {
+        serde_json::json!({"offer_id":[offer_id]})
+    } else {
+        serde_json::json!({"product_id":[product_id.parse::<i64>().unwrap_or_default()]})
+    };
+    let payload = seller_post(
+        c,
+        "/v5/product/info/prices",
+        &serde_json::json!({"filter":filter,"cursor":"","limit":100}),
+    )?;
+    let item = payload
+        .get("items")
+        .or_else(|| payload.pointer("/result/items"))
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first())
+        .ok_or("Ozon 未返回该产品的价格；请检查商品标识与 API 权限")?;
+    let price_obj = item.get("price").unwrap_or(item);
+    let current = ProductPrice {
+        sku: sku.to_string(),
+        offer_id: item
+            .get("offer_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&offer_id)
+            .to_string(),
+        product_id: item
+            .get("product_id")
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| v.to_string())
+            })
+            .unwrap_or(product_id),
+        currency_code: price_obj
+            .get("currency_code")
+            .or_else(|| item.get("currency_code"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("RUB")
+            .to_string(),
+        price: number(price_obj.get("price"))
+            .or_else(|| number(price_obj.get("marketing_seller_price")))
+            .unwrap_or(0.0),
+        old_price: number(price_obj.get("old_price")).unwrap_or(0.0),
+        min_price: number(price_obj.get("min_price")).unwrap_or(0.0),
+        marketing_seller_price: number(price_obj.get("marketing_seller_price")),
+        retail_price: number(price_obj.get("retail_price")),
+        net_price: number(price_obj.get("net_price")),
+        synced_at: chrono::Local::now().to_rfc3339(),
+    };
+    c.execute("INSERT INTO product_price_cache(sku,offer_id,product_id,currency_code,price,old_price,min_price,marketing_seller_price,retail_price,net_price,raw_json,synced_at)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,CURRENT_TIMESTAMP)ON CONFLICT(sku)DO UPDATE SET offer_id=excluded.offer_id,product_id=excluded.product_id,currency_code=excluded.currency_code,price=excluded.price,old_price=excluded.old_price,min_price=excluded.min_price,marketing_seller_price=excluded.marketing_seller_price,retail_price=excluded.retail_price,net_price=excluded.net_price,raw_json=excluded.raw_json,synced_at=CURRENT_TIMESTAMP",params![current.sku,current.offer_id,current.product_id,current.currency_code,current.price,current.old_price,current.min_price,current.marketing_seller_price,current.retail_price,current.net_price,item.to_string()]).map_err(|e|e.to_string())?;
+    cached_price(c, sku).ok_or("价格缓存写入失败".into())
+}
+
+#[tauri::command]
+pub fn refresh_product_price(sku: String, state: State<AppState>) -> Result<ProductPrice, String> {
+    let c = db(&state)?;
+    ensure(&c)?;
+    refresh_price(&c, sku.trim())
+}
+
+#[tauri::command]
+pub fn update_product_price(
+    form: ProductPriceUpdate,
+    state: State<AppState>,
+) -> Result<ProductPrice, String> {
+    validate_price_update(&form)?;
+    let c = db(&state)?;
+    ensure(&c)?;
+    let before = refresh_price(&c, form.sku.trim()).or_else(|_| {
+        cached_price(&c, form.sku.trim()).ok_or_else(|| "无法取得改价前价格".to_string())
+    })?;
+    let offer = if before.offer_id.is_empty() {
+        c.query_row(
+            "SELECT COALESCE(offer_id,'') FROM products WHERE sku=?1",
+            [form.sku.trim()],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_default()
+    } else {
+        before.offer_id.clone()
+    };
+    if offer.is_empty() {
+        return Err("当前产品缺少货号，无法安全修改价格".into());
+    }
+    c.execute("INSERT INTO product_price_action_logs(sku,offer_id,before_price,requested_price,requested_old_price,requested_min_price,currency_code,status)VALUES(?1,?2,?3,?4,?5,?6,?7,'pending')",params![form.sku,offer,before.price,form.price,form.old_price,form.min_price,form.currency_code]).map_err(|e|e.to_string())?;
+    let log_id = c.last_insert_rowid();
+    let payload = serde_json::json!({"prices":[{"offer_id":offer,"price":form.price.to_string(),"old_price":form.old_price.to_string(),"min_price":form.min_price.to_string(),"currency_code":if form.currency_code.is_empty(){"RUB"}else{&form.currency_code},"auto_action_enabled":"UNKNOWN"}]});
+    let response = match seller_post(&c, "/v1/product/import/prices", &payload) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = c.execute(
+                "UPDATE product_price_action_logs SET status='failed',message=?1 WHERE id=?2",
+                params![e, log_id],
+            );
+            return Err(e);
+        }
+    };
+    let result = response
+        .get("result")
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first());
+    let updated = result
+        .and_then(|v| v.get("updated"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let errors = result
+        .and_then(|v| v.get("errors"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if !updated || !errors.is_empty() {
+        let message = if errors.is_empty() {
+            "Ozon 未确认价格更新".to_string()
+        } else {
+            errors
+                .iter()
+                .map(|e| {
+                    e.get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("未知错误")
+                })
+                .collect::<Vec<_>>()
+                .join("；")
+        };
+        let _=c.execute("UPDATE product_price_action_logs SET status='failed',message=?1,response_json=?2 WHERE id=?3",params![message,response.to_string(),log_id]);
+        return Err(message);
+    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let verified = refresh_price(&c, form.sku.trim()).ok();
+    let verified_price = verified.as_ref().map(|v| v.price);
+    let status = if verified_price.is_some_and(|v| (v - form.price).abs() < 0.01) {
+        "verified"
+    } else {
+        "accepted"
+    };
+    let message = if status == "verified" {
+        "Ozon 已接受并回读确认新价格"
+    } else {
+        "Ozon 已接受更新；价格缓存尚未刷新，请稍后再次读取"
+    };
+    c.execute("UPDATE product_price_action_logs SET status=?1,message=?2,response_json=?3,verified_price=?4,verified_at=CASE WHEN ?4 IS NULL THEN '' ELSE CURRENT_TIMESTAMP END WHERE id=?5",params![status,message,response.to_string(),verified_price,log_id]).map_err(|e|e.to_string())?;
+    verified
+        .or_else(|| cached_price(&c, form.sku.trim()))
+        .ok_or("价格更新已提交，但无法读取价格缓存".into())
+}
+
+#[cfg(test)]
+mod price_tests {
+    use super::*;
+
+    fn form(price: f64, old_price: f64, min_price: f64) -> ProductPriceUpdate {
+        ProductPriceUpdate {
+            sku: "SKU-1".into(),
+            price,
+            old_price,
+            min_price,
+            currency_code: "RUB".into(),
+        }
+    }
+
+    #[test]
+    fn accepts_safe_price_relationships() {
+        assert!(validate_price_update(&form(1686.0, 1990.0, 1500.0)).is_ok());
+        assert!(validate_price_update(&form(1686.0, 0.0, 0.0)).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_price_relationships() {
+        assert!(validate_price_update(&form(0.0, 0.0, 0.0)).is_err());
+        assert!(validate_price_update(&form(1686.0, 1600.0, 1500.0)).is_err());
+        assert!(validate_price_update(&form(1400.0, 1990.0, 1500.0)).is_err());
+    }
 }
 
 #[tauri::command]
@@ -104,12 +357,16 @@ pub fn product_detail(
             orders: item.orders,
         })
     }
+    let price = cached_price(&c, &sku);
+    let price_logs = price_logs(&c, &sku);
     Ok(ProductDetail {
         sku,
         offer_id,
         name,
         trend,
         clusters,
+        price,
+        price_logs,
     })
 }
 

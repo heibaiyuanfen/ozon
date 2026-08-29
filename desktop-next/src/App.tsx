@@ -4,6 +4,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  type ReactNode,
 } from "react";
 import "./performance.css";
 import "./layout-fixes.css";
@@ -39,8 +40,10 @@ import {
   inventory,
   listShops,
   orders,
+  openListingSupplierUrl,
   products,
   selectShop,
+  syncAllData,
 } from "./bridge";
 import type {
   AdvertisingData,
@@ -66,7 +69,7 @@ import {
   CompetitorsPage,
   FbsPage,
   FeishuPage,
-  ListingPage,
+  ListingLedgerPage,
   MigrationPage,
   ReportsPage,
   SupplyPage,
@@ -99,6 +102,7 @@ const emptyDashboard: DashboardData = {
   views: 0,
   orderConversion: null,
 };
+const orderCache = new Map<string, Promise<OrderRow[]>>();
 const emptyAds: AdvertisingData = {
   impressions: 0,
   clicks: 0,
@@ -167,8 +171,8 @@ function Sidebar({
   changeShop: (id: string) => void;
   workspace: "ozon" | "wb";
   setWorkspace: (value: "ozon" | "wb") => void;
-  wbPage: "daily" | "costs" | "settings";
-  setWbPage: (value: "daily" | "costs" | "settings") => void;
+  wbPage: "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings";
+  setWbPage: (value: "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings") => void;
   collapsed: boolean;
   setCollapsed: (value: boolean) => void;
 }) {
@@ -177,7 +181,7 @@ function Sidebar({
     { id: "marketing", label: "营销与洞察", icon: Target, items: [["growth_center", "增长中心", BarChart3], ["advertising", "广告运营", Megaphone], ["competitors", "竞品跟踪", PackageSearch], ["differentiation", "亚马逊差异化选品", Target], ["ai", "AI 分析", BrainCircuit]] },
     { id: "reports", label: "报表与利润", icon: BarChart3, items: [["reports", "数据报告", BarChart3], ["monthly_profit", "月度盈亏", BarChart3], ["weekly_report", "经营周报", CalendarDays], ["cross_profit", "跨境店铺利润", BarChart3]] },
     { id: "inventory", label: "库存与供应链", icon: PackageSearch, items: [["inventory", "库存管理", PackageSearch], ["supply", "约仓计划", Truck]] },
-    { id: "cross", label: "跨境运营", icon: Truck, items: [["cross_border_ops", "俄罗斯跨境经营", Truck], ["listing", "跨境上品", PackageSearch]] },
+    { id: "cross", label: "跨境运营", icon: Truck, items: [["cross_border_ops", "俄罗斯跨境经营", Truck], ["listing", "产品台账", PackageSearch]] },
     { id: "data", label: "数据与协作", icon: Database, items: [["sync", "数据同步", RefreshCw], ["feishu", "飞书协作", Database], ["migration", "数据迁移", Database]] },
     { id: "system", label: "系统设置", icon: Settings2, items: [["shops", "店铺管理", Store], ["settings", "连接设置", Settings2]] },
   ];
@@ -243,16 +247,22 @@ function Sidebar({
             {(
               [
                 ["daily", "经营总览", LayoutDashboard],
+                ["reports", "报告中心", BarChart3],
+                ["orders", "订单中心", ShoppingBag],
+                ["ads", "广告运营", Megaphone],
+                ["inventory", "仓库与库存", PackageSearch],
                 ["costs", "商品与成本", Box],
+                ["domestic_profit", "本土利润", BarChart3],
+                ["cross_profit", "跨境利润", BarChart3],
                 ["settings", "WB API 与汇率", Settings2],
               ] as Array<
-                ["daily" | "costs" | "settings", string, typeof LayoutDashboard]
+                ["daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings", string, typeof LayoutDashboard]
               >
             ).map(([key, label, Icon]) => (
               <button
                 key={label}
                 className={wbPage === key ? "active" : ""}
-                onClick={() => setWbPage(key as "daily" | "costs" | "settings")}
+                onClick={() => setWbPage(key)}
               >
                 <Icon size={17} />
                 {label}
@@ -278,12 +288,14 @@ function Header({
   subtitle,
   refreshing,
   refresh,
+  actions,
 }: {
   eyebrow: string;
   title: string;
   subtitle: string;
   refreshing: boolean;
   refresh: () => void;
+  actions?: ReactNode;
 }) {
   return (
     <header className="page-header">
@@ -292,10 +304,13 @@ function Header({
         <h1>{title}</h1>
         <p>{subtitle}</p>
       </div>
-      <button className="dark-button" onClick={refresh} disabled={refreshing}>
-        <RefreshCw size={16} className={refreshing ? "spin" : ""} />
-        {refreshing ? "正在读取" : "刷新数据"}
-      </button>
+      <div className="page-header-actions">
+        {actions}
+        <button className="dark-button" onClick={refresh} disabled={refreshing}>
+          <RefreshCw size={16} className={refreshing ? "spin" : ""} />
+          {refreshing ? "正在读取" : "刷新数据"}
+        </button>
+      </div>
     </header>
   );
 }
@@ -435,6 +450,7 @@ function Dashboard({
   setDays,
   refreshing,
   refresh,
+  range,
   to,
 }: {
   data: DashboardData;
@@ -443,9 +459,40 @@ function Dashboard({
   setDays: (n: number) => void;
   refreshing: boolean;
   refresh: () => void;
+  range: DateRange;
   to: string;
 }) {
-  const [chartMode, setChartMode] = useState<"revenue" | "units">("revenue");
+  const [chartMode, setChartMode] = useState<"revenue" | "units">("revenue"),
+    [syncRange, setSyncRange] = useState<DateRange>(range),
+    [forceSync, setForceSync] = useState(false),
+    [syncingAll, setSyncingAll] = useState(false),
+    [syncMessage, setSyncMessage] = useState("");
+  useEffect(() => setSyncRange(range), [range.from, range.to]);
+  const today = new Date().toISOString().slice(0, 10),
+    syncRangeValid = !!syncRange.from && !!syncRange.to && syncRange.from <= syncRange.to && syncRange.to <= today;
+  const syncEverything = async () => {
+    if (!syncRangeValid) {
+      setSyncMessage("请选择有效日期：结束日期不能早于开始日期，也不能晚于今天。");
+      return;
+    }
+    setSyncingAll(true);
+    setSyncMessage("Seller、Performance 和 Finance 正在并行同步…");
+    try {
+      const result = await syncAllData(syncRange, forceSync);
+      clearReportCache();
+      const items = [
+        result.sellerError ? `Seller 失败：${result.sellerError}` : result.sellerRows === 0 ? "Seller 复用本地缓存" : `Seller ${result.sellerRows ?? 0} 行`,
+        result.performanceError ? `Performance 失败：${result.performanceError}` : result.performanceRows === 0 ? "Performance 复用本地缓存" : `Performance ${result.performanceRows ?? 0} 行`,
+        result.financeError ? `Finance 失败：${result.financeError}` : result.financeRows === 0 ? "Finance 复用本地缓存" : `Finance ${result.financeRows ?? 0} 行`,
+      ];
+      setSyncMessage(`同步完成：${items.join("；")}`);
+      await refresh();
+    } catch (error) {
+      setSyncMessage(`同步启动失败：${String(error)}`);
+    } finally {
+      setSyncingAll(false);
+    }
+  };
   const avg = data.orders ? data.revenue / data.orders : 0;
   return (
     <>
@@ -455,7 +502,22 @@ function Dashboard({
         subtitle="当前店铺经营表现与本地缓存快照"
         refreshing={refreshing}
         refresh={refresh}
+        actions={
+          <div className="dashboard-sync-actions">
+            <div className="sync-mode-tabs compact">
+              <button className={!forceSync ? "selected" : ""} onClick={() => setForceSync(false)}>智能</button>
+              <button className={forceSync ? "selected danger" : ""} onClick={() => setForceSync(true)}>强制</button>
+            </div>
+            <label>开始<input type="date" value={syncRange.from} max={syncRange.to || today} onChange={(event) => setSyncRange((current) => ({ ...current, from: event.target.value }))} /></label>
+            <label>结束<input type="date" value={syncRange.to} min={syncRange.from} max={today} onChange={(event) => setSyncRange((current) => ({ ...current, to: event.target.value }))} /></label>
+            <button className="sync-all-button" disabled={syncingAll || refreshing || !syncRangeValid} onClick={() => void syncEverything()}>
+              <RefreshCw size={16} className={syncingAll ? "spin" : ""} />
+              {syncingAll ? "同步中" : "同步所有数据"}
+            </button>
+          </div>
+        }
       />
+      {syncMessage && <div className={`dashboard-sync-message ${syncMessage.includes("失败") ? "error" : ""}`}>{syncMessage}</div>}
       <div className="hero-grid">
         <section className="card summary">
           <div className="card-title">
@@ -645,6 +707,7 @@ function Orders({
   refresh,
   query,
   setQuery,
+  crossBorder,
 }: {
   rows: OrderRow[];
   currency: string;
@@ -654,6 +717,7 @@ function Orders({
   refresh: () => void;
   query: string;
   setQuery: (q: string) => void;
+  crossBorder: boolean;
 }) {
   const [page, setPage] = useState(0),
     pages = Math.max(1, Math.ceil(rows.length / 50)),
@@ -663,8 +727,8 @@ function Orders({
     <>
       <Header
         eyebrow="ORDER OPERATIONS"
-        title="订单中心"
-        subtitle="FBS / FBO 订单状态、履约、商品、集群与基础配送"
+        title={crossBorder ? "跨境订单中心" : "本土订单中心"}
+        subtitle={crossBorder ? "RFBS / FBP / WHD 订单状态、履约与采购台账" : "FBS / FBO 订单状态、履约、商品、集群与基础配送"}
         refreshing={refreshing}
         refresh={refresh}
       />
@@ -731,6 +795,14 @@ function Orders({
                         {row.offerId || "—"} ×{row.quantity}
                       </b>
                       <small>{row.sku}</small>
+                      {row.supplierUrl && (
+                        <button
+                          className="link-button"
+                          onClick={() => void openListingSupplierUrl(row.supplierUrl)}
+                        >
+                          打开 1688
+                        </button>
+                      )}
                     </div>
                   </div>
                 </td>
@@ -1113,7 +1185,7 @@ export function App() {
   const [page, setPage] = useState<PageKey>("dashboard"),
     [workspace, setWorkspace] = useState<"ozon" | "wb">("ozon"),
     [sidebarCollapsed, setSidebarCollapsed] = useState(false),
-    [wbPage, setWbPage] = useState<"daily" | "costs" | "settings">("daily"),
+    [wbPage, setWbPage] = useState<"daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings">("daily"),
     [shops, setShops] = useState<Shop[]>([]),
     [days, setDays] = useState(7),
     [dash, setDash] = useState(emptyDashboard),
@@ -1136,7 +1208,11 @@ export function App() {
     setRefreshing(true);
     try {
       if (page === "dashboard") setDash(await dashboard(range));
-      if (page === "orders") setOrderRows(await orders(range, deferredQuery));
+      if (page === "orders") {
+        const key = `${activeShop?.id || ""}|${range.from}|${range.to}|${deferredQuery}`;
+        if (!orderCache.has(key)) orderCache.set(key, orders(range, deferredQuery));
+        setOrderRows(await orderCache.get(key)!);
+      }
       if (page === "advertising") setAds(await advertising(range));
       if (page === "products")
         setProductRows(await products(range, deferredQuery));
@@ -1156,6 +1232,7 @@ export function App() {
   const changeShop = async (id: string) => {
     await selectShop(id);
     clearReportCache();
+    orderCache.clear();
     setProductRows([]);
     const nextShop = shops.find((shop) => shop.id === id);
     if (nextShop?.kind === "cross_border" && page === "monthly_profit") {
@@ -1191,6 +1268,7 @@ export function App() {
                 setDays={setDays}
                 refreshing={refreshing}
                 refresh={load}
+                range={range}
                 to={range.to}
               />
             )}{" "}
@@ -1201,9 +1279,13 @@ export function App() {
                 days={days}
                 setDays={setDays}
                 refreshing={refreshing}
-                refresh={load}
+                refresh={() => {
+                  orderCache.clear();
+                  void load();
+                }}
                 query={query}
                 setQuery={setQuery}
+                crossBorder={activeShop?.kind === "cross_border"}
               />
             )}{" "}
             {page === "fbs" && <FbsPage currency={currency} />}{" "}
@@ -1279,7 +1361,7 @@ export function App() {
             {page === "feishu" && <FeishuPage range={range} />}{" "}
             {page === "wb" && <WbPage range={range} section="daily" days={days} setDays={setDays} />}{" "}
             {page === "migration" && <MigrationPage range={range} />}{" "}
-            {page === "listing" && <ListingPage />}{" "}
+            {page === "listing" && <ListingLedgerPage />}{" "}
             {page === "cross_border_ops" && <CrossBorderOperationsPage range={range} shopName={activeShop?.name || "当前店铺"} enabled={activeShop?.kind === "cross_border"} />}{" "}
             {page === "competitors" && (
               <CompetitorsPage key={activeShop?.id} />

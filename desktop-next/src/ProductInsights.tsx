@@ -1,15 +1,17 @@
 import { useDeferredValue, useEffect, useState } from "react";
-import { Layers3, Plus, Search, Trash2 } from "lucide-react";
+import { Layers3, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import * as echarts from "./charts";
 import {
   deleteProductSeries,
   productDetail,
   productInsights,
+  refreshProductPrice,
   saveProductClusterWeights,
   saveProductSeries,
   seriesInsights,
+  updateProductPrice,
 } from "./bridge";
-import type { InsightRow, ProductDetail } from "./types";
+import type { InsightRow, ProductDetail, ProductPrice } from "./types";
 import "./product-insights.css";
 
 const cash = (value: number, currency: string) =>
@@ -246,7 +248,14 @@ function ProductDetailModal({
         data.clusters.map((x) => [x.cluster, x.configuredWeight]),
       ),
     ),
-    [message, setMessage] = useState("");
+    [message, setMessage] = useState(""),
+    [price, setPrice] = useState<ProductPrice | null>(data.price),
+    [priceLogs, setPriceLogs] = useState(data.priceLogs),
+    [priceDraft, setPriceDraft] = useState(() => data.price?.price ?? 0),
+    [oldPriceDraft, setOldPriceDraft] = useState(() => data.price?.oldPrice ?? 0),
+    [minPriceDraft, setMinPriceDraft] = useState(() => data.price?.minPrice ?? 0),
+    [priceConfirm, setPriceConfirm] = useState(""),
+    [priceBusy, setPriceBusy] = useState(false);
   useEffect(() => {
     const line = echarts.init(document.getElementById("product-detail-trend")!);
     line.setOption({
@@ -311,6 +320,56 @@ function ProductDetailModal({
     await saveProductClusterWeights(data.sku, weights);
     setMessage("权重已归一化保存，将用于该产品的集群配送费估算。");
   };
+  const applyPrice = (next: ProductPrice) => {
+    setPrice(next);
+    setPriceDraft(next.price);
+    setOldPriceDraft(next.oldPrice);
+    setMinPriceDraft(next.minPrice);
+  };
+  const refreshPrice = async () => {
+    setPriceBusy(true);
+    setMessage("");
+    try {
+      applyPrice(await refreshProductPrice(data.sku));
+      setMessage("已从 Ozon Seller API 读取最新价格。");
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setPriceBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (!data.price) void refreshPrice();
+    // 首次无缓存时读取一次；已有缓存立即展示，避免每次打开弹窗都阻塞等待 API。
+  }, [data.sku]);
+  const savePrice = async () => {
+    if (priceConfirm.trim() !== "确认改价") {
+      setMessage("请输入“确认改价”后再提交。");
+      return;
+    }
+    if (!window.confirm(`确认把 ${data.offerId || data.sku} 的售价修改为 ₽${priceDraft}？`)) return;
+    setPriceBusy(true);
+    setMessage("");
+    try {
+      applyPrice(await updateProductPrice({
+        sku: data.sku,
+        price: priceDraft,
+        oldPrice: oldPriceDraft,
+        minPrice: minPriceDraft,
+        currencyCode: price?.currencyCode || "RUB",
+      }));
+      const refreshed = await productDetail(data.sku, data.trend.at(-1)?.day || "");
+      setPriceLogs(refreshed.priceLogs);
+      setPriceConfirm("");
+      setMessage("价格修改请求已提交，并完成 Ozon 回读检查。");
+    } catch (e) {
+      setMessage(String(e));
+      const refreshed = await productDetail(data.sku, data.trend.at(-1)?.day || "").catch(() => null);
+      if (refreshed) setPriceLogs(refreshed.priceLogs);
+    } finally {
+      setPriceBusy(false);
+    }
+  };
   return (
     <div className="modal-backdrop product-detail-backdrop">
       <div className="product-detail-modal">
@@ -344,6 +403,35 @@ function ProductDetailModal({
                   : "近7天保持稳定"}
           </strong>
         </header>
+        <section className="product-price-panel">
+          <div className="product-price-heading">
+            <div>
+              <h3>Ozon 商品价格</h3>
+              <p>{price ? `上次读取：${price.syncedAt}` : "尚未读取官方价格"}</p>
+            </div>
+            <button disabled={priceBusy} onClick={refreshPrice}>
+              <RefreshCw size={14} />{priceBusy ? "读取中" : "读取最新价格"}
+            </button>
+          </div>
+          <div className="product-price-metrics">
+            <span>当前售价<b>{price ? `${price.currencyCode} ${price.price.toLocaleString()}` : "—"}</b></span>
+            <span>划线价<b>{price ? price.oldPrice.toLocaleString() : "—"}</b></span>
+            <span>最低价<b>{price ? price.minPrice.toLocaleString() : "—"}</b></span>
+            <span>结算净价<b>{price?.netPrice == null ? "—" : price.netPrice.toLocaleString()}</b></span>
+          </div>
+          <div className="product-price-editor">
+            <label>新售价<input type="number" min="0.01" step="0.01" value={priceDraft || ""} onChange={(e)=>setPriceDraft(Number(e.target.value))}/></label>
+            <label>划线价<input type="number" min="0" step="0.01" value={oldPriceDraft} onChange={(e)=>setOldPriceDraft(Number(e.target.value))}/></label>
+            <label>最低价<input type="number" min="0" step="0.01" value={minPriceDraft} onChange={(e)=>setMinPriceDraft(Number(e.target.value))}/></label>
+            <label>安全确认<input value={priceConfirm} onChange={(e)=>setPriceConfirm(e.target.value)} placeholder="输入：确认改价"/></label>
+            <button className="dark-button" disabled={priceBusy || !priceDraft || priceConfirm!=="确认改价"} onClick={savePrice}>提交价格修改</button>
+          </div>
+          <div className="product-price-logs">
+            <h4>最近改价记录</h4>
+            {priceLogs.slice(0,5).map((log)=><div key={log.id}><time>{log.createdAt}</time><span>₽{log.beforePrice} → ₽{log.requestedPrice}</span><b className={log.status}>{log.status}</b><small>{log.message}</small></div>)}
+            {!priceLogs.length && <p>暂无 ERP 改价记录。</p>}
+          </div>
+        </section>
         <div className="product-detail-charts">
           <section>
             <h3>30天销量、销售额与广告趋势</h3>

@@ -5,6 +5,7 @@ import * as echarts from "./charts";
 import {
   AlertTriangle,
   CalendarDays,
+  ClipboardList,
   CheckCircle2,
   Clock3,
   Database,
@@ -33,6 +34,13 @@ import {
   saveListingDraft,
   retryListingJob,
   collectListingReference,
+  listingAttributeDefinitions,
+  listingDictionaryValues,
+  mapListingReferenceAttributes,
+  setListingAttributeValue,
+  clearListingAttributeValue,
+  aiFillListingRequiredAttributes,
+  validateListingJob,
   openListingBrowser,
   importListingHtml,
   refreshListingCategories,
@@ -54,6 +62,7 @@ import {
   listingRows,
   listingJobs,
   listingSettings,
+  openListingSupplierUrl,
   missingCostRows,
   notifyShipment,
   pruneCache,
@@ -118,6 +127,8 @@ import type {
   ListingRow,
   ListingJob,
   ListingCategory,
+  ListingAttributeDefinition,
+  ListingDictionaryValue,
   ListingDraftInput,
   ListingPriceBreakdown,
   ListingPriceInput,
@@ -273,11 +284,131 @@ function MissingCostEditor({
     </div>
   );
 }
+
+function WbCostEditor({
+  row,
+  close,
+  saved,
+}: {
+  row: WbCost;
+  close: () => void;
+  saved: () => Promise<void>;
+}) {
+  const value = (v: number | null) => (v == null ? "" : String(v));
+  const [form, setForm] = useState({
+    article: row.article,
+    purchaseCostCny: value(row.purchaseCostCny),
+    lengthCm: value(row.lengthCm),
+    widthCm: value(row.widthCm),
+    heightCm: value(row.heightCm),
+    weightKg: value(row.weightKg),
+    warehouseMode: row.warehouseMode || "auto",
+  });
+  const [busy, setBusy] = useState(false);
+  const numeric = (v: string) => (v.trim() === "" ? null : Number(v));
+  const field = (key: "purchaseCostCny" | "lengthCm" | "widthCm" | "heightCm" | "weightKg", label: string) => (
+    <label>
+      {label}
+      <input type="number" min="0" step="any" value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} />
+    </label>
+  );
+  return <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
+    <div className="cost-modal">
+      <button className="modal-close" onClick={close}>×</button>
+      <h2>{form.article || "未命名货号"} / {row.nmId}</h2>
+      <p>这里与“商品与成本”使用同一条 WB 成本记录；保存后当前盈亏表会立即重新核算。</p>
+      <div className="cost-fields">
+        <label className="wide">货号<input value={form.article} onChange={(e) => setForm({ ...form, article: e.target.value })} /></label>
+        {field("purchaseCostCny", "采购成本（CNY/件）")}
+        {field("lengthCm", "长度（cm）")}
+        {field("widthCm", "宽度（cm）")}
+        {field("heightCm", "高度（cm）")}
+        {field("weightKg", "重量（kg）")}
+        <label>仓库模式<select value={form.warehouseMode} onChange={(e) => setForm({ ...form, warehouseMode: e.target.value })}>
+          <option value="auto">自动识别</option><option value="dongguan">东莞跨境</option><option value="overseas">俄罗斯海外仓</option><option value="unknown">未知</option>
+        </select></label>
+      </div>
+      <div className="modal-actions">
+        <button className="dark-button" disabled={busy} onClick={async () => {
+          const numbers = [form.purchaseCostCny, form.lengthCm, form.widthCm, form.heightCm, form.weightKg];
+          if (numbers.some((v) => v.trim() !== "" && (!Number.isFinite(Number(v)) || Number(v) < 0))) {
+            window.alert("成本、尺寸和重量必须是大于或等于 0 的数字。"); return;
+          }
+          setBusy(true);
+          try {
+            await saveWbCost({ nmId: row.nmId, article: form.article.trim(), purchaseCostCny: numeric(form.purchaseCostCny), lengthCm: numeric(form.lengthCm), widthCm: numeric(form.widthCm), heightCm: numeric(form.heightCm), weightKg: numeric(form.weightKg), warehouseMode: form.warehouseMode });
+            await saved();
+          } catch (e) { window.alert(`保存失败：${String(e)}`); } finally { setBusy(false); }
+        }}>{busy ? "保存中…" : "保存并重新核算"}</button>
+        <button className="outline-button" onClick={close}>取消</button>
+      </div>
+    </div>
+  </div>;
+}
 export const clearReportCache = () => {
   reportCache.clear();
   detailCache.clear();
 };
 window.addEventListener("report-settings-changed", clearReportCache);
+
+let listingLedgerSettingsCache: Promise<ListingSettings> | null = null;
+const listingLedgerRowsCache = new Map<string, Promise<ListingRow[]>>();
+
+export function ListingLedgerPage() {
+  const [form, setForm] = useState<ListingSettings>({ ledgerPath: "", ledgerShopName: "", toolExecutable: "", toolDataDir: "" });
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState<ListingRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const load = async (refresh = false) => {
+    setBusy(true);
+    try {
+      if (refresh) {
+        listingLedgerSettingsCache = null;
+        listingLedgerRowsCache.clear();
+      }
+      listingLedgerSettingsCache ||= listingSettings();
+      const settings = await listingLedgerSettingsCache;
+      setForm(settings);
+      if (!listingLedgerRowsCache.has(query)) listingLedgerRowsCache.set(query, listingRows(query));
+      setRows(await listingLedgerRowsCache.get(query)!);
+      setMessage("");
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => { void load(); }, [query]);
+  const save = async () => {
+    setBusy(true);
+    try {
+      await saveListingSettings(form);
+      await load(true);
+      setMessage("台账路径已保存；后续切换页面将使用缓存，文件修改后后端会自动失效缓存。");
+    } catch (error) { setMessage(String(error)); setBusy(false); }
+  };
+  const sync = async () => {
+    setBusy(true);
+    try {
+      const count = await syncListingCosts();
+      listingLedgerRowsCache.clear();
+      setRows(await listingRows(query));
+      setMessage(`仅更新数据库中货号相同的现有 SKU：${count} 条。未匹配货号没有生成新数据。`);
+    } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+  };
+  return <>
+    <header className="page-header"><div><span className="eyebrow">PRODUCT LEDGER</span><h1>产品台账</h1><p>只读取产品资料、采购成本和 1688 采购链接；不再执行采集、AI 填写或自动上架。</p></div></header>
+    <section className="card listing-settings">
+      <label>产品台账文件<input value={form.ledgerPath} onChange={(e) => setForm({ ...form, ledgerPath: e.target.value })} placeholder="产品台账.xlsx 的完整路径" /></label>
+      <label>台账店铺筛选（可留空）<input value={form.ledgerShopName} onChange={(e) => setForm({ ...form, ledgerShopName: e.target.value })} placeholder="留空读取全部店铺" /></label>
+      <div className="button-row"><button onClick={() => void save()} disabled={busy}>保存并读取</button><button className="outline-button" onClick={() => void load(true)} disabled={busy}>重新读取台账</button><button className="outline-button" onClick={() => void sync()} disabled={busy}>同步已匹配成本</button></div>
+      {message && <p className="message">{message}</p>}
+    </section>
+    <div className="orders-tools"><label className="search"><Search size={16}/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索货号、标题、商品 ID 或店铺" /></label><span>{busy ? "读取中…" : `${rows.length} 条台账记录`}</span></div>
+    <section className="card table-card"><table><thead><tr><th>店铺 / 货号</th><th>商品信息</th><th>采购成本</th><th>重量 / 尺寸</th><th>采购链接</th><th>状态</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.offerId}-${index}`}><td><b>{row.shopName || "—"}</b><small>{row.offerId || "—"}</small></td><td><b>{row.productTitle || "—"}</b><small>{row.productId || "—"}</small></td><td><b>{row.unitCostCny == null ? "—" : `¥${row.unitCostCny.toFixed(2)}`}</b><small>{row.currencyCode || "CNY"}</small></td><td><b>{row.weightKg == null ? "—" : `${row.weightKg} kg`}</b><small>{[row.lengthCm,row.widthCm,row.heightCm].every((v) => v != null) ? `${row.lengthCm} × ${row.widthCm} × ${row.heightCm} cm` : "—"}</small></td><td>{row.supplierUrl ? <button className="link-button" onClick={() => void openListingSupplierUrl(row.supplierUrl)}>打开 1688</button> : "—"}</td><td><b>{row.status || "台账记录"}</b><small>{row.platform || "Ozon（旧台账）"}</small></td></tr>)}</tbody></table>{!rows.length && !busy && <div className="empty">当前台账没有符合条件的记录</div>}</section>
+  </>;
+}
 
 export function ListingPage() {
   const empty: ListingSettings = {
@@ -308,12 +439,47 @@ export function ListingPage() {
     [complexAttributesText, setComplexAttributesText] = useState("[]"),
     [imagesText, setImagesText] = useState(""),
     [reference, setReference] = useState(""),
+    [listingMode, setListingMode] = useState<"follow" | "local">("follow"),
     [listingHtmlPath, setListingHtmlPath] = useState(""),
     [categoryQuery, setCategoryQuery] = useState(""),
     [categoryRows, setCategoryRows] = useState<ListingCategory[]>([]),
+    [attributeDefinitions, setAttributeDefinitions] = useState<ListingAttributeDefinition[]>([]),
+    [attributeInputs, setAttributeInputs] = useState<Record<number, string>>({}),
+    [dictionaryQueries, setDictionaryQueries] = useState<Record<number, string>>({}),
+    [dictionaryOptions, setDictionaryOptions] = useState<Record<number, ListingDictionaryValue[]>>({}),
+    [attributeBusyId, setAttributeBusyId] = useState<number | null>(null),
     [query, setQuery] = useState(""),
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState("");
+  const applyAttributePayload = (payload: Record<string, unknown>) => {
+    setAttributesText(JSON.stringify(Array.isArray(payload.attributes) ? payload.attributes : [], null, 2));
+    setComplexAttributesText(JSON.stringify(Array.isArray(payload.complex_attributes) ? payload.complex_attributes : [], null, 2));
+  };
+  const currentAttributeValues = (attributeId: number): string[] => {
+    try {
+      const normal = JSON.parse(attributesText) as Array<Record<string, unknown>>;
+      const complex = JSON.parse(complexAttributesText) as Array<Record<string, unknown>>;
+      const all = [
+        ...(Array.isArray(normal) ? normal : []),
+        ...(Array.isArray(complex) ? complex.flatMap((group) => Array.isArray(group.attributes) ? group.attributes as Array<Record<string, unknown>> : []) : []),
+      ];
+      const item = all.find((entry) => Number(entry.id) === attributeId);
+      return Array.isArray(item?.values)
+        ? (item.values as Array<Record<string, unknown>>).map((value) => String(value.value || value.dictionary_value_id || "")).filter(Boolean)
+        : [];
+    } catch {
+      return [];
+    }
+  };
+  const normalizeDictionaryValues = (raw: unknown): ListingDictionaryValue[] => {
+    const root = raw as { items?: unknown; result?: unknown } | null;
+    const rows = Array.isArray(raw) ? raw : Array.isArray(root?.items) ? root.items : Array.isArray(root?.result) ? root.result : [];
+    return (rows as Array<Record<string, unknown>>).map((item) => ({
+      id: Number(item.id || item.value_id || item.dictionary_value_id || 0),
+      value: String(item.value || item.name || ""),
+      info: String(item.info || item.description || ""),
+    })).filter((item) => item.id > 0 && item.value);
+  };
   const editJob = (job: ListingJob) => {
     const p = job.payload || {};
     const numberValue = (key: string) => Number(p[key] || 0);
@@ -347,6 +513,15 @@ export function ListingPage() {
         2,
       ),
     );
+    const categoryId = Number(p.category_id || job.categoryId || 0);
+    const typeId = Number(p.type_id || 0);
+    if (categoryId > 0 && typeId > 0) {
+      void listingAttributeDefinitions(categoryId, typeId)
+        .then(setAttributeDefinitions)
+        .catch(() => setAttributeDefinitions([]));
+    } else {
+      setAttributeDefinitions([]);
+    }
   };
   const load = async () => {
     setBusy(true);
@@ -408,25 +583,33 @@ export function ListingPage() {
       </header>
       <section className="card listing-config">
         <div className="card-title">参考商品与上品草稿</div>
+        <div className="listing-mode-switch">
+          <label><input type="radio" checked={listingMode === "follow"} onChange={() => setListingMode("follow")} /> 跟卖模式</label>
+          <label><input type="radio" checked={listingMode === "local"} onChange={() => setListingMode("local")} /> 本地新品模式</label>
+          <span>{listingMode === "follow" ? "读取指定 Ozon 商品作为标题、参数和图片的可核验来源。" : "不采集其他商品，使用自己准备的标题、属性和图片地址。"}</span>
+        </div>
         <div className="listing-fields">
           <label>
-            Ozon 商品链接或 Артикул
+            {listingMode === "follow" ? "Ozon 商品链接或 Артикул" : "本地新品不需要来源链接"}
             <input
               value={reference}
               onChange={(e) => setReference(e.target.value)}
+              disabled={listingMode === "local"}
               placeholder="支持链接、纯数字或 Артикул: 2379505289"
             />
           </label>
         </div>
         <button
           className="dark-button"
-          disabled={busy || !reference.trim()}
+          disabled={busy || (listingMode === "follow" && !reference.trim())}
           onClick={async () => {
             setBusy(true);
             try {
-              const id = await createListingDraft(reference);
+              const id = await createListingDraft(reference, listingMode);
               setMessage(
-                `已创建上品草稿 #${id}，下一阶段将从参考商品采集标题、图片和属性。`,
+                listingMode === "follow"
+                  ? `已创建跟卖草稿 #${id}，货号已自动生成，下一阶段将采集参考商品。`
+                  : `已创建本地新品草稿 #${id}，货号已自动生成；请填写标题、图片、类目和属性。`,
               );
               setReference("");
               setJobs(await listingJobs());
@@ -458,7 +641,7 @@ export function ListingPage() {
                   <tr key={job.id}>
                     <td>#{job.id}</td>
                     <td>
-                      <b>{job.article}</b>
+                      <b>{job.article || (job.payload?.listing_mode === "local" ? "本地新品" : "待采集")}</b>
                       <small>{job.offerId || job.sourceUrl}</small>
                     </td>
                     <td>
@@ -484,7 +667,7 @@ export function ListingPage() {
                       </button>
                       <button
                         className="outline-button"
-                        disabled={busy || job.status === "collecting"}
+                        disabled={busy || job.status === "collecting" || job.payload?.listing_mode === "local"}
                         onClick={async () => {
                           setBusy(true);
                           setMessage(`正在后台采集任务 #${job.id}…`);
@@ -528,7 +711,7 @@ export function ListingPage() {
         {draft && (
           <div className="listing-draft-editor">
             <div className="card-title">编辑草稿 #{draft.id}</div>
-            <div className="migration-note">
+            <div className="migration-note" hidden={jobs.find((job) => job.id === draft.id)?.payload?.listing_mode === "local"}>
               <AlertTriangle />
               <div>
                 <h3>浏览器验证采集</h3>
@@ -667,6 +850,12 @@ export function ListingPage() {
                               });
                               setCategoryRows([]);
                               setMessage(`已选择实时类目：${row.display}`);
+                              void listingAttributeDefinitions(
+                                row.descriptionCategoryId,
+                                row.typeId,
+                              )
+                                .then(setAttributeDefinitions)
+                                .catch((error) => setMessage(String(error)));
                             }}
                           >
                             选择
@@ -686,13 +875,14 @@ export function ListingPage() {
                   ["categoryId", "description_category_id"],
                   ["categoryDisplay", "类目路径"],
                   ["typeId", "type_id"],
-                  ["price", "售价 RUB"],
+                  ["price", "跨境售价 CNY"],
                 ] as Array<[keyof ListingDraftInput, string]>
               ).map(([key, label]) => (
                 <label key={key}>
                   {label}
                   <input
                     value={String(draft[key])}
+                    readOnly={key === "offerId"}
                     onChange={(e) =>
                       setDraft({ ...draft, [key]: e.target.value })
                     }
@@ -720,6 +910,165 @@ export function ListingPage() {
                 </label>
               ))}
             </div>
+            <div className="migration-note">
+              <AlertTriangle />
+              <div>
+                <h3>Ozon 实时属性定义</h3>
+                <p>
+                  已加载 {attributeDefinitions.length} 项；其中必填 {attributeDefinitions.filter((v) => v.isRequired).length} 项、字典属性 {attributeDefinitions.filter((v) => v.dictionaryId > 0).length} 项。参考页只会自动映射标准化后完全同名的自由文本属性，字典值不会猜测。
+                </p>
+                <div className="competitor-actions">
+                  <button
+                    className="outline-button"
+                    disabled={busy || !draft.categoryId || !draft.typeId}
+                    onClick={async () => {
+                      setBusy(true);
+                      try {
+                        const count = await mapListingReferenceAttributes(draft.id);
+                        const next = await listingJobs();
+                        setJobs(next);
+                        const current = next.find((v) => v.id === draft.id);
+                        if (current) editJob(current);
+                        setMessage(`已从参考页保守匹配 ${count} 个同名自由文本属性。`);
+                      } catch (e) {
+                        setMessage(String(e));
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    从参考页匹配属性
+                  </button>
+                  <button
+                    className="dark-button"
+                    disabled={busy || !draft.categoryId || !draft.typeId}
+                    onClick={async () => {
+                      setBusy(true);
+                      try {
+                        const result = await validateListingJob(draft.id);
+                        setMessage(result.valid ? "提交前校验通过。" : `尚不能提交：${result.issues.join("；")}。缺少必填：${result.missingRequired.join("、") || "无"}`);
+                      } catch (e) {
+                        setMessage(String(e));
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    提交前校验
+                  </button>
+                  <button
+                    className="dark-button"
+                    disabled={busy || !draft.categoryId || !draft.typeId}
+                    onClick={async () => {
+                      setBusy(true);
+                      try {
+                        await saveListingDraft({
+                          ...draft,
+                          images: imagesText.split(/\r?\n/).map((v) => v.trim()).filter(Boolean),
+                          attributes: JSON.parse(attributesText),
+                          complexAttributes: JSON.parse(complexAttributesText),
+                        });
+                        const result = await aiFillListingRequiredAttributes(draft.id);
+                        const next = await listingJobs();
+                        setJobs(next);
+                        const current = next.find((v) => v.id === draft.id);
+                        if (current) editJob(current);
+                        setMessage(`AI 已填写 ${result.filled} 个有证据的必填属性（自由文本 ${result.freeTextFilled}、官方字典 ${result.dictionaryFilled}）；仍缺：${result.missingRequired.join("、") || "无"}。`);
+                      } catch (e) {
+                        setMessage(String(e));
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    AI 填写必填属性
+                  </button>
+                </div>
+              </div>
+            </div>
+            {!!attributeDefinitions.length && (
+              <div className="table-card listing-attributes-table">
+                <table>
+                  <thead><tr><th>属性</th><th>要求</th><th>当前值</th><th>编辑属性值</th></tr></thead>
+                  <tbody>{attributeDefinitions.map((row) => {
+                    const currentValues = currentAttributeValues(row.id);
+                    const missing = row.isRequired && !currentValues.length;
+                    return (
+                      <tr key={row.id} className={missing ? "listing-attribute-missing" : ""}>
+                        <td>
+                          <b>{row.name}</b><small>ID {row.id} · {row.groupName || (row.attributeComplexId > 0 ? `组合 ${row.attributeComplexId}` : "普通")}</small>
+                          {!!row.description && <small>{row.description}</small>}
+                        </td>
+                        <td>{row.isRequired ? "必填" : "选填"}{row.isCollection ? " · 多值" : ""}</td>
+                        <td>{currentValues.length ? currentValues.join("；") : <span className="missing-cost">未填写</span>}</td>
+                        <td>
+                          {row.dictionaryId > 0 ? (
+                            <div className="listing-attribute-editor">
+                              <div className="listing-attribute-search">
+                                <input
+                                  value={dictionaryQueries[row.id] || ""}
+                                  onChange={(e) => setDictionaryQueries({ ...dictionaryQueries, [row.id]: e.target.value })}
+                                  placeholder="搜索 Ozon 官方字典值"
+                                />
+                                <button className="outline-button" disabled={attributeBusyId === row.id} onClick={async () => {
+                                  setAttributeBusyId(row.id);
+                                  try {
+                                    const raw = await listingDictionaryValues(Number(draft.categoryId), Number(draft.typeId), row.id, dictionaryQueries[row.id] || "");
+                                    const values = normalizeDictionaryValues(raw);
+                                    setDictionaryOptions({ ...dictionaryOptions, [row.id]: values });
+                                    setMessage(values.length ? `属性“${row.name}”已加载 ${values.length} 个官方字典值。` : `属性“${row.name}”没有匹配的字典值。`);
+                                  } catch (e) { setMessage(String(e)); }
+                                  finally { setAttributeBusyId(null); }
+                                }}>搜索</button>
+                              </div>
+                              {!!dictionaryOptions[row.id]?.length && (
+                                <select value="" onChange={async (e) => {
+                                  const option = dictionaryOptions[row.id].find((item) => item.id === Number(e.target.value));
+                                  if (!option) return;
+                                  setAttributeBusyId(row.id);
+                                  try {
+                                    const payload = await setListingAttributeValue({ id: draft.id, attributeId: row.id, attributeComplexId: row.attributeComplexId, attributeName: row.name, isCollection: row.isCollection, dictionaryValueId: option.id, value: option.value });
+                                    applyAttributePayload(payload);
+                                    setMessage(`已采用 Ozon 字典值：${row.name} = ${option.value}`);
+                                  } catch (error) { setMessage(String(error)); }
+                                  finally { setAttributeBusyId(null); }
+                                }}>
+                                  <option value="">选择并采用字典值…</option>
+                                  {dictionaryOptions[row.id].map((item) => <option key={item.id} value={item.id}>{item.value}{item.info ? ` — ${item.info}` : ""}</option>)}
+                                </select>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="listing-attribute-editor">
+                              <input value={attributeInputs[row.id] || ""} onChange={(e) => setAttributeInputs({ ...attributeInputs, [row.id]: e.target.value })} placeholder="填写俄文属性值" />
+                              <button className="outline-button" disabled={attributeBusyId === row.id || !(attributeInputs[row.id] || "").trim()} onClick={async () => {
+                                setAttributeBusyId(row.id);
+                                try {
+                                  const payload = await setListingAttributeValue({ id: draft.id, attributeId: row.id, attributeComplexId: row.attributeComplexId, attributeName: row.name, isCollection: row.isCollection, dictionaryValueId: 0, value: attributeInputs[row.id] || "" });
+                                  applyAttributePayload(payload);
+                                  setAttributeInputs({ ...attributeInputs, [row.id]: "" });
+                                  setMessage(`已保存属性：${row.name}`);
+                                } catch (e) { setMessage(String(e)); }
+                                finally { setAttributeBusyId(null); }
+                              }}>保存</button>
+                            </div>
+                          )}
+                          {!!currentValues.length && <button className="listing-clear-attribute" disabled={attributeBusyId === row.id} onClick={async () => {
+                            setAttributeBusyId(row.id);
+                            try {
+                              const payload = await clearListingAttributeValue(draft.id, row.id);
+                              applyAttributePayload(payload);
+                              setMessage(`已清除属性：${row.name}`);
+                            } catch (e) { setMessage(String(e)); }
+                            finally { setAttributeBusyId(null); }
+                          }}>清除当前值</button>}
+                        </td>
+                      </tr>
+                    );
+                  })}</tbody>
+                </table>
+              </div>
+            )}
             <label>
               俄文描述
               <textarea
@@ -736,7 +1085,9 @@ export function ListingPage() {
                 onChange={(e) => setImagesText(e.target.value)}
               />
             </label>
-            <div className="listing-fields">
+            <details className="listing-advanced-json">
+              <summary>高级：查看/手动编辑 Ozon 属性 JSON</summary>
+              <div className="listing-fields">
               <label>
                 attributes JSON
                 <textarea
@@ -751,7 +1102,8 @@ export function ListingPage() {
                   onChange={(e) => setComplexAttributesText(e.target.value)}
                 />
               </label>
-            </div>
+              </div>
+            </details>
             <div className="competitor-actions">
               <button
                 className="dark-button"
@@ -3000,6 +3352,16 @@ function CrossBorderView({ data }: { data: CrossBorderReport | null }) {
     `¥${v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const rate = (v: number | null) =>
     v == null ? "历史样本不足" : `${(v * 100).toFixed(2)}%`;
+  const incompleteRows = data.rows.filter((row) => !row.costComplete);
+  const missingReasons = (row: CrossBorderReport["rows"][number]) => {
+    const reasons: string[] = [];
+    if (row.purchaseCostCny == null) reasons.push("采购成本未填写");
+    if (row.weightKg == null) reasons.push("重量未填写");
+    else if (row.freightUnitCny == null) reasons.push("重量超出跨境运费区间");
+    if (row.estimatedPlatformFeesCny == null)
+      reasons.push("历史佣金/收单费率不足");
+    return reasons;
+  };
   return (
     <>
       <div className="report-hero">
@@ -3051,6 +3413,51 @@ function CrossBorderView({ data }: { data: CrossBorderReport | null }) {
         <div className="card-title">跨境销售额、广告与日利润趋势</div>
         <div id="cross-profit-trend" className="report-chart" />
       </section>
+      {incompleteRows.length > 0 && (
+        <section className="card table-card missing-cost-detail">
+          <div className="section-heading">
+            <div>
+              <h2>未完整核算 SKU 明细</h2>
+              <p>
+                共 {incompleteRows.length} 个 SKU。采购成本和重量可在“产品成本”补录；
+                历史费率不足需要继续同步 Finance 结算样本。
+              </p>
+            </div>
+            <span className="badge orange">利润暂不汇总这些商品</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>货号 / SKU</th>
+                <th>商品</th>
+                <th>销量</th>
+                <th>当前成本</th>
+                <th>重量 / 运费</th>
+                <th>缺失原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              {incompleteRows.map((row) => (
+                <tr key={`missing-${row.sku}`}>
+                  <td><b>{row.offerId || "—"}</b><small>{row.sku}</small></td>
+                  <td>{row.productName || "—"}</td>
+                  <td>{row.units}</td>
+                  <td>{row.purchaseCostCny == null ? "未填写" : cny(row.purchaseCostCny)}</td>
+                  <td>
+                    {row.weightKg == null ? "重量未填写" : `${row.weightKg} kg`}
+                    <small>{row.freightUnitCny == null ? "运费未核算" : `${cny(row.freightUnitCny)} / 件`}</small>
+                  </td>
+                  <td>
+                    <div className="missing-reasons">
+                      {missingReasons(row).map((reason) => <span key={reason}>{reason}</span>)}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
       <section className="card table-card report-detail">
         <table>
           <thead>
@@ -3662,6 +4069,7 @@ export function SyncPage({ range }: { range: DateRange }) {
   const [logs, setLogs] = useState<SyncLog[]>([]),
     [coverage, setCoverage] = useState<DataCoverageRow[]>([]),
     [syncRange, setSyncRange] = useState<DateRange>(range),
+    [forceSync, setForceSync] = useState(false),
     [pruneBefore, setPruneBefore] = useState(() => {
       const d = new Date();
       d.setDate(d.getDate() - 90);
@@ -3698,7 +4106,7 @@ export function SyncPage({ range }: { range: DateRange }) {
         throw new Error(
           "请选择有效的同步日期，结束日期不能早于开始日期或晚于今天。",
         );
-      const count = await syncSeller(syncRange);
+      const count = await syncSeller(syncRange, forceSync);
       clearReportCache();
       setMessage(`Seller 销量同步完成，写入 ${count} 行真实数据。`);
       await load();
@@ -3718,8 +4126,8 @@ export function SyncPage({ range }: { range: DateRange }) {
     try {
       const count =
         kind === "performance"
-          ? await syncPerformance(syncRange)
-          : await syncFinance(syncRange);
+          ? await syncPerformance(syncRange, forceSync)
+          : await syncFinance(syncRange, forceSync);
       clearReportCache();
       setMessage(
         `${kind === "performance" ? "Performance 广告" : "Finance 结算"}同步完成，写入 ${count} 行。`,
@@ -3741,18 +4149,18 @@ export function SyncPage({ range }: { range: DateRange }) {
     setMessage("Seller、Performance 和 Finance 已通过三个后台线程同时开始同步…");
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     try {
-      const result = await syncAllData(syncRange);
+      const result = await syncAllData(syncRange, forceSync);
       clearReportCache();
       const items = [
         result.sellerError
           ? `Seller 失败：${result.sellerError}`
-          : `Seller ${result.sellerRows ?? 0} 行`,
+          : result.sellerRows === 0 ? "Seller 复用本地缓存" : `Seller ${result.sellerRows ?? 0} 行`,
         result.performanceError
           ? `Performance 失败：${result.performanceError}`
-          : `Performance ${result.performanceRows ?? 0} 行`,
+          : result.performanceRows === 0 ? "Performance 复用本地缓存" : `Performance ${result.performanceRows ?? 0} 行`,
         result.financeError
           ? `Finance 失败：${result.financeError}`
-          : `Finance ${result.financeRows ?? 0} 行`,
+          : result.financeRows === 0 ? "Finance 复用本地缓存" : `Finance ${result.financeRows ?? 0} 行`,
       ];
       setMessage(`并行同步完成：${items.join("；")}`);
       await load();
@@ -3788,6 +4196,10 @@ export function SyncPage({ range }: { range: DateRange }) {
       </header>
       <div className="month-toolbar sync-range-toolbar">
         <b>同步日期</b>
+        <div className="sync-mode-tabs">
+          <button className={!forceSync ? "selected" : ""} onClick={() => setForceSync(false)}>智能增量</button>
+          <button className={forceSync ? "selected danger" : ""} onClick={() => setForceSync(true)}>强制覆盖</button>
+        </div>
         <label>
           开始
           <input
@@ -4241,13 +4653,14 @@ export function WbPage({
   setDays,
 }: {
   range: DateRange;
-  section: "daily" | "costs" | "settings";
+  section: "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings";
   days: number;
   setDays: (days: number) => void;
 }) {
   const wbChartRef = useRef<HTMLDivElement | null>(null);
+  const wbAdChartRef = useRef<HTMLDivElement | null>(null);
   const [tab, setTab] = useState<
-      "daily" | "orders" | "ads" | "inventory" | "costs" | "settings"
+      "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings"
     >(section),
     [settings, setSettings] = useState<WbSettings | null>(null),
     [rows, setRows] = useState<WbDaily[]>([]),
@@ -4256,6 +4669,11 @@ export function WbPage({
     [warehouseRows, setWarehouseRows] = useState<WbWarehouseRow[]>([]),
     [stockRows, setStockRows] = useState<WbStockRow[]>([]),
     [costs, setCosts] = useState<WbCost[]>([]),
+    [editingWbCost, setEditingWbCost] = useState<WbCost | null>(null),
+    [costQuery, setCostQuery] = useState(""),
+    [dirtyWbCosts, setDirtyWbCosts] = useState<Set<number>>(new Set()),
+    [savingWbCost, setSavingWbCost] = useState<number | null>(null),
+    [savedWbCost, setSavedWbCost] = useState<number | null>(null),
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState(""),
     [wbApiPath, setWbApiPath] = useState("");
@@ -4356,6 +4774,30 @@ export function WbPage({
       chart.dispose();
     };
   }, [rows, tab]);
+  useEffect(() => {
+    if (tab !== "ads" || !wbAdChartRef.current) return;
+    const grouped = new Map<string, { spend: number; sales: number; orders: number }>();
+    adRows.forEach((row) => {
+      const value = grouped.get(row.day) || { spend: 0, sales: 0, orders: 0 };
+      value.spend += row.spendCny; value.sales += row.salesCny; value.orders += row.orders;
+      grouped.set(row.day, value);
+    });
+    const data = [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const chart = echarts.init(wbAdChartRef.current);
+    chart.setOption({
+      tooltip: { trigger: "axis" }, legend: { data: ["广告花费", "归因销售额", "ROAS"] },
+      grid: { left: 28, right: 62, top: 50, bottom: 30, containLabel: true },
+      xAxis: { type: "category", boundaryGap: false, data: data.map(([day]) => day) },
+      yAxis: [{ type: "value", name: "CNY" }, { type: "value", name: "ROAS", splitLine: { show: false } }],
+      series: [
+        { name: "广告花费", type: "line", smooth: true, data: data.map(([, v]) => v.spend), lineStyle: { color: "#3478f6", width: 3 }, areaStyle: { color: "rgba(52,120,246,.12)" } },
+        { name: "归因销售额", type: "line", smooth: true, data: data.map(([, v]) => v.sales), lineStyle: { color: "#f39a32", width: 2 } },
+        { name: "ROAS", type: "line", smooth: true, yAxisIndex: 1, data: data.map(([, v]) => v.spend > 0 ? Number((v.sales / v.spend).toFixed(2)) : null), lineStyle: { color: "#69b83e", width: 2, type: "dashed" } },
+      ],
+    });
+    const resize = () => chart.resize(); window.addEventListener("resize", resize);
+    return () => { window.removeEventListener("resize", resize); chart.dispose(); };
+  }, [adRows, tab]);
   const total = (key: keyof WbDaily) =>
     rows.reduce(
       (n, r) => n + (typeof r[key] === "number" ? Number(r[key]) : 0),
@@ -4377,6 +4819,33 @@ export function WbPage({
     tacos = revenue > 0 ? (adSpend / revenue) * 100 : null,
     ctr = adViews > 0 ? (adClicks / adViews) * 100 : null,
     adConversion = adClicks > 0 ? (adOrders / adClicks) * 100 : null;
+  const normalizedCostQuery = costQuery.trim().toLocaleLowerCase();
+  const filteredCosts = normalizedCostQuery
+    ? costs.filter((row) =>
+        [row.nmId, row.article, row.warehouseMode]
+          .some((value) => String(value ?? "").toLocaleLowerCase().includes(normalizedCostQuery)),
+      )
+    : costs;
+  const changeWbCost = (nmId: number, change: Partial<WbCost>) => {
+    setCosts((current) => current.map((item) => item.nmId === nmId ? { ...item, ...change } : item));
+    setDirtyWbCosts((current) => new Set(current).add(nmId));
+    setSavedWbCost((current) => current === nmId ? null : current);
+  };
+  const saveWbCostRow = async (row: WbCost) => {
+    setSavingWbCost(row.nmId);
+    try {
+      await saveWbCost(row);
+      setDirtyWbCosts((current) => { const next = new Set(current); next.delete(row.nmId); return next; });
+      await load();
+      setSavedWbCost(row.nmId);
+      setMessage(`已保存 ${row.nmId}，盈亏表将使用最新成本重新核算。`);
+      window.setTimeout(() => setSavedWbCost((current) => current === row.nmId ? null : current), 1800);
+    } catch (error) {
+      window.alert(`保存失败：${String(error)}`);
+    } finally {
+      setSavingWbCost(null);
+    }
+  };
   const sync = async () => {
     setBusy(true);
     setMessage(
@@ -4406,45 +4875,52 @@ export function WbPage({
           {busy ? "同步中" : "同步 WB API"}
         </button>
       </header>
-      <div className="tabs wb-tabs">
-        <button
-          className={tab === "daily" ? "selected" : ""}
-          onClick={() => setTab("daily")}
-        >
-          每日经营
-        </button>
-        <button
-          className={tab === "orders" ? "selected" : ""}
-          onClick={() => setTab("orders")}
-        >
-          订单
-        </button>
-        <button
-          className={tab === "ads" ? "selected" : ""}
-          onClick={() => setTab("ads")}
-        >
-          广告
-        </button>
-        <button
-          className={tab === "inventory" ? "selected" : ""}
-          onClick={() => setTab("inventory")}
-        >
-          仓库与库存
-        </button>
-        <button
-          className={tab === "costs" ? "selected" : ""}
-          onClick={() => setTab("costs")}
-        >
-          产品成本与运费
-        </button>
-        <button
-          className={tab === "settings" ? "selected" : ""}
-          onClick={() => setTab("settings")}
-        >
-          WB API 设置
-        </button>
-      </div>
       {message && <div className="sync-message">{message}</div>}
+      {tab === "reports" && (() => {
+        const validOrders = orderRows.filter((row) => !row.cancelled);
+        const cancelledOrders = orderRows.filter((row) => row.cancelled);
+        const stockUnits = stockRows.reduce((sum, row) => sum + row.quantity, 0);
+        const returnTransit = stockRows.reduce((sum, row) => sum + row.inWayFromClient, 0);
+        const reportCards = [
+          { title: "每周销售趋势分析", text: `${validOrders.length} 条有效订单，销售额 ¥${revenue.toFixed(2)}`, state: "已接入", target: "daily" as const },
+          { title: "销量 / 实时销售概览", text: `${units} 件 · ${activeProducts} 个活跃 nmId`, state: "已接入", target: "orders" as const },
+          { title: "库存报告", text: `${stockUnits} 件可用 · ${returnTransit} 件退回途中`, state: "已接入", target: "inventory" as const },
+          { title: "商品评分报告", text: "将结合商品卡片与隐藏商品原因展示评分风险", state: "待 Analytics 报告同步" },
+          { title: "隐藏商品", text: "对应 blocked / shadowed 官方 Analytics 报告", state: "待 Analytics 报告同步" },
+          { title: "扣款报告", text: "对应 deductions、反作弊与强制标识扣款", state: "待 Analytics 报告同步" },
+          { title: "退货和货物移动", text: `${cancelledOrders.length} 条取消订单；正式退货需 goods-return 报告`, state: "部分接入" },
+          { title: "品牌销售价格指数", text: "当前公开缓存不含市场基准价，不使用推测值", state: "需单独数据源" },
+          { title: "错误标识符 / IMEI", text: "订单与商品缓存不含完整 IMEI 差异报告", state: "需退货申请明细" },
+        ];
+        return <>
+          <section className="card trend-card wb-report-overview">
+            <div className="section-heading">
+              <div><h2>WB 报告中心</h2><p>把卖家后台报告映射到现有真实订单、库存、广告和利润缓存；未获得的数据明确标注，不生成模拟值。</p></div>
+              <span className="date-pill"><CalendarDays size={16} />{range.from} — {range.to}</span>
+            </div>
+            <div className="four-cols">
+              <div className="stat blue"><span>有效订单</span><strong>{validOrders.length}</strong><small>按 srid 去重</small></div>
+              <div className="stat green"><span>销量</span><strong>{units}</strong><small>当前筛选周期</small></div>
+              <div className="stat purple"><span>库存</span><strong>{stockUnits}</strong><small>{stockRows.length} 条仓库快照</small></div>
+              <div className="stat orange"><span>取消订单</span><strong>{cancelledOrders.length}</strong><small>不等同正式退货报告</small></div>
+            </div>
+          </section>
+          <section className="wb-report-grid">
+            {reportCards.map((item) => (
+              <article className="card wb-report-card" key={item.title}>
+                <div className="wb-report-icon"><ClipboardList size={20} /></div>
+                <div><h3>{item.title}</h3><p>{item.text}</p></div>
+                <span className={`badge ${item.state === "已接入" ? "green" : item.state === "部分接入" ? "orange" : "blue"}`}>{item.state}</span>
+                {item.target && <button className="outline-button" onClick={() => setTab(item.target)}>查看现有数据</button>}
+              </article>
+            ))}
+          </section>
+          <section className="card migration-note">
+            <AlertTriangle />
+            <div><h3>报告口径与后续同步</h3><p>销售和库存已经复用当前 WB API 缓存。隐藏商品、扣款、退货移动可由 Seller Analytics 报告接口补充；品牌价格指数与完整 IMEI 差异并不在当前缓存内，界面不会把取消订单冒充退货、也不会估算扣款。</p></div>
+          </section>
+        </>;
+      })()}
       {tab === "daily" && (
         <>
           <div className="hero-grid">
@@ -4697,6 +5173,14 @@ export function WbPage({
       )}
       {tab === "costs" && (
         <section className="card table-card">
+          <div className="orders-tools wb-cost-tools">
+            <div className="card-title">WB 商品成本</div>
+            <label className="search">
+              <Search size={16} />
+              <input value={costQuery} onChange={(e) => setCostQuery(e.target.value)} placeholder="搜索 nmId、货号或仓库模式" />
+            </label>
+            <span>{filteredCosts.length} / {costs.length} 条</span>
+          </div>
           <table>
             <thead>
               <tr>
@@ -4712,19 +5196,13 @@ export function WbPage({
               </tr>
             </thead>
             <tbody>
-              {costs.map((row, i) => (
+              {filteredCosts.map((row) => (
                 <tr key={row.nmId}>
                   <td>{row.nmId}</td>
                   <td>
                     <input
                       value={row.article}
-                      onChange={(e) =>
-                        setCosts((x) =>
-                          x.map((v, j) =>
-                            j === i ? { ...v, article: e.target.value } : v,
-                          ),
-                        )
-                      }
+                      onChange={(e) => changeWbCost(row.nmId, { article: e.target.value })}
                     />
                   </td>
                   {(
@@ -4740,36 +5218,14 @@ export function WbPage({
                       <input
                         type="number"
                         value={row[key] ?? ""}
-                        onChange={(e) =>
-                          setCosts((x) =>
-                            x.map((v, j) =>
-                              j === i
-                                ? {
-                                    ...v,
-                                    [key]:
-                                      e.target.value === ""
-                                        ? null
-                                        : Number(e.target.value),
-                                  }
-                                : v,
-                            ),
-                          )
-                        }
+                        onChange={(e) => changeWbCost(row.nmId, { [key]: e.target.value === "" ? null : Number(e.target.value) })}
                       />
                     </td>
                   ))}
                   <td>
                     <select
                       value={row.warehouseMode}
-                      onChange={(e) =>
-                        setCosts((x) =>
-                          x.map((v, j) =>
-                            j === i
-                              ? { ...v, warehouseMode: e.target.value }
-                              : v,
-                          ),
-                        )
-                      }
+                      onChange={(e) => changeWbCost(row.nmId, { warehouseMode: e.target.value })}
                     >
                       <option value="auto">自动识别</option>
                       <option value="dongguan">东莞跨境</option>
@@ -4779,20 +5235,19 @@ export function WbPage({
                   </td>
                   <td>
                     <button
-                      onClick={async () => {
-                        await saveWbCost(row);
-                        setMessage(`已保存 ${row.nmId}`);
-                        await load();
-                      }}
+                      className={`wb-row-save ${dirtyWbCosts.has(row.nmId) ? "dirty" : ""} ${savedWbCost === row.nmId ? "saved" : ""}`}
+                      disabled={!dirtyWbCosts.has(row.nmId) || savingWbCost === row.nmId}
+                      onClick={() => void saveWbCostRow(row)}
                     >
-                      <Save size={14} />
-                      保存
+                      {savedWbCost === row.nmId ? <CheckCircle2 size={15} /> : <Save size={15} />}
+                      {savingWbCost === row.nmId ? "保存中" : savedWbCost === row.nmId ? "已保存" : dirtyWbCosts.has(row.nmId) ? "保存修改" : "未修改"}
                     </button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {!filteredCosts.length && <div className="empty">没有匹配“{costQuery}”的商品成本记录。</div>}
         </section>
       )}
       {tab === "orders" && (
@@ -4803,6 +5258,7 @@ export function WbPage({
           <table>
             <thead>
               <tr>
+                <th>商品</th>
                 <th>日期 / srid</th>
                 <th>nmId / 货号</th>
                 <th>仓库</th>
@@ -4814,6 +5270,7 @@ export function WbPage({
             <tbody>
               {orderRows.slice(0, 1000).map((row) => (
                 <tr key={row.srid}>
+                  <td>{row.imageUrl ? <img className="wb-order-image" src={row.imageUrl} alt={row.article || String(row.nmId)} loading="lazy" /> : <div className="wb-order-image placeholder">暂无图片</div>}</td>
                   <td>
                     {row.day}
                     <small>{row.srid}</small>
@@ -4836,6 +5293,17 @@ export function WbPage({
         </section>
       )}
       {tab === "ads" && (
+        <>
+        <section className="card trend-card">
+          <div className="section-heading"><div><h2>广告效果看板</h2><p>复用 Ozon 广告监控的花费、归因销售与 ROAS 折线口径</p></div></div>
+          <div className="four-cols">
+            <div className="stat blue"><span>广告花费</span><strong>¥{adRows.reduce((n,r)=>n+r.spendCny,0).toFixed(2)}</strong></div>
+            <div className="stat green"><span>归因销售</span><strong>¥{adRows.reduce((n,r)=>n+r.salesCny,0).toFixed(2)}</strong></div>
+            <div className="stat purple"><span>广告订单</span><strong>{adRows.reduce((n,r)=>n+r.orders,0)}</strong></div>
+            <div className="stat orange"><span>ROAS</span><strong>{adRows.reduce((n,r)=>n+r.spendCny,0)>0?(adRows.reduce((n,r)=>n+r.salesCny,0)/adRows.reduce((n,r)=>n+r.spendCny,0)).toFixed(2):"—"}</strong></div>
+          </div>
+          <div ref={wbAdChartRef} className="report-chart" />
+        </section>
         <section className="card table-card">
           <div className="card-title">
             WB 商品级广告归因 <span>{adRows.length} 行</span>
@@ -4878,7 +5346,34 @@ export function WbPage({
             <div className="empty">当前日期范围尚无商品级广告缓存。</div>
           )}
         </section>
+        </>
       )}
+      {(tab === "domestic_profit" || tab === "cross_profit") && (() => {
+        const wanted = tab === "domestic_profit" ? "overseas" : "dongguan";
+        const scoped = rows.filter((row) => row.warehouseMode === wanted);
+        const scopedRevenue = scoped.reduce((n, row) => n + row.revenueCny, 0);
+        const scopedAds = scoped.reduce((n, row) => n + row.adSpendCny, 0);
+        const scopedProfit = scoped.reduce((n, row) => n + (row.profitCny || 0), 0);
+        const complete = scoped.filter((row) => row.complete).length;
+        return <>
+          <section className="card trend-card">
+            <div className="section-heading"><div><h2>{tab === "domestic_profit" ? "WB 本土月度利润" : "WB 跨境月度利润"}</h2><p>{tab === "domestic_profit" ? "俄罗斯海外仓商品" : "中国跨境仓商品"}，利润沿用 WB 每日经营的销售－广告－平台费－采购－物流公式</p></div>
+              <div className="tabs">{([[1,"日利润"],[7,"周利润"],[30,"月利润"],[90,"季度利润"]] as const).map(([value,label])=><button key={value} className={days===value?"selected":""} onClick={()=>setDays(value)}>{label}</button>)}</div>
+            </div>
+            <div className="four-cols">
+              <div className="stat blue"><span>销售额</span><strong>¥{scopedRevenue.toFixed(2)}</strong><small>{range.from} — {range.to}</small></div>
+              <div className="stat orange"><span>广告费</span><strong>¥{scopedAds.toFixed(2)}</strong></div>
+              <div className="stat green"><span>暂估利润</span><strong>¥{scopedProfit.toFixed(2)}</strong></div>
+              <div className="stat purple"><span>已核算行</span><strong>{complete} / {scoped.length}</strong><small>缺成本或物流不计入利润</small></div>
+            </div>
+          </section>
+          <section className="card table-card"><table><thead><tr><th>日期 / nmId</th><th>货号 / 仓库</th><th>销量</th><th>销售额</th><th>广告</th><th>平台费</th><th>采购</th><th>物流</th><th>利润 / 操作</th></tr></thead><tbody>{scoped.map(row=>{
+            const cost = costs.find((item) => item.nmId === row.nmId) || { nmId: row.nmId, article: row.article, purchaseCostCny: null, lengthCm: null, widthCm: null, heightCm: null, weightKg: null, warehouseMode: row.warehouseMode || "auto" };
+            return <tr key={`${row.day}-${row.nmId}`} onDoubleClick={() => !row.complete && setEditingWbCost(cost)} className={!row.complete ? "cost-editable-row" : ""} title={!row.complete ? "双击补充成本" : undefined}><td>{row.day}<small>{row.nmId}</small></td><td>{row.article}<small>{row.warehouseName}</small></td><td>{row.quantity}</td><td>¥{row.revenueCny.toFixed(2)}</td><td>¥{row.adSpendCny.toFixed(2)}</td><td>¥{row.commissionCny.toFixed(2)}</td><td>{row.purchaseTotalCny==null?"—":`¥${row.purchaseTotalCny.toFixed(2)}`}</td><td>{row.logisticsTotalCny==null?"—":`¥${row.logisticsTotalCny.toFixed(2)}`}</td><td>{row.profitCny==null?<button className="outline-button" onClick={() => setEditingWbCost(cost)}>补充成本</button>:`¥${row.profitCny.toFixed(2)}`}</td></tr>;
+          })}</tbody></table>{!scoped.length&&<div className="empty">当前周期没有匹配仓库模式的商品；明确仓库名会自动归类，也可在“商品与成本”中人工设置。</div>}</section>
+        </>;
+      })()}
+      {editingWbCost && <WbCostEditor row={editingWbCost} close={() => setEditingWbCost(null)} saved={async () => { const nmId = editingWbCost.nmId; setEditingWbCost(null); await load(); setMessage(`nmId ${nmId} 成本已保存，商品与成本及当前盈亏表已同步重新核算。`); }} />}
       {tab === "inventory" && (
         <section className="card table-card">
           <div className="card-title">

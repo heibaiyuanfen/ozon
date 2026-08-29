@@ -68,6 +68,7 @@ export async function listShops(): Promise<Shop[]> {
       kind: "cross_border",
       apiName: "Seller + Performance API",
       active: true,
+      databaseSizeBytes: 0,
     },
   ];
 }
@@ -124,6 +125,7 @@ export async function orders(
     estimatedDelivery: 12.4,
     estimateBasis: "集群权重预估",
     imageUrl: "",
+    supplierUrl: "",
   }));
 }
 
@@ -495,17 +497,17 @@ export async function bookSupplyTimeslot(
 export async function syncLogs(): Promise<SyncLog[]> {
   return isTauri() ? invoke("sync_logs") : [];
 }
-export async function syncSeller(range: DateRange): Promise<number> {
-  return invoke("sync_seller_sales", { range });
+export async function syncSeller(range: DateRange, force = false): Promise<number> {
+  return invoke("sync_seller_sales", { range, force });
 }
-export async function syncPerformance(range: DateRange): Promise<number> {
-  return invoke("sync_performance_ads", { range });
+export async function syncPerformance(range: DateRange, force = false): Promise<number> {
+  return invoke("sync_performance_ads", { range, force });
 }
-export async function syncFinance(range: DateRange): Promise<number> {
-  return invoke("sync_finance", { range });
+export async function syncFinance(range: DateRange, force = false): Promise<number> {
+  return invoke("sync_finance", { range, force });
 }
-export async function syncAllData(range: DateRange): Promise<SyncAllResult> {
-  return invoke("sync_all_data", { range });
+export async function syncAllData(range: DateRange, force = false): Promise<SyncAllResult> {
+  return invoke("sync_all_data", { range, force });
 }
 export async function testFeishu(): Promise<string> {
   return invoke("test_feishu");
@@ -628,11 +630,14 @@ export async function saveListingSettings(
 export async function listingRows(query: string): Promise<ListingRow[]> {
   return invoke("listing_rows", { query });
 }
+export async function openListingSupplierUrl(url: string): Promise<void> {
+  return invoke("open_listing_supplier_url", { url });
+}
 export async function listingJobs(): Promise<ListingJob[]> {
   return invoke("listing_jobs");
 }
-export async function createListingDraft(reference: string): Promise<number> {
-  return invoke("create_listing_draft", { reference });
+export async function createListingDraft(reference: string, listingMode: "follow" | "local"): Promise<number> {
+  return invoke("create_listing_draft", { reference, listingMode });
 }
 export async function saveListingDraft(
   form: ListingDraftInput,
@@ -698,6 +703,59 @@ export async function productDetail(
   to: string,
 ): Promise<ProductDetail> {
   return invoke("product_detail", { sku, to });
+}
+export async function listingAttributeDefinitions(
+  categoryId: number,
+  typeId: number,
+): Promise<import("./types").ListingAttributeDefinition[]> {
+  return invoke("listing_attribute_definitions", { categoryId, typeId });
+}
+export async function listingDictionaryValues(
+  categoryId: number,
+  typeId: number,
+  attributeId: number,
+  query: string,
+): Promise<unknown> {
+  return invoke("listing_dictionary_values", {
+    categoryId,
+    typeId,
+    attributeId,
+    query,
+  });
+}
+export async function mapListingReferenceAttributes(id: number): Promise<number> {
+  return invoke("map_listing_reference_attributes", { id });
+}
+export async function setListingAttributeValue(
+  form: import("./types").ListingAttributeValueInput,
+): Promise<Record<string, unknown>> {
+  return invoke("set_listing_attribute_value", { form });
+}
+export async function clearListingAttributeValue(
+  id: number,
+  attributeId: number,
+): Promise<Record<string, unknown>> {
+  return invoke("clear_listing_attribute_value", { id, attributeId });
+}
+export async function aiFillListingRequiredAttributes(
+  id: number,
+): Promise<import("./types").ListingAiFillResult> {
+  return invoke("ai_fill_listing_required_attributes", { id });
+}
+export async function validateListingJob(
+  id: number,
+): Promise<import("./types").ListingValidation> {
+  return invoke("validate_listing_job", { id });
+}
+export async function refreshProductPrice(
+  sku: string,
+): Promise<import("./types").ProductPrice> {
+  return invoke("refresh_product_price", { sku });
+}
+export async function updateProductPrice(
+  form: import("./types").ProductPriceUpdate,
+): Promise<import("./types").ProductPrice> {
+  return invoke("update_product_price", { form });
 }
 export async function saveProductClusterWeights(
   sku: string,
