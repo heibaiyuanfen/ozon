@@ -6144,7 +6144,7 @@ fn analytics_detail_blocking(
     let c = db(&state)?;
     let rate = rub_per_cny_for(state, &c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS analytics_detail_cache(range_key TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
-    let fingerprint:String=c.query_row("SELECT 'analytics-v4|'||printf('%d|%s|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let fingerprint:String=c.query_row("SELECT 'analytics-v5-ad-level-dedup|'||printf('%d|%s|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     let cache_key = format!("{}|{}", range.from, range.to);
     if let Ok(payload) = c.query_row(
         "SELECT payload FROM analytics_detail_cache WHERE range_key=?1 AND fingerprint=?2",
@@ -6263,7 +6263,7 @@ fn analytics_detail_blocking(
         .map_err(|e| e.to_string())?;
     // The legacy report is two fixed seven-day periods ending on the selected Sunday.
     // Do not use SQLite %W here: it changes the business boundary and used to omit SKU ad rows.
-    let mut weekly_stmt=c.prepare("WITH periods(label,from_day,to_day,sort_no) AS (VALUES('本周',date(?2,'-6 day'),?2,0),('上周',date(?2,'-13 day'),date(?2,'-7 day'),1)) SELECT p.label||' ('||substr(p.from_day,6)||'~'||substr(p.to_day,6)||')',COALESCE(SUM(s.revenue),0),COALESCE(SUM(s.ordered_units),0),COALESCE((SELECT SUM(ABS(a.spend)) FROM ad_daily a WHERE a.day BETWEEN p.from_day AND p.to_day),0),COALESCE(SUM(s.ordered_units*COALESCE(pc.unit_cost_cny*?3,pc.unit_cost,0)),0),COALESCE(SUM(s.ordered_units*COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny*?3,0)),0),COALESCE((SELECT SUM(a.orders) FROM ad_daily a WHERE a.day BETWEEN p.from_day AND p.to_day),0),COALESCE(SUM(s.returns),0),COALESCE(SUM(s.cancellations),0) FROM periods p LEFT JOIN sales_daily s ON s.day BETWEEN p.from_day AND p.to_day LEFT JOIN product_costs pc ON pc.sku=s.sku GROUP BY p.label,p.from_day,p.to_day,p.sort_no ORDER BY p.sort_no").map_err(|e|e.to_string())?;
+    let mut weekly_stmt=c.prepare("WITH periods(label,from_day,to_day,sort_no) AS (VALUES('本周',date(?2,'-6 day'),?2,0),('上周',date(?2,'-13 day'),date(?2,'-7 day'),1)),ad_by_day AS(SELECT a.day,SUM(CASE WHEN EXISTS(SELECT 1 FROM ad_daily z WHERE z.day=a.day AND z.sku='') THEN CASE WHEN a.sku='' THEN ABS(a.spend) ELSE 0 END ELSE CASE WHEN a.sku<>'' THEN ABS(a.spend) ELSE 0 END END) spend,SUM(CASE WHEN EXISTS(SELECT 1 FROM ad_daily z WHERE z.day=a.day AND z.sku='') THEN CASE WHEN a.sku='' THEN a.orders ELSE 0 END ELSE CASE WHEN a.sku<>'' THEN a.orders ELSE 0 END END) orders FROM ad_daily a GROUP BY a.day) SELECT p.label||' ('||substr(p.from_day,6)||'~'||substr(p.to_day,6)||')',COALESCE(SUM(s.revenue),0),COALESCE(SUM(s.ordered_units),0),COALESCE((SELECT SUM(a.spend) FROM ad_by_day a WHERE a.day BETWEEN p.from_day AND p.to_day),0),COALESCE(SUM(s.ordered_units*COALESCE(pc.unit_cost_cny*?3,pc.unit_cost,0)),0),COALESCE(SUM(s.ordered_units*COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny*?3,0)),0),COALESCE((SELECT SUM(a.orders) FROM ad_by_day a WHERE a.day BETWEEN p.from_day AND p.to_day),0),COALESCE(SUM(s.returns),0),COALESCE(SUM(s.cancellations),0) FROM periods p LEFT JOIN sales_daily s ON s.day BETWEEN p.from_day AND p.to_day LEFT JOIN product_costs pc ON pc.sku=s.sku GROUP BY p.label,p.from_day,p.to_day,p.sort_no ORDER BY p.sort_no").map_err(|e|e.to_string())?;
     let weekly = weekly_stmt
         .query_map(params![range.from, range.to, rate], |r| {
             let revenue: f64 = r.get(1)?;
@@ -6296,7 +6296,7 @@ fn analytics_detail_blocking(
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    let mut weekly_daily_stmt=c.prepare("SELECT s.day,SUM(s.revenue),SUM(s.ordered_units),COALESCE((SELECT SUM(ABS(a.spend))FROM ad_daily a WHERE a.day=s.day),0),COALESCE((SELECT SUM(a.orders)FROM ad_daily a WHERE a.day=s.day),0),SUM(s.returns),SUM(s.cancellations) FROM sales_daily s WHERE s.day BETWEEN date(?1,'-6 day') AND ?1 GROUP BY s.day ORDER BY s.day").map_err(|e|e.to_string())?;
+    let mut weekly_daily_stmt=c.prepare("SELECT s.day,SUM(s.revenue),SUM(s.ordered_units),COALESCE((SELECT SUM(CASE WHEN EXISTS(SELECT 1 FROM ad_daily z WHERE z.day=s.day AND z.sku='') THEN CASE WHEN a.sku='' THEN ABS(a.spend) ELSE 0 END ELSE CASE WHEN a.sku<>'' THEN ABS(a.spend) ELSE 0 END END)FROM ad_daily a WHERE a.day=s.day),0),COALESCE((SELECT SUM(CASE WHEN EXISTS(SELECT 1 FROM ad_daily z WHERE z.day=s.day AND z.sku='') THEN CASE WHEN a.sku='' THEN a.orders ELSE 0 END ELSE CASE WHEN a.sku<>'' THEN a.orders ELSE 0 END END)FROM ad_daily a WHERE a.day=s.day),0),SUM(s.returns),SUM(s.cancellations) FROM sales_daily s WHERE s.day BETWEEN date(?1,'-6 day') AND ?1 GROUP BY s.day ORDER BY s.day").map_err(|e|e.to_string())?;
     let weekly_daily = weekly_daily_stmt
         .query_map([range.to.clone()], |r| {
             let revenue: f64 = r.get(1)?;
@@ -9247,6 +9247,7 @@ pub fn run() {
             listing::validate_listing_job,
             listing::launch_listing_tool,
             insights::product_insights,
+            insights::product_analysis,
             insights::series_insights,
             insights::save_product_series,
             insights::delete_product_series,

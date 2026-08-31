@@ -20,6 +20,7 @@ export type PageKey =
   | "listing"
   | "competitors"
   | "differentiation"
+  | "product_analysis"
   | "shops"
   | "settings";
 
@@ -682,6 +683,28 @@ export interface ProductDetail {
   }>;
   price: ProductPrice | null;
   priceLogs: ProductPriceLog[];
+}
+export interface ProductAnalysisRow {
+  sku: string; offerId: string; name: string; day: string;
+  impressions: number; clicks: number; adOrders: number;
+  adRevenue: number; adSpend: number; totalUnits: number; totalRevenue: number;
+  price: number | null; stock: number;
+  ctr: number | null; cpc: number | null; cvr: number | null;
+  cpa: number | null; roas: number | null; cpaLimit: number | null;
+  breakEvenRoas: number | null; inventoryDays: number | null;
+  purchaseCost: number | null; firstMileCost: number | null;
+  platformUnitCost: number | null;
+  incrementalRoas: number | null; clicks3d: number; sampleReady: boolean;
+  units7d: number; previousUnits7d: number;
+  revenue7d: number; previousRevenue7d: number;
+  adSpend7d: number; previousAdSpend7d: number;
+  adOrders7d: number; previousAdOrders7d: number;
+  adRevenue7d: number; previousAdRevenue7d: number;
+  overallScore: number; trafficScore: number; conversionScore: number;
+  profitScore: number; inventoryScore: number; scaleScore: number;
+  grade: string; confidence: string;
+  adSource: string; ruleVersion: string;
+  diagnosis: string; action: string;
 }
 export interface ListingAttributeDefinition {
   id: number;

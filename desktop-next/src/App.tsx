@@ -80,6 +80,7 @@ import { ProductInsights } from "./ProductInsights";
 import { ProductDifferentiationPage } from "./ProductDifferentiationPage";
 import { CrossBorderOperationsPage } from "./CrossBorderOperationsPage";
 import { GrowthCenterPage } from "./GrowthCenterPage";
+import { ProductAnalysisPage } from "./ProductAnalysisPage";
 
 const emptyDashboard: DashboardData = {
   revenue: 0,
@@ -195,7 +196,7 @@ function Sidebar({
 }) {
   const groups: Array<{ id: string; label: string; icon: typeof LayoutDashboard; items: Array<[PageKey, string, typeof LayoutDashboard]> }> = [
     { id: "operations", label: "经营管理", icon: LayoutDashboard, items: [["dashboard", "经营总览", LayoutDashboard], ["orders", "订单中心", ShoppingBag], ["products", "商品中心", Box], ["fbs", "FBS 管理", Truck]] },
-    { id: "marketing", label: "营销与洞察", icon: Target, items: [["growth_center", "增长中心", BarChart3], ["advertising", "广告运营", Megaphone], ["competitors", "竞品跟踪", PackageSearch], ["differentiation", "亚马逊差异化选品", Target], ["ai", "AI 分析", BrainCircuit]] },
+    { id: "marketing", label: "营销与洞察", icon: Target, items: [["growth_center", "增长中心", BarChart3], ["product_analysis", "产品分析", Target], ["advertising", "广告运营", Megaphone], ["competitors", "竞品跟踪", PackageSearch], ["differentiation", "亚马逊差异化选品", Target], ["ai", "AI 分析", BrainCircuit]] },
     { id: "reports", label: "报表与利润", icon: BarChart3, items: [["reports", "数据报告", BarChart3], ["monthly_profit", "月度盈亏", BarChart3], ["weekly_report", "经营周报", CalendarDays], ["cross_profit", "跨境店铺利润", BarChart3]] },
     { id: "inventory", label: "库存与供应链", icon: PackageSearch, items: [["inventory", "库存管理", PackageSearch], ["supply", "约仓计划", Truck]] },
     { id: "cross", label: "跨境运营", icon: Truck, items: [["cross_border_ops", "俄罗斯跨境经营", Truck], ["listing", "产品台账", PackageSearch]] },
@@ -1269,6 +1270,17 @@ export function App() {
     listShops().then(setShops);
   }, []);
   useEffect(() => {
+    const navigate = (event: Event) => {
+      const detail = (event as CustomEvent<{ page?: PageKey; query?: string }>).detail;
+      if (!detail?.page) return;
+      if (detail.query != null) setQuery(detail.query);
+      setWorkspace("ozon");
+      setPage(detail.page);
+    };
+    window.addEventListener("ozon:navigate", navigate);
+    return () => window.removeEventListener("ozon:navigate", navigate);
+  }, []);
+  useEffect(() => {
     void load();
   }, [page, range.from, range.to, activeShop?.id, deferredQuery, targetDays, leadTimeDays, safetyDays]);
   const changeShop = async (id: string) => {
@@ -1386,6 +1398,7 @@ export function App() {
             )}{" "}
             {page === "ai" && <AiPage range={range} />}{" "}
             {page === "growth_center" && <GrowthCenterPage range={range} currency={currency} shopName={activeShop?.name || "当前店铺"} />}{" "}
+            {page === "product_analysis" && <ProductAnalysisPage currency={currency} />}{" "}
             {page === "inventory" && (
               <InventoryPage
                 rows={inventoryRows}

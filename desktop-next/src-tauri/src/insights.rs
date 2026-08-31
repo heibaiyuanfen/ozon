@@ -1,4 +1,4 @@
-use crate::{db, seller_post, AppState};
+use crate::{db, rub_per_cny_for, seller_post, AppState};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -113,6 +113,289 @@ pub struct InsightRow {
     month_ad_orders: i64,
     clusters: Vec<ClusterShare>,
     ad_source: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductAnalysisRow {
+    sku: String,
+    offer_id: String,
+    name: String,
+    day: String,
+    impressions: i64,
+    clicks: i64,
+    ad_orders: i64,
+    ad_revenue: f64,
+    ad_spend: f64,
+    total_units: i64,
+    total_revenue: f64,
+    price: Option<f64>,
+    stock: i64,
+    ctr: Option<f64>,
+    cpc: Option<f64>,
+    cvr: Option<f64>,
+    cpa: Option<f64>,
+    roas: Option<f64>,
+    cpa_limit: Option<f64>,
+    break_even_roas: Option<f64>,
+    purchase_cost: Option<f64>,
+    first_mile_cost: Option<f64>,
+    platform_unit_cost: Option<f64>,
+    inventory_days: Option<f64>,
+    incremental_roas: Option<f64>,
+    clicks_3d: i64,
+    units_7d: i64,
+    previous_units_7d: i64,
+    revenue_7d: f64,
+    previous_revenue_7d: f64,
+    ad_spend_7d: f64,
+    previous_ad_spend_7d: f64,
+    ad_orders_7d: i64,
+    previous_ad_orders_7d: i64,
+    ad_revenue_7d: f64,
+    previous_ad_revenue_7d: f64,
+    sample_ready: bool,
+    overall_score: i64,
+    traffic_score: i64,
+    conversion_score: i64,
+    profit_score: i64,
+    inventory_score: i64,
+    scale_score: i64,
+    grade: String,
+    confidence: String,
+    ad_source: String,
+    rule_version: String,
+    diagnosis: String,
+    action: String,
+}
+
+#[tauri::command]
+pub fn product_analysis(
+    to: String,
+    query: String,
+    state: State<AppState>,
+) -> Result<Vec<ProductAnalysisRow>, String> {
+    let c = db(&state)?;
+    ensure(&c)?;
+    let rub_per_cny = rub_per_cny_for(&state, &c)?;
+    let needle = format!("%{}%", query.trim());
+    let mut stmt = c.prepare("WITH known AS(SELECT sku FROM products UNION SELECT sku FROM sales_daily),candidate AS(SELECT DISTINCT a.campaign_id,p.sku FROM ad_daily a JOIN products p ON a.sku='' AND ((length(COALESCE(p.offer_id,''))>=4 AND instr(lower(a.campaign_name),lower(p.offer_id))>0)OR(length(p.sku)>=6 AND instr(a.campaign_name,p.sku)>0))),cmap AS(SELECT campaign_id,MIN(sku)sku FROM candidate GROUP BY campaign_id HAVING COUNT(DISTINCT sku)=1),effective_ads AS(SELECT day,sku,impressions,clicks,orders,revenue,ABS(spend) spend,0 fallback FROM ad_daily WHERE sku<>'' UNION ALL SELECT a.day,m.sku,CASE WHEN EXISTS(SELECT 1 FROM ad_daily x WHERE x.day=a.day AND x.campaign_id=a.campaign_id AND x.sku=m.sku)THEN 0 ELSE a.impressions END,CASE WHEN EXISTS(SELECT 1 FROM ad_daily x WHERE x.day=a.day AND x.campaign_id=a.campaign_id AND x.sku=m.sku)THEN 0 ELSE a.clicks END,CASE WHEN EXISTS(SELECT 1 FROM ad_daily x WHERE x.day=a.day AND x.campaign_id=a.campaign_id AND x.sku=m.sku AND (x.orders<>0 OR x.revenue<>0))THEN 0 ELSE a.orders END,CASE WHEN EXISTS(SELECT 1 FROM ad_daily x WHERE x.day=a.day AND x.campaign_id=a.campaign_id AND x.sku=m.sku AND (x.orders<>0 OR x.revenue<>0))THEN 0 ELSE a.revenue END,CASE WHEN EXISTS(SELECT 1 FROM ad_daily x WHERE x.day=a.day AND x.campaign_id=a.campaign_id AND x.sku=m.sku)THEN 0 ELSE ABS(a.spend) END,CASE WHEN EXISTS(SELECT 1 FROM ad_daily x WHERE x.day=a.day AND x.campaign_id=a.campaign_id AND x.sku=m.sku)AND NOT EXISTS(SELECT 1 FROM ad_daily x WHERE x.day=a.day AND x.campaign_id=a.campaign_id AND x.sku=m.sku AND (x.orders<>0 OR x.revenue<>0))AND (a.orders<>0 OR a.revenue<>0)THEN 1 ELSE 0 END FROM ad_daily a JOIN cmap m ON m.campaign_id=a.campaign_id WHERE a.sku=''),ad AS(SELECT sku,SUM(CASE WHEN day=?1 THEN impressions ELSE 0 END) impressions,SUM(CASE WHEN day=?1 THEN clicks ELSE 0 END) clicks,SUM(CASE WHEN day=?1 THEN orders ELSE 0 END) orders,SUM(CASE WHEN day=?1 THEN revenue ELSE 0 END) revenue,SUM(CASE WHEN day=?1 THEN spend ELSE 0 END) spend,SUM(CASE WHEN day BETWEEN date(?1,'-2 day') AND ?1 THEN clicks ELSE 0 END) clicks3,SUM(CASE WHEN day=date(?1,'-1 day') THEN revenue ELSE 0 END) prev_revenue,SUM(CASE WHEN day=date(?1,'-1 day') THEN spend ELSE 0 END) prev_spend,MAX(CASE WHEN day=?1 THEN fallback ELSE 0 END) fallback,SUM(CASE WHEN day BETWEEN date(?1,'-6 day') AND ?1 THEN spend ELSE 0 END) spend7,SUM(CASE WHEN day BETWEEN date(?1,'-13 day') AND date(?1,'-7 day') THEN spend ELSE 0 END) prev_spend7,SUM(CASE WHEN day BETWEEN date(?1,'-6 day') AND ?1 THEN orders ELSE 0 END) orders7,SUM(CASE WHEN day BETWEEN date(?1,'-13 day') AND date(?1,'-7 day') THEN orders ELSE 0 END) prev_orders7,SUM(CASE WHEN day BETWEEN date(?1,'-6 day') AND ?1 THEN revenue ELSE 0 END) revenue7,SUM(CASE WHEN day BETWEEN date(?1,'-13 day') AND date(?1,'-7 day') THEN revenue ELSE 0 END) prev_revenue7 FROM effective_ads GROUP BY sku),sales AS(SELECT sku,SUM(CASE WHEN day=?1 THEN ordered_units ELSE 0 END) units,SUM(CASE WHEN day=?1 THEN revenue ELSE 0 END) revenue,SUM(CASE WHEN day BETWEEN date(?1,'-6 day') AND ?1 THEN ordered_units ELSE 0 END)/7.0 daily7,SUM(CASE WHEN day BETWEEN date(?1,'-6 day') AND ?1 THEN ordered_units ELSE 0 END) units7,SUM(CASE WHEN day BETWEEN date(?1,'-13 day') AND date(?1,'-7 day') THEN ordered_units ELSE 0 END) prev_units7,SUM(CASE WHEN day BETWEEN date(?1,'-6 day') AND ?1 THEN revenue ELSE 0 END) revenue7,SUM(CASE WHEN day BETWEEN date(?1,'-13 day') AND date(?1,'-7 day') THEN revenue ELSE 0 END) prev_revenue7 FROM sales_daily GROUP BY sku),stock AS(SELECT sku,SUM(available_stock) qty FROM inventory_stock GROUP BY sku),fp AS(SELECT sku,SUM(CASE WHEN accruals_for_sale>0 THEN accruals_for_sale ELSE 0 END) sales,SUM(ABS(sale_commission)) commission,SUM(ABS(delivery_charge)+ABS(return_delivery_charge)) logistics,COUNT(DISTINCT CASE WHEN posting_number<>'' THEN posting_number END) postings FROM finance_transactions WHERE sku<>'' AND substr(operation_date,1,10)<=?1 GROUP BY sku) SELECT k.sku,COALESCE(p.offer_id,''),COALESCE(NULLIF(p.name,''),''),COALESCE(ad.impressions,0),COALESCE(ad.clicks,0),COALESCE(ad.orders,0),COALESCE(ad.revenue,0),COALESCE(ad.spend,0),COALESCE(sales.units,0),COALESCE(sales.revenue,0),NULLIF(COALESCE(pp.price,CASE WHEN sales.units>0 THEN sales.revenue/sales.units ELSE 0 END),0),COALESCE(stock.qty,0),COALESCE(ad.clicks3,0),COALESCE(ad.prev_revenue,0),COALESCE(ad.prev_spend,0),pc.unit_cost,pc.first_mile_cost,fp.sales,fp.commission,fp.logistics,fp.postings,COALESCE(sales.daily7,0),COALESCE(ad.fallback,0),COALESCE(sales.units7,0),COALESCE(sales.prev_units7,0),COALESCE(sales.revenue7,0),COALESCE(sales.prev_revenue7,0),COALESCE(ad.spend7,0),COALESCE(ad.prev_spend7,0),COALESCE(ad.orders7,0),COALESCE(ad.prev_orders7,0),COALESCE(ad.revenue7,0),COALESCE(ad.prev_revenue7,0) FROM known k LEFT JOIN products p ON p.sku=k.sku LEFT JOIN ad ON ad.sku=k.sku LEFT JOIN sales ON sales.sku=k.sku LEFT JOIN stock ON stock.sku=k.sku LEFT JOIN product_costs pc ON pc.sku=k.sku LEFT JOIN product_price_cache pp ON pp.sku=k.sku LEFT JOIN fp ON fp.sku=k.sku WHERE (?2='%%' OR k.sku LIKE ?2 OR p.offer_id LIKE ?2 OR p.name LIKE ?2) AND (COALESCE(sales.units,0)>0 OR COALESCE(ad.impressions,0)>0 OR COALESCE(stock.qty,0)>0) ORDER BY COALESCE(sales.revenue,0) DESC,COALESCE(ad.spend,0) DESC LIMIT 1000").map_err(|e|e.to_string())?;
+    let rows = stmt
+        .query_map(params![to, needle], |r| {
+            let sku: String = r.get(0)?;
+            let impressions: i64 = r.get(3)?;
+            let clicks: i64 = r.get(4)?;
+            let ad_orders: i64 = r.get(5)?;
+            let ad_revenue: f64 = r.get(6)?;
+            let ad_spend: f64 = r.get(7)?;
+            let price: Option<f64> = r.get(10)?;
+            let stock: i64 = r.get(11)?;
+            let clicks_3d: i64 = r.get(12)?;
+            let prev_revenue: f64 = r.get(13)?;
+            let prev_spend: f64 = r.get(14)?;
+            let unit_cost_native: Option<f64> = r.get(15)?;
+            let first_mile_native: Option<f64> = r.get(16)?;
+            let (unit_cost_cny, first_mile_cny): (Option<f64>, Option<f64>) = c
+                .query_row(
+                    "SELECT unit_cost_cny,first_mile_cost_cny FROM product_costs WHERE sku=?1",
+                    [&sku],
+                    |x| Ok((x.get(0)?, x.get(1)?)),
+                )
+                .unwrap_or((None, None));
+            let unit_cost = unit_cost_native.or(unit_cost_cny.map(|v| v * rub_per_cny));
+            let first_mile = first_mile_native.or(first_mile_cny.map(|v| v * rub_per_cny));
+            let fp_sales: Option<f64> = r.get(17)?;
+            let fp_commission: Option<f64> = r.get(18)?;
+            let fp_logistics: Option<f64> = r.get(19)?;
+            let fp_postings: Option<i64> = r.get(20)?;
+            let daily7: f64 = r.get(21)?;
+            let ad_fallback: i64 = r.get(22)?;
+            let ratio = |n: f64, d: f64| (d > 0.0).then_some(n / d);
+            let platform_unit = match (price, fp_sales, fp_commission, fp_logistics, fp_postings) {
+                (Some(p), Some(s), Some(cm), Some(lg), Some(posts))
+                    if s > 0.0 && posts > 0 && cm / s <= 0.6 =>
+                {
+                    Some(p * cm / s + lg / posts as f64)
+                }
+                _ => None,
+            };
+            let cpa_limit = match (price, unit_cost, first_mile, platform_unit) {
+                (Some(p), Some(cost), Some(first), Some(platform)) => {
+                    Some(p - cost - first - platform)
+                }
+                _ => None,
+            }
+            .filter(|v| *v > 0.0);
+            let cpa = ratio(ad_spend, ad_orders as f64);
+            let roas = ratio(ad_revenue, ad_spend);
+            let ctr = ratio(clicks as f64 * 100.0, impressions as f64);
+            let cvr = ratio(ad_orders as f64 * 100.0, clicks as f64);
+            let incremental_roas = {
+                let ds = ad_spend - prev_spend;
+                (ds.abs() > 0.01).then_some((ad_revenue - prev_revenue) / ds)
+            };
+            let diagnosis = if impressions == 0 {
+                "无曝光"
+            } else if ctr.unwrap_or(0.0) < 1.0 {
+                "CTR 偏低"
+            } else if clicks >= 30 && cvr.unwrap_or(0.0) < 3.0 {
+                "CVR 偏低"
+            } else if cpa.zip(cpa_limit).is_some_and(|(a, l)| a > l) {
+                "CPA 超过利润上限"
+            } else {
+                "漏斗暂未发现明显异常"
+            }
+            .to_string();
+            let action = if clicks_3d < 100 {
+                "样本不足：保持单变量，累计至少 3 天或 100 点击"
+            } else if cpa.zip(cpa_limit).is_some_and(|(a, l)| a > l) {
+                "停止放量并回退最近一次变量"
+            } else if incremental_roas
+                .zip(price.zip(cpa_limit))
+                .is_some_and(|(ir, (p, l))| l > 0.0 && ir < p / l)
+            {
+                "增量 ROAS 低于保本线，回退"
+            } else {
+                "可继续观察；每次只改预算、图片或价格中的一个"
+            }
+            .to_string();
+            // Five transparent dimensions total 100 points. Low-sample products receive a
+            // neutral conversion/scale score and are explicitly marked low confidence.
+            let traffic_score = if impressions == 0 {
+                0
+            } else if ctr.unwrap_or(0.0) >= 3.0 {
+                20
+            } else if ctr.unwrap_or(0.0) >= 2.0 {
+                16
+            } else if ctr.unwrap_or(0.0) >= 1.0 {
+                10
+            } else {
+                5
+            };
+            let conversion_score = if clicks < 20 {
+                8
+            } else if cvr.unwrap_or(0.0) >= 8.0 {
+                20
+            } else if cvr.unwrap_or(0.0) >= 5.0 {
+                16
+            } else if cvr.unwrap_or(0.0) >= 3.0 {
+                12
+            } else if cvr.unwrap_or(0.0) >= 1.0 {
+                6
+            } else {
+                0
+            };
+            let profit_score = if ad_spend <= 0.0 {
+                15
+            } else {
+                match (cpa, cpa_limit) {
+                    (Some(a), Some(l)) if a <= l * 0.7 => 25,
+                    (Some(a), Some(l)) if a <= l => 20,
+                    (Some(a), Some(l)) if a <= l * 1.2 => 10,
+                    (Some(_), Some(_)) => 0,
+                    _ => 6,
+                }
+            };
+            let inventory_days = (daily7 > 0.0).then_some(stock as f64 / daily7);
+            let inventory_score = match inventory_days {
+                Some(d) if (14.0..=60.0).contains(&d) => 15,
+                Some(d) if (7.0..=90.0).contains(&d) => 10,
+                Some(d) if d < 3.0 || d > 120.0 => 3,
+                Some(_) => 7,
+                None if stock == 0 => 0,
+                None => 5,
+            };
+            let break_even_roas = price.zip(cpa_limit).and_then(|(p, l)| ratio(p, l));
+            let scale_score = if clicks_3d < 100 {
+                8
+            } else {
+                match (incremental_roas, break_even_roas) {
+                    (Some(i), Some(b)) if i >= b => 20,
+                    (Some(i), _) if i > 0.0 => 12,
+                    (Some(_), _) => 0,
+                    (None, _) => 8,
+                }
+            };
+            let overall_score =
+                traffic_score + conversion_score + profit_score + inventory_score + scale_score;
+            let grade = if overall_score >= 85 {
+                "优秀"
+            } else if overall_score >= 70 {
+                "良好"
+            } else if overall_score >= 55 {
+                "观察"
+            } else {
+                "风险"
+            }
+            .to_string();
+            let confidence = if clicks_3d >= 100 && cpa_limit.is_some() {
+                "高"
+            } else if clicks_3d >= 30 {
+                "中"
+            } else {
+                "低"
+            }
+            .to_string();
+            Ok(ProductAnalysisRow {
+                sku,
+                offer_id: r.get(1)?,
+                name: r.get(2)?,
+                day: to.clone(),
+                impressions,
+                clicks,
+                ad_orders,
+                ad_revenue,
+                ad_spend,
+                total_units: r.get(8)?,
+                total_revenue: r.get(9)?,
+                price,
+                stock,
+                ctr,
+                cpc: ratio(ad_spend, clicks as f64),
+                cvr,
+                cpa,
+                roas,
+                cpa_limit,
+                break_even_roas,
+                purchase_cost: unit_cost,
+                first_mile_cost: first_mile,
+                platform_unit_cost: platform_unit,
+                inventory_days,
+                incremental_roas,
+                clicks_3d,
+                units_7d: r.get(23)?,
+                previous_units_7d: r.get(24)?,
+                revenue_7d: r.get(25)?,
+                previous_revenue_7d: r.get(26)?,
+                ad_spend_7d: r.get(27)?,
+                previous_ad_spend_7d: r.get(28)?,
+                ad_orders_7d: r.get(29)?,
+                previous_ad_orders_7d: r.get(30)?,
+                ad_revenue_7d: r.get(31)?,
+                previous_ad_revenue_7d: r.get(32)?,
+                sample_ready: clicks_3d >= 100,
+                overall_score,
+                traffic_score,
+                conversion_score,
+                profit_score,
+                inventory_score,
+                scale_score,
+                grade,
+                confidence,
+                ad_source: if ad_fallback > 0 {
+                    "SKU 明细曝光/点击/花费 + 唯一匹配活动级订单/销售额补齐".into()
+                } else {
+                    "SKU 明细或唯一活动名称匹配".into()
+                },
+                rule_version: "product-analysis-v2.1.0".into(),
+                diagnosis,
+                action,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
 }
 
 fn ensure(c: &Connection) -> Result<(), String> {

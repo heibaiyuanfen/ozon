@@ -18,6 +18,7 @@ import type {
   FbsOrderRow,
   FinanceBreakdownRow,
   InsightRow,
+  ProductAnalysisRow,
   InventoryRow,
   ListingRow,
   ListingJob,
@@ -703,6 +704,9 @@ export async function productDetail(
   to: string,
 ): Promise<ProductDetail> {
   return invoke("product_detail", { sku, to });
+}
+export async function productAnalysis(to: string, query: string): Promise<ProductAnalysisRow[]> {
+  return invoke("product_analysis", { to, query });
 }
 export async function listingAttributeDefinitions(
   categoryId: number,
