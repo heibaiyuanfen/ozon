@@ -1701,18 +1701,22 @@ pub fn retry_listing_job(id: i64, state: State<AppState>) -> Result<(), String> 
 
 fn shipping_bands(weight: f64) -> Vec<(f64, f64, f64)> {
     let mut bands = Vec::new();
-    if weight < 0.5 {
-        bands.push((0.0, 135.0, 3.37 + weight * 28.17));
-    } else if weight < 30.0 {
-        bands.push((0.0, 135.0, 25.83 + weight * 19.17));
+    let billed_weight = (weight * 10.0).ceil() / 10.0;
+    let rounded = |value: f64| (value * 100.0).round() / 100.0;
+    if billed_weight < 0.5 {
+        bands.push((0.0, 135.0, rounded(3.37 + billed_weight * 28.10)));
+    } else if billed_weight < 30.0 {
+        bands.push((0.0, 135.0, rounded(24.71 + billed_weight * 28.10)));
     }
-    if weight < 2.0 {
-        bands.push((135.0, 635.0, 17.97 + weight * 28.17));
-    } else if weight < 30.0 {
-        bands.push((135.0, 635.0, 40.44 + weight * 28.17));
+    if billed_weight < 2.0 {
+        bands.push((135.0, 635.0, rounded(17.97 + billed_weight * 28.10)));
+    } else if billed_weight < 30.0 {
+        bands.push((135.0, 635.0, rounded(40.44 + billed_weight * 28.10)));
     }
-    if weight < 5.0 {
-        bands.push((635.0, 22_525.0, 24.17 + weight * 28.17));
+    if billed_weight < 5.0 {
+        bands.push((635.0, 22_525.0, rounded(25.83 + billed_weight * 19.10)));
+    } else if billed_weight < 30.0 {
+        bands.push((635.0, 22_525.0, rounded(64.00 + billed_weight * 25.80)));
     }
     bands
 }
@@ -2125,11 +2129,11 @@ mod tests {
             minimum_sale_price: 0.0,
         };
         let first = calculate_listing_price(form(15.0, 12.0)).unwrap();
-        assert_eq!(first.price, 99.0);
-        assert!((first.shipping - 37.332).abs() < 0.000_001);
+        assert_eq!(first.price, 106.0);
+        assert!((first.shipping - 41.57).abs() < 0.000_001);
         let crossed = calculate_listing_price(form(50.0, 14.0)).unwrap();
         assert_eq!(crossed.price, 184.0);
-        assert!((crossed.shipping - 34.872).abs() < 0.000_001);
+        assert!((crossed.shipping - 34.83).abs() < 0.000_001);
     }
     #[test]
     fn category_tree_matches_legacy_leaf_and_type_shapes() {

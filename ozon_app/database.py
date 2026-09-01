@@ -15,22 +15,31 @@ from .delivery_tariffs import normalize_cluster, read_tariff_workbook
 
 
 def cross_border_shipping_cny(price_cny: float, weight_kg: float) -> float | None:
-    """Return cross-border freight in CNY using the user's ordered IFS rules."""
+    """Return cross-border freight in CNY using the current six-band tariff.
+
+    The billing weight is rounded up to the next 0.1 kg before selecting a
+    band, matching the spreadsheet formula used by operations.
+    """
     price = float(price_cny)
-    weight = float(weight_kg)
-    if price < 0 or weight < 0:
+    raw_weight = float(weight_kg)
+    if price < 0 or raw_weight < 0:
         return None
+    weight = math.ceil(raw_weight * 10) / 10
     if price < 135 and weight < 0.5:
-        return 3.37 + weight * 28.17
-    if 135 <= price < 635 and weight < 2:
-        return 17.97 + weight * 28.17
-    if 635 <= price < 22525 and weight < 5:
-        return 24.17 + weight * 28.17
-    if price < 135 and 0.5 <= weight < 30:
-        return 25.83 + weight * 19.17
-    if 135 <= price < 635 and 2 <= weight < 30:
-        return 40.44 + weight * 28.17
-    return None
+        freight = 3.37 + weight * 28.10
+    elif 135 <= price < 635 and weight < 2:
+        freight = 17.97 + weight * 28.10
+    elif 635 <= price < 22525 and weight < 5:
+        freight = 25.83 + weight * 19.10
+    elif price < 135 and 0.5 <= weight < 30:
+        freight = 24.71 + weight * 28.10
+    elif 135 <= price < 635 and 2 <= weight < 30:
+        freight = 40.44 + weight * 28.10
+    elif 635 <= price < 22525 and 5 <= weight < 30:
+        freight = 64.00 + weight * 25.80
+    else:
+        return None
+    return round(freight, 2)
 
 
 class Database:

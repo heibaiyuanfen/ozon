@@ -420,11 +420,13 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(second["weight_kg"], 0.4)
 
     def test_cross_border_shipping_formula_boundaries(self) -> None:
-        self.assertAlmostEqual(cross_border_shipping_cny(100, 0.4), 3.37 + 0.4 * 28.17)
-        self.assertAlmostEqual(cross_border_shipping_cny(200, 1.0), 17.97 + 28.17)
-        self.assertAlmostEqual(cross_border_shipping_cny(700, 2.0), 24.17 + 2 * 28.17)
-        self.assertAlmostEqual(cross_border_shipping_cny(100, 0.5), 25.83 + 0.5 * 19.17)
-        self.assertAlmostEqual(cross_border_shipping_cny(200, 2.0), 40.44 + 2 * 28.17)
+        self.assertAlmostEqual(cross_border_shipping_cny(100, 0.4), 14.61)
+        self.assertAlmostEqual(cross_border_shipping_cny(200, 1.0), 46.07)
+        self.assertAlmostEqual(cross_border_shipping_cny(700, 2.0), 64.03)
+        self.assertAlmostEqual(cross_border_shipping_cny(100, 0.5), 38.76)
+        self.assertAlmostEqual(cross_border_shipping_cny(200, 2.0), 96.64)
+        self.assertAlmostEqual(cross_border_shipping_cny(700, 5.0), 193.00)
+        self.assertAlmostEqual(cross_border_shipping_cny(10, 0.01), 6.18)
         self.assertIsNone(cross_border_shipping_cny(30000, 1))
 
     def test_cross_border_report_contains_only_sold_products(self) -> None:

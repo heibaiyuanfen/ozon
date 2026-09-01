@@ -5789,20 +5789,25 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
 
 fn cross_border_shipping(price: f64, weight: f64) -> Option<f64> {
     if price < 0.0 || weight < 0.0 {
-        None
-    } else if price < 135.0 && weight < 0.5 {
-        Some(3.37 + weight * 28.17)
-    } else if price >= 135.0 && price < 635.0 && weight < 2.0 {
-        Some(17.97 + weight * 28.17)
-    } else if price >= 635.0 && price < 22525.0 && weight < 5.0 {
-        Some(24.17 + weight * 28.17)
-    } else if price < 135.0 && weight >= 0.5 && weight < 30.0 {
-        Some(25.83 + weight * 19.17)
-    } else if price >= 135.0 && price < 635.0 && weight >= 2.0 && weight < 30.0 {
-        Some(40.44 + weight * 28.17)
-    } else {
-        None
+        return None;
     }
+    let billed_weight = (weight * 10.0).ceil() / 10.0;
+    let freight = if price < 135.0 && billed_weight < 0.5 {
+        3.37 + billed_weight * 28.10
+    } else if price >= 135.0 && price < 635.0 && billed_weight < 2.0 {
+        17.97 + billed_weight * 28.10
+    } else if price >= 635.0 && price < 22525.0 && billed_weight < 5.0 {
+        25.83 + billed_weight * 19.10
+    } else if price < 135.0 && billed_weight >= 0.5 && billed_weight < 30.0 {
+        24.71 + billed_weight * 28.10
+    } else if price >= 135.0 && price < 635.0 && billed_weight >= 2.0 && billed_weight < 30.0 {
+        40.44 + billed_weight * 28.10
+    } else if price >= 635.0 && price < 22525.0 && billed_weight >= 5.0 && billed_weight < 30.0 {
+        64.00 + billed_weight * 25.80
+    } else {
+        return None;
+    };
+    Some((freight * 100.0).round() / 100.0)
 }
 
 fn cross_border_report_blocking(
@@ -8875,12 +8880,15 @@ mod cross_border_tests {
     use super::cross_border_shipping;
 
     #[test]
-    fn freight_formula_matches_legacy_boundaries() {
-        assert_eq!(cross_border_shipping(100.0, 0.4), Some(3.37 + 0.4 * 28.17));
-        assert_eq!(cross_border_shipping(200.0, 1.0), Some(17.97 + 28.17));
-        assert_eq!(cross_border_shipping(700.0, 3.0), Some(24.17 + 3.0 * 28.17));
-        assert_eq!(cross_border_shipping(100.0, 1.0), Some(25.83 + 19.17));
-        assert_eq!(cross_border_shipping(100.0, 3.0), Some(25.83 + 3.0 * 19.17));
+    fn freight_formula_matches_current_boundaries() {
+        assert_eq!(cross_border_shipping(100.0, 0.4), Some(14.61));
+        assert_eq!(cross_border_shipping(200.0, 1.0), Some(46.07));
+        assert_eq!(cross_border_shipping(700.0, 3.0), Some(83.13));
+        assert_eq!(cross_border_shipping(100.0, 1.0), Some(52.81));
+        assert_eq!(cross_border_shipping(200.0, 2.0), Some(96.64));
+        assert_eq!(cross_border_shipping(700.0, 5.0), Some(193.00));
+        assert_eq!(cross_border_shipping(10.0, 0.01), Some(6.18));
+        assert_eq!(cross_border_shipping(635.0, 30.0), None);
         assert_eq!(cross_border_shipping(30000.0, 1.0), None);
     }
 }
