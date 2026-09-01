@@ -459,6 +459,10 @@ class DatabaseTests(unittest.TestCase):
                         "price": -20,
                     }],
                 },
+                {
+                    "operation_id": "stars-august", "operation_date": "2026-08-02",
+                    "operation_type": "StarsMembership", "amount": -115,
+                },
             ])
             rows = database.cross_border_profit_rows("2026-08-01", "2026-08-07")
             self.assertEqual([row["sku"] for row in rows], ["101"])
@@ -467,15 +471,18 @@ class DatabaseTests(unittest.TestCase):
             self.assertAlmostEqual(rows[0]["estimated_commission_rate"], 0.10)
             self.assertAlmostEqual(rows[0]["estimated_acquiring_rate"], 0.02)
             # Live CNY formula: 120 sales - 14.4 commission/acquiring
-            # - 60 purchase - 135 estimated freight = -89.4.
+            # - 60 purchase - 158.43 estimated freight = -112.83.
             self.assertAlmostEqual(
-                rows[0]["contribution_before_shop_ads_cny"], -89.40, places=2,
+                rows[0]["contribution_before_shop_ads_cny"], -112.83, places=2,
             )
-            self.assertIn("120.00 - 14.40 - 60.00 - 135.00", rows[0]["realtime_profit_formula_cny"])
+            self.assertIn("120.00 - 14.40 - 60.00 - 158.43", rows[0]["realtime_profit_formula_cny"])
             summary = database.cross_border_period_summary(
                 "2026-08-01", "2026-08-07", rows,
             )
-            self.assertAlmostEqual(summary["profit_cny"], -89.40, places=2)
+            self.assertAlmostEqual(summary["performance_ad_spend_cny"], 0, places=2)
+            self.assertAlmostEqual(summary["stars_membership_cny"], 11.50, places=2)
+            self.assertAlmostEqual(summary["ad_spend_cny"], 11.50, places=2)
+            self.assertAlmostEqual(summary["profit_cny"], -124.33, places=2)
             self.assertGreater(summary["reference_cross_border_freight"], 0)
             self.assertTrue(summary["freight_in_realtime_profit"])
 

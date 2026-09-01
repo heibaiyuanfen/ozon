@@ -639,6 +639,8 @@ struct CrossBorderReport {
     revenue_cny: f64,
     units: i64,
     ad_spend_cny: f64,
+    performance_ad_spend_cny: f64,
+    stars_membership_cny: f64,
     estimated_platform_fees_cny: f64,
     purchase_and_freight_cny: f64,
     profit_cny: Option<f64>,
@@ -5276,6 +5278,7 @@ fn finance_service_category(name: &str) -> (&'static str, &'static str) {
         "premium",
         "subscription",
         "cashback",
+        "starsmembership",
         "advert",
         "реклам",
         "продвиж",
@@ -6041,13 +6044,22 @@ fn cross_border_report_blocking(
     }
     let revenue_cny = rows.iter().map(|x| x.revenue_cny).sum::<f64>();
     let units = rows.iter().map(|x| x.units).sum();
-    let ad_rub: f64 = c
+    let performance_ad_rub: f64 = c
         .query_row(
             "SELECT COALESCE(SUM(spend),0)FROM ad_daily WHERE day BETWEEN ?1 AND ?2 AND sku=''",
             params![range.from, range.to],
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
+    let stars_membership_rub: f64 = c
+        .query_row(
+            "SELECT COALESCE(-SUM(amount),0) FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND lower(operation_type) LIKE '%starsmembership%'",
+            params![range.from, range.to],
+            |r| r.get::<_, f64>(0),
+        )
+        .map_err(|e| e.to_string())?
+        .max(0.0);
+    let ad_rub = performance_ad_rub + stars_membership_rub;
     let settled:f64=c.query_row("SELECT COALESCE(SUM(amount),0)FROM finance_transactions WHERE substr(operation_date,1,10)BETWEEN ?1 AND ?2",params![range.from,range.to],|r|r.get(0)).map_err(|e|e.to_string())?;
     let finance_available:i64=c.query_row("SELECT COUNT(*)FROM finance_transactions WHERE substr(operation_date,1,10)BETWEEN ?1 AND ?2",params![range.from,range.to],|r|r.get(0)).map_err(|e|e.to_string())?;
     let profit = (missing == 0 && !rows.is_empty())
@@ -6059,6 +6071,8 @@ fn cross_border_report_blocking(
         revenue_cny,
         units,
         ad_spend_cny: ad_rub / rate,
+        performance_ad_spend_cny: performance_ad_rub / rate,
+        stars_membership_cny: stars_membership_rub / rate,
         estimated_platform_fees_cny: total_fees,
         purchase_and_freight_cny: purchase_freight,
         profit_cny: profit,
@@ -6105,7 +6119,7 @@ fn cross_border_report_blocking(
             }
             days.into_iter()
                 .map(|(day, (units, revenue, expense, complete))| {
-                    let ad: f64 = c
+                    let performance_ad: f64 = c
                         .query_row(
                             "SELECT COALESCE(SUM(spend),0)FROM ad_daily WHERE day=?1 AND sku=''",
                             [&day],
@@ -6113,6 +6127,16 @@ fn cross_border_report_blocking(
                         )
                         .unwrap_or(0.0)
                         / rate;
+                    let stars_membership = c
+                        .query_row(
+                            "SELECT COALESCE(-SUM(amount),0) FROM finance_transactions WHERE substr(operation_date,1,10)=?1 AND lower(operation_type) LIKE '%starsmembership%'",
+                            [&day],
+                            |r| r.get::<_, f64>(0),
+                        )
+                        .unwrap_or(0.0)
+                        .max(0.0)
+                        / rate;
+                    let ad = performance_ad + stars_membership;
                     let fees = shop_commission_rate
                         .zip(acquiring_rate)
                         .map(|(a, b)| revenue * (a + b))
@@ -8930,6 +8954,7 @@ mod finance_category_tests {
             finance_service_category("OperationMarketplaceServiceCostPerClick").0,
             "advertising"
         );
+        assert_eq!(finance_service_category("StarsMembership").0, "advertising");
     }
 }
 

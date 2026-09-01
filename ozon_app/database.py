@@ -3833,7 +3833,15 @@ class Database:
             for row in rows if row.get("estimated_platform_fees") is not None
         )
         revenue = sum(float(row.get("revenue") or 0) for row in rows)
-        ads = float(dashboard.get("spend") or 0)
+        performance_ads = float(dashboard.get("spend") or 0)
+        with self.connect() as db:
+            stars_membership = max(0.0, -_number(db.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM finance_transactions "
+                "WHERE substr(operation_date, 1, 10) BETWEEN ? AND ? "
+                "AND lower(operation_type) LIKE '%starsmembership%'",
+                (date_from, date_to),
+            ).fetchone()[0]))
+        ads = performance_ads + stars_membership
         finance_available = bool(monthly.get("finance_available"))
         missing = sum(1 for row in rows if not row["cross_border_cost_complete"])
         profit = (
@@ -3857,6 +3865,8 @@ class Database:
                 int(row.get("other_fulfillment_orders") or 0) for row in fulfillment_rows
             ),
             "ad_spend": ads,
+            "performance_ad_spend": performance_ads,
+            "stars_membership": stars_membership,
             "estimated_platform_fees": estimated_platform_fees,
             "estimated_commission_rate": fee_profile.get("commission_rate"),
             "estimated_acquiring_rate": fee_profile.get("acquiring_rate"),
@@ -3876,6 +3886,8 @@ class Database:
             "rub_per_cny": rate,
             "revenue_cny": revenue / rate if rate else 0.0,
             "ad_spend_cny": ads / rate if rate else 0.0,
+            "performance_ad_spend_cny": performance_ads / rate if rate else 0.0,
+            "stars_membership_cny": stars_membership / rate if rate else 0.0,
             "platform_payout_cny": (
                 float(monthly.get("platform_payout") or 0) / rate if rate else 0.0
             ),

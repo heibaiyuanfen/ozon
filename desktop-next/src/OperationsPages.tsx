@@ -3405,7 +3405,9 @@ function CrossBorderView({ data }: { data: CrossBorderReport | null }) {
         <div>
           <span>全店广告</span>
           <strong>{cny(data.adSpendCny)}</strong>
-          <small>仅汇总扣除，不分摊单品</small>
+          <small>
+            Performance {cny(data.performanceAdSpendCny)} · 星星商品 {cny(data.starsMembershipCny)}
+          </small>
         </div>
         <div>
           <span>预估佣金 + 收单</span>

@@ -498,6 +498,8 @@ export interface CrossBorderReport {
   revenueCny: number;
   units: number;
   adSpendCny: number;
+  performanceAdSpendCny: number;
+  starsMembershipCny: number;
   estimatedPlatformFeesCny: number;
   purchaseAndFreightCny: number;
   profitCny: number | null;
