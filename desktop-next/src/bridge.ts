@@ -139,6 +139,9 @@ export async function advertising(range: DateRange): Promise<AdvertisingData> {
     orders: 0,
     revenue: 0,
     spend: 0,
+    clickSpend: 0,
+    orderSpend: 0,
+    unclassifiedSpend: 0,
     ctr: null,
     cpc: null,
     roas: 0,
@@ -151,6 +154,7 @@ export async function advertising(range: DateRange): Promise<AdvertisingData> {
     knownCostMargin: null,
     marginCoveragePercent: 0,
     campaigns: [],
+    products: [],
     trend: [],
   };
 }
@@ -707,6 +711,12 @@ export async function productDetail(
 }
 export async function productAnalysis(to: string, query: string): Promise<ProductAnalysisRow[]> {
   return invoke("product_analysis", { to, query });
+}
+export async function exportProductAnalysisJson(
+  fileName: string,
+  payload: unknown,
+): Promise<string> {
+  return invoke("export_product_analysis_json", { input: { fileName, payload } });
 }
 export async function listingAttributeDefinitions(
   categoryId: number,

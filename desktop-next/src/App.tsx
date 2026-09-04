@@ -20,6 +20,7 @@ import {
   LayoutDashboard,
   Megaphone,
   PackageSearch,
+  Network,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
@@ -81,6 +82,7 @@ import { ProductDifferentiationPage } from "./ProductDifferentiationPage";
 import { CrossBorderOperationsPage } from "./CrossBorderOperationsPage";
 import { GrowthCenterPage } from "./GrowthCenterPage";
 import { ProductAnalysisPage } from "./ProductAnalysisPage";
+import { MindMapPage } from "./MindMapPage";
 
 const emptyDashboard: DashboardData = {
   revenue: 0,
@@ -111,6 +113,9 @@ const emptyAds: AdvertisingData = {
   orders: 0,
   revenue: 0,
   spend: 0,
+  clickSpend: 0,
+  orderSpend: 0,
+  unclassifiedSpend: 0,
   ctr: null,
   cpc: null,
   roas: null,
@@ -123,6 +128,7 @@ const emptyAds: AdvertisingData = {
   knownCostMargin: null,
   marginCoveragePercent: 0,
   campaigns: [],
+  products: [],
   trend: [],
 };
 
@@ -200,7 +206,7 @@ function Sidebar({
     { id: "reports", label: "报表与利润", icon: BarChart3, items: [["reports", "数据报告", BarChart3], ["monthly_profit", "月度盈亏", BarChart3], ["weekly_report", "经营周报", CalendarDays], ["cross_profit", "跨境店铺利润", BarChart3]] },
     { id: "inventory", label: "库存与供应链", icon: PackageSearch, items: [["inventory", "库存管理", PackageSearch], ["supply", "约仓计划", Truck]] },
     { id: "cross", label: "跨境运营", icon: Truck, items: [["cross_border_ops", "俄罗斯跨境经营", Truck], ["listing", "产品台账", PackageSearch]] },
-    { id: "data", label: "数据与协作", icon: Database, items: [["sync", "数据同步", RefreshCw], ["feishu", "飞书协作", Database], ["migration", "数据迁移", Database]] },
+    { id: "data", label: "数据与协作", icon: Database, items: [["mind_map", "可视化报告", Network], ["sync", "数据同步", RefreshCw], ["feishu", "飞书协作", Database], ["migration", "数据迁移", Database]] },
     { id: "system", label: "系统设置", icon: Settings2, items: [["shops", "店铺管理", Store], ["settings", "连接设置", Settings2]] },
   ];
   const groupForPage = groups.find((group) => group.items.some(([key]) => key === page))?.id ?? "operations";
@@ -946,6 +952,7 @@ function Advertising({
   refresh: () => void;
 }) {
   const [campaignQuery, setCampaignQuery] = useState("");
+  const [productQuery, setProductQuery] = useState("");
   const [monitorId, setMonitorId] = useState<string | null>(null);
   const [monitorCache, setMonitorCache] = useState<Record<string, { data: CampaignMonitorData; at: number }>>({});
   const visibleCampaigns = data.campaigns.filter((x) =>
@@ -953,6 +960,9 @@ function Advertising({
         .toLowerCase()
         .includes(campaignQuery.trim().toLowerCase()),
     );
+  const visibleProducts = data.products.filter((x) =>
+    `${x.sku} ${x.offerId} ${x.name}`.toLowerCase().includes(productQuery.trim().toLowerCase()),
+  );
   return (
     <>
       <Header
@@ -979,6 +989,9 @@ function Advertising({
           value={money(data.spend, currency)}
           note="活动总计"
         />
+        <Stat tone="blue" label="按点击费用" value={money(data.clickSpend, currency)} note="CPC / 按点击计划" />
+        <Stat tone="orange" label="按订单费用" value={money(data.orderSpend, currency)} note="CPO / 按订单推广" />
+        {data.unclassifiedSpend > 0 && <Stat tone="pink" label="未分类广告费" value={money(data.unclassifiedSpend, currency)} note="计费类型未由 API 返回" />}
         <Stat
           tone="blue"
           label="广告销售额"
@@ -1062,6 +1075,23 @@ function Advertising({
           </div>
         </section>
       </div>
+      <section className="card campaigns product-ad-metrics">
+        <div className="card-title">
+          单品 ACOS 与 TACOS
+          <label className="search"><Search size={15} /><input value={productQuery} onChange={(e) => setProductQuery(e.target.value)} placeholder="搜索 SKU、货号或商品名" /></label>
+          <span>{visibleProducts.length} 个单品</span>
+        </div>
+        <p className="metric-definition">同一所选周期计算：ACOS＝广告费 ÷ 广告归因销售额；TACOS＝广告费 ÷ 单品全部销售额。仅展示能匹配到 SKU 的广告明细，店铺级未分摊广告不强行归属。</p>
+        {visibleProducts.length ? <table>
+          <thead><tr><th>单品</th><th>计费类型</th><th>曝光 / 点击</th><th>广告订单</th><th>总广告费</th><th>按点击</th><th>按订单</th><th>广告销售额</th><th>总销售额</th><th>归因占比</th><th>ACOS</th><th>TACOS</th><th>ROAS</th></tr></thead>
+          <tbody>{visibleProducts.map((x)=><tr key={x.sku}>
+            <td><b>{x.offerId || x.sku}</b><small>{x.sku}{x.name ? ` · ${x.name}` : ""}</small></td>
+            <td>{x.billingTypes || "未分类"}{x.unclassifiedSpend > 0 && <small>未分类 {money(x.unclassifiedSpend,currency)}</small>}</td><td>{x.impressions} / {x.clicks}</td><td>{x.orders}</td><td>{money(x.spend,currency)}</td><td>{money(x.clickSpend,currency)}</td><td>{money(x.orderSpend,currency)}</td><td>{money(x.adRevenue,currency)}</td><td>{money(x.totalRevenue,currency)}</td><td>{x.totalRevenue > 0 ? pct(x.adRevenue / x.totalRevenue * 100) : "—"}</td>
+            <td><b className={x.acos != null && x.acos > 30 ? "metric-risk" : ""}>{pct(x.acos)}</b></td>
+            <td><b className={x.tacos != null && x.tacos > 15 ? "metric-risk" : ""}>{pct(x.tacos)}</b></td><td>{x.roas?.toFixed(2) ?? "—"}</td>
+          </tr>)}</tbody>
+        </table>:<div className="empty">当前周期没有可归属到 SKU 的广告明细。请同步商品级广告统计；店铺级广告汇总无法可靠计算单品 ACOS/TACOS。</div>}
+      </section>
       <section className="card campaigns">
         <div className="card-title">
           广告计划表现
@@ -1081,6 +1111,7 @@ function Advertising({
               <tr>
                 <th>计划</th>
                 <th>状态</th>
+                <th>计费</th>
                 <th>曝光</th>
                 <th>点击</th>
                 <th>订单</th>
@@ -1100,6 +1131,7 @@ function Advertising({
                     <small>{x.id}</small>
                   </td>
                   <td>{x.state || "—"}</td>
+                  <td>{x.paymentType || "未分类"}</td>
                   <td>{x.impressions}</td>
                   <td>{x.clicks}</td>
                   <td>{x.orders}</td>
@@ -1398,7 +1430,8 @@ export function App() {
             )}{" "}
             {page === "ai" && <AiPage range={range} />}{" "}
             {page === "growth_center" && <GrowthCenterPage range={range} currency={currency} shopName={activeShop?.name || "当前店铺"} />}{" "}
-            {page === "product_analysis" && <ProductAnalysisPage currency={currency} />}{" "}
+            {page === "product_analysis" && <ProductAnalysisPage currency={currency} shopId={activeShop?.id || ""} />}{" "}
+            {page === "mind_map" && <MindMapPage shopId={activeShop?.id || ""} />}{" "}
             {page === "inventory" && (
               <InventoryPage
                 rows={inventoryRows}

@@ -1663,6 +1663,10 @@
 .campaigns .card-title {
   gap: 14px;
 }
+.product-ad-metrics { margin-bottom: 18px; }
+.product-ad-metrics .metric-definition { margin: 0 0 14px; color: #71809a; font-size: 12px; line-height: 1.65; }
+.product-ad-metrics td small { display: block; max-width: 280px; overflow: hidden; color: #8a98ad; text-overflow: ellipsis; white-space: nowrap; }
+.product-ad-metrics .metric-risk { color: #dc2626; }
 .shop-identity,
 .shop-database-size {
   display: flex !important;

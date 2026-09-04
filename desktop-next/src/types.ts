@@ -21,6 +21,7 @@ export type PageKey =
   | "competitors"
   | "differentiation"
   | "product_analysis"
+  | "mind_map"
   | "shops"
   | "settings";
 
@@ -92,6 +93,9 @@ export interface AdvertisingData {
   orders: number;
   revenue: number;
   spend: number;
+  clickSpend: number;
+  orderSpend: number;
+  unclassifiedSpend: number;
   ctr: number | null;
   cpc: number | null;
   roas: number | null;
@@ -123,6 +127,12 @@ export interface AdvertisingData {
     diagnosisText: string;
     recommendedAction: string;
     budget: number;
+  }>;
+  products: Array<{
+    sku: string; offerId: string; name: string;
+    impressions: number; clicks: number; orders: number;
+    spend: number; clickSpend: number; orderSpend: number; unclassifiedSpend: number; billingTypes: string; adRevenue: number; totalRevenue: number;
+    acos: number | null; tacos: number | null; roas: number | null;
   }>;
   trend: Array<{
     day: string;

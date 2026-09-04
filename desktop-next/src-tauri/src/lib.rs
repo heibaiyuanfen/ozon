@@ -183,6 +183,26 @@ struct CampaignRow {
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AdvertisingProductRow {
+    sku: String,
+    offer_id: String,
+    name: String,
+    impressions: i64,
+    clicks: i64,
+    orders: i64,
+    spend: f64,
+    click_spend: f64,
+    order_spend: f64,
+    unclassified_spend: f64,
+    billing_types: String,
+    ad_revenue: f64,
+    total_revenue: f64,
+    acos: Option<f64>,
+    tacos: Option<f64>,
+    roas: Option<f64>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AdvertisingTrendRow {
     day: String,
     impressions: i64,
@@ -200,6 +220,9 @@ struct AdvertisingData {
     orders: i64,
     revenue: f64,
     spend: f64,
+    click_spend: f64,
+    order_spend: f64,
+    unclassified_spend: f64,
     ctr: Option<f64>,
     cpc: Option<f64>,
     roas: Option<f64>,
@@ -212,6 +235,7 @@ struct AdvertisingData {
     known_cost_margin: Option<f64>,
     margin_coverage_percent: f64,
     campaigns: Vec<CampaignRow>,
+    products: Vec<AdvertisingProductRow>,
     trend: Vec<AdvertisingTrendRow>,
 }
 #[derive(Serialize)]
@@ -1742,6 +1766,7 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
     let cross_border = active_shop_kind(&state)? == "cross_border";
     let rate = rub_per_cny_for(&state, &c)?;
     let (impressions,clicks,cart_adds,orders,revenue,spend):(i64,i64,i64,i64,f64,f64)=c.query_row("WITH x AS(SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT COALESCE(SUM(impressions),0),COALESCE(SUM(clicks),0),COALESCE(SUM(cart_adds),0),COALESCE(SUM(orders),0),COALESCE(SUM(revenue),0),COALESCE(SUM(spend),0)FROM x,m WHERE (m.store=1 AND x.sku='')OR(m.store=0 AND x.sku<>'')",params![range.from,range.to],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(|e|e.to_string())?;
+    let (click_spend,order_spend,unclassified_spend):(f64,f64,f64)=c.query_row("WITH x AS(SELECT a.*,lower(CASE WHEN COALESCE(c.payment_type,'')<>'' THEN c.payment_type WHEN a.source='api_product_sku' THEN 'CPC' ELSE '' END) pt FROM ad_daily a LEFT JOIN campaigns c ON c.campaign_id=a.campaign_id WHERE a.day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store),y AS(SELECT * FROM x,m WHERE (m.store=1 AND sku='')OR(m.store=0 AND sku<>'')) SELECT COALESCE(SUM(CASE WHEN pt LIKE '%click%' OR pt='cpc' THEN ABS(spend) ELSE 0 END),0),COALESCE(SUM(CASE WHEN pt LIKE '%order%' OR pt='cpo' THEN ABS(spend) ELSE 0 END),0),COALESCE(SUM(CASE WHEN NOT(pt LIKE '%click%' OR pt='cpc' OR pt LIKE '%order%' OR pt='cpo') THEN ABS(spend) ELSE 0 END),0) FROM y",params![range.from,range.to],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|e.to_string())?;
     let to_date = chrono::NaiveDate::parse_from_str(&range.to, "%Y-%m-%d")
         .unwrap_or_else(|_| chrono::Local::now().date_naive());
     let active_from = to_date
@@ -1865,6 +1890,13 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    // Only explicit SKU rows are eligible for product attribution. Store-level
+    // advertising rows cannot be distributed without inventing product data.
+    let mut product_stmt=c.prepare("WITH raw AS(SELECT a.*,lower(CASE WHEN COALESCE(c.payment_type,'')<>'' THEN c.payment_type WHEN a.source='api_product_sku' THEN 'CPC' ELSE '' END) pt,CASE WHEN COALESCE(c.payment_type,'')<>'' THEN c.payment_type WHEN a.source='api_product_sku' THEN 'CPC' ELSE '未分类' END billing FROM ad_daily a LEFT JOIN campaigns c ON c.campaign_id=a.campaign_id WHERE a.day BETWEEN ?1 AND ?2 AND a.sku<>''),ad AS(SELECT sku,SUM(impressions) impressions,SUM(clicks) clicks,SUM(orders) orders,SUM(ABS(spend)) spend,SUM(CASE WHEN pt LIKE '%click%' OR pt='cpc' THEN ABS(spend) ELSE 0 END) click_spend,SUM(CASE WHEN pt LIKE '%order%' OR pt='cpo' THEN ABS(spend) ELSE 0 END) order_spend,SUM(CASE WHEN NOT(pt LIKE '%click%' OR pt='cpc' OR pt LIKE '%order%' OR pt='cpo') THEN ABS(spend) ELSE 0 END) unclassified_spend,SUM(revenue) ad_revenue,GROUP_CONCAT(DISTINCT billing) billing_types FROM raw GROUP BY sku),sales AS(SELECT sku,SUM(revenue) total_revenue FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku) SELECT ad.sku,COALESCE(p.offer_id,''),COALESCE(NULLIF(p.name,''),MAX(sd.product_name),''),ad.impressions,ad.clicks,ad.orders,ad.spend,ad.click_spend,ad.order_spend,ad.unclassified_spend,ad.billing_types,ad.ad_revenue,COALESCE(sales.total_revenue,0) FROM ad LEFT JOIN products p ON p.sku=ad.sku LEFT JOIN sales_daily sd ON sd.sku=ad.sku LEFT JOIN sales ON sales.sku=ad.sku GROUP BY ad.sku ORDER BY ad.spend DESC,ad.ad_revenue DESC LIMIT 2000").map_err(|e|e.to_string())?;
+    let products=product_stmt.query_map(params![range.from,range.to],|r|{
+        let spend:f64=r.get(6)?; let ad_revenue:f64=r.get(11)?; let total_revenue:f64=r.get(12)?;
+        Ok(AdvertisingProductRow{sku:r.get(0)?,offer_id:r.get(1)?,name:r.get(2)?,impressions:r.get(3)?,clicks:r.get(4)?,orders:r.get(5)?,spend:display_amount(spend,cross_border,rate),click_spend:display_amount(r.get(7)?,cross_border,rate),order_spend:display_amount(r.get(8)?,cross_border,rate),unclassified_spend:display_amount(r.get(9)?,cross_border,rate),billing_types:r.get(10)?,ad_revenue:display_amount(ad_revenue,cross_border,rate),total_revenue:display_amount(total_revenue,cross_border,rate),acos:(ad_revenue>0.0).then_some(spend/ad_revenue*100.0),tacos:(total_revenue>0.0).then_some(spend/total_revenue*100.0),roas:(spend>0.0).then_some(ad_revenue/spend)})
+    }).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut trend_stmt=c.prepare("WITH x AS(SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),m AS(SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)SELECT a.day,SUM(a.impressions),SUM(a.clicks),SUM(a.orders),SUM(a.spend),SUM(a.revenue)FROM x a CROSS JOIN m WHERE (m.store=1 AND a.sku='')OR(m.store=0 AND a.sku<>'')GROUP BY a.day ORDER BY a.day").map_err(|e|e.to_string())?;
     let mut trend = trend_stmt
         .query_map(params![range.from, range.to], |r| {
@@ -1893,6 +1925,9 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
         orders,
         revenue: display_amount(revenue, cross_border, rate),
         spend: display_amount(spend, cross_border, rate),
+        click_spend: display_amount(click_spend, cross_border, rate),
+        order_spend: display_amount(order_spend, cross_border, rate),
+        unclassified_spend: display_amount(unclassified_spend, cross_border, rate),
         ctr: if impressions > 0 {
             Some(clicks as f64 / impressions as f64 * 100.0)
         } else {
@@ -1917,6 +1952,7 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
         known_cost_margin,
         margin_coverage_percent,
         campaigns,
+        products,
         trend,
     })
 }
@@ -2346,6 +2382,45 @@ fn export_product_costs(state: State<AppState>) -> Result<String, String> {
         ));
     }
     fs::write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductAnalysisJsonExport {
+    file_name: String,
+    payload: serde_json::Value,
+}
+
+#[tauri::command]
+fn export_product_analysis_json(
+    input: ProductAnalysisJsonExport,
+    state: State<AppState>,
+) -> Result<String, String> {
+    let safe_name: String = input
+        .file_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_name = safe_name.trim_matches('_');
+    if safe_name.is_empty() {
+        return Err("导出文件名无效".into());
+    }
+    let folder = state
+        .data_dir
+        .parent()
+        .unwrap_or(&state.data_dir)
+        .join("exports");
+    fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let path = folder.join(format!("{safe_name}.json"));
+    let bytes = serde_json::to_vec_pretty(&input.payload).map_err(|e| e.to_string())?;
+    fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -7173,7 +7248,11 @@ fn sync_performance_ads_blocking(
                         .get("weeklyBudget")
                         .or_else(|| campaign.get("budget")),
                 );
-                tx.execute("INSERT INTO campaigns(campaign_id,name,state,payment_type,budget,budget_known,budget_updated_at,budget_scale_version,source)VALUES(?1,?2,?3,?4,COALESCE(?5,0),?6,CASE WHEN ?6=1 THEN CURRENT_TIMESTAMP ELSE '' END,1,'api') ON CONFLICT(campaign_id) DO UPDATE SET name=excluded.name,state=excluded.state,payment_type=excluded.payment_type,budget=CASE WHEN excluded.budget_known=1 THEN excluded.budget ELSE campaigns.budget END,budget_known=MAX(campaigns.budget_known,excluded.budget_known),budget_updated_at=CASE WHEN excluded.budget_known=1 THEN CURRENT_TIMESTAMP ELSE campaigns.budget_updated_at END,budget_scale_version=1,source='api',updated_at=CURRENT_TIMESTAMP",params![id,name,json_text(campaign.get("state")),json_text(campaign.get("paymentType")),budget,budget.is_some()]).map_err(|e|e.to_string())?;
+                let mut payment_type=json_text(campaign.get("paymentType").or_else(||campaign.get("payment_type")).or_else(||campaign.get("paymentMethod")).or_else(||campaign.get("payment_method")));
+                if payment_type.is_empty(){
+                    payment_type=match json_text(campaign.get("advObjectType").or_else(||campaign.get("adv_object_type"))).as_str(){"SKU"=>"CPC","SEARCH_PROMO"=>"CPO","BANNER"=>"CPM",_=>""}.to_string();
+                }
+                tx.execute("INSERT INTO campaigns(campaign_id,name,state,payment_type,budget,budget_known,budget_updated_at,budget_scale_version,source)VALUES(?1,?2,?3,?4,COALESCE(?5,0),?6,CASE WHEN ?6=1 THEN CURRENT_TIMESTAMP ELSE '' END,1,'api') ON CONFLICT(campaign_id) DO UPDATE SET name=excluded.name,state=excluded.state,payment_type=COALESCE(NULLIF(excluded.payment_type,''),campaigns.payment_type),budget=CASE WHEN excluded.budget_known=1 THEN excluded.budget ELSE campaigns.budget END,budget_known=MAX(campaigns.budget_known,excluded.budget_known),budget_updated_at=CASE WHEN excluded.budget_known=1 THEN CURRENT_TIMESTAMP ELSE campaigns.budget_updated_at END,budget_scale_version=1,source='api',updated_at=CURRENT_TIMESTAMP",params![id,name,json_text(campaign.get("state")),payment_type,budget,budget.is_some()]).map_err(|e|e.to_string())?;
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
@@ -9186,6 +9265,7 @@ pub fn run() {
             save_product_cost,
             match_product_costs,
             export_product_costs,
+            export_product_analysis_json,
             export_dataset,
             import_product_costs_csv,
             warehouse_mappings,
