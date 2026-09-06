@@ -144,6 +144,41 @@ export interface AdvertisingData {
   }>;
 }
 
+export interface AdvertisingSeriesReport {
+  dateFrom: string;
+  dateTo: string;
+  skuCount: number;
+  impressions: number;
+  clicks: number;
+  adOrders: number;
+  totalUnits: number;
+  spend: number;
+  adRevenue: number;
+  totalRevenue: number;
+  ctr: number | null;
+  conversionRate: number | null;
+  cpc: number | null;
+  cpa: number | null;
+  acos: number | null;
+  tacos: number | null;
+  roas: number | null;
+  members: Array<{
+    sku: string;
+    offerId: string;
+    name: string;
+    impressions: number;
+    clicks: number;
+    adOrders: number;
+    totalUnits: number;
+    spend: number;
+    adRevenue: number;
+    totalRevenue: number;
+    acos: number | null;
+    tacos: number | null;
+    roas: number | null;
+  }>;
+}
+
 export interface CampaignActionLog {
   id: number;
   action: string;
@@ -926,4 +961,43 @@ export interface WbStockRow {
   inWayToClient: number;
   inWayFromClient: number;
   updatedAt: string;
+}
+
+export interface MlSettings {
+  siteId: string;
+  sellerId: string;
+  currencyId: string;
+  tokenConfigured: boolean;
+}
+export interface MlSettingsInput {
+  siteId: string;
+  sellerId: string;
+  currencyId: string;
+  accessToken: string;
+}
+export interface MlDraft {
+  id: number | null;
+  title: string;
+  categoryId: string;
+  price: number;
+  currencyId: string;
+  availableQuantity: number;
+  conditionCode: "new" | "used" | "not_specified";
+  listingTypeId: string;
+  pictures: string[];
+  attributes: unknown[];
+  status: string;
+  remoteItemId: string;
+  error: string;
+}
+export interface MlAnalyticsDay { day: string; orders: number; units: number; revenue: number }
+export interface MlAnalytics {
+  dateFrom: string;
+  dateTo: string;
+  orders: number;
+  units: number;
+  revenue: number;
+  averageOrderValue: number | null;
+  currencyId: string;
+  daily: MlAnalyticsDay[];
 }

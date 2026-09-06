@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AdvertisingData,
+  AdvertisingSeriesReport,
   CampaignControlInput,
   CampaignMonitorData,
   AnalyticsDetail,
@@ -157,6 +158,12 @@ export async function advertising(range: DateRange): Promise<AdvertisingData> {
     products: [],
     trend: [],
   };
+}
+export async function advertisingSeries(
+  range: DateRange,
+  skus: string[],
+): Promise<AdvertisingSeriesReport> {
+  return invoke("advertising_series", { range, skus });
 }
 
 export async function campaignMonitor(
@@ -777,3 +784,11 @@ export async function saveProductClusterWeights(
 ): Promise<void> {
   return invoke("save_product_cluster_weights", { sku, weights });
 }
+export async function mlSettings(): Promise<import("./types").MlSettings> { return invoke("ml_settings"); }
+export async function saveMlSettings(input: import("./types").MlSettingsInput): Promise<void> { return invoke("save_ml_settings", { input }); }
+export async function testMlConnection(): Promise<string> { return invoke("test_ml_connection"); }
+export async function mlDrafts(): Promise<import("./types").MlDraft[]> { return invoke("ml_drafts"); }
+export async function saveMlDraft(draft: import("./types").MlDraft): Promise<number> { return invoke("save_ml_draft", { draft }); }
+export async function publishMlDraft(id: number): Promise<string> { return invoke("publish_ml_draft", { id }); }
+export async function syncMlOrders(range: import("./types").DateRange): Promise<number> { return invoke("sync_ml_orders", { range }); }
+export async function mlAnalytics(range: import("./types").DateRange): Promise<import("./types").MlAnalytics> { return invoke("ml_analytics", { range }); }

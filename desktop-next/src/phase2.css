@@ -1667,6 +1667,18 @@
 .product-ad-metrics .metric-definition { margin: 0 0 14px; color: #71809a; font-size: 12px; line-height: 1.65; }
 .product-ad-metrics td small { display: block; max-width: 280px; overflow: hidden; color: #8a98ad; text-overflow: ellipsis; white-space: nowrap; }
 .product-ad-metrics .metric-risk { color: #dc2626; }
+.ad-series-panel { margin-top: 16px; margin-bottom: 18px; overflow: hidden; }
+.ad-series-actions, .ad-series-builder, .ad-series-chips { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.ad-series-actions > button, .ad-series-builder > button, .ad-series-chips button { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #dbe3ee; border-radius: 9px; background: #fff; color: #286bdc; padding: 8px 11px; cursor: pointer; }
+.ad-series-actions > button:disabled, .ad-series-builder > button:disabled { cursor: default; opacity: .5; }
+.ad-series-builder { padding: 4px 20px 16px; }
+.ad-series-builder > input { min-width: 220px; border: 1px solid #dbe3ee; border-radius: 9px; padding: 9px 11px; }
+.ad-series-builder > span { color: #748198; font-size: 11px; }
+.ad-series-chips { flex: 1; }
+.ad-series-chips button.selected { color: #fff; border-color: #3478f6; background: #3478f6; }
+.ad-series-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; border-top: 1px solid #edf1f5; background: #edf1f5; }
+.ad-series-summary .stat { min-height: 102px; padding: 18px 20px; background: #fff; }
+.ad-series-period { padding: 12px 20px; color: #71809a; background: #f8faff; font-size: 11px; }
 .shop-identity,
 .shop-database-size {
   display: flex !important;

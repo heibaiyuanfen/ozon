@@ -996,3 +996,49 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 边际实验：使用所选周期与紧邻等长前期计算边际 CPA、边际 ROAS、边际 CVR 和广告弹性；广告费增长至少 10%、点击增长、链接订单增长低于 5% 且边际 CPA 超线时判定边际饱和，即使平均 ROAS 良好也停止继续加预算。
 - 下一放量关口：默认只允许单次预算增加 10%，观察 48–72 小时；要求订单增长至少 8%、边际 CVR 保留基线 80%、边际 CPA 不超线、库存覆盖至少 21 天、不是变体迁移且可信度达到 60%。自动停止条件包括订单增长低于 5%、边际 CPA/ROAS 越线、边际 CVR 下滑、库存不足和第二变量介入。
 - 构建验证：`pnpm build`、正式 Tauri Release 与 NSIS 安装包均通过。新启动器 `ozon-analytics-next-new.exe` SHA-256 为 `51D258AFA42B59BD6C1B54E282769106FF36B7D94A73E49AD4D23F8AB4C003DD`；安装包 `release/Ozon-Analytics-1.0.0-Setup.exe` SHA-256 为 `003B1235D8B24F2ABA43BB475FE7DB75611470C973006E1D7CD7074088C836BC`。
+
+### 2026-09-04：同步 GitHub 最新源码并更新正式启动器
+
+- 源码同步：本地 `main` 从 `6e13246` fast-forward 至 GitHub `origin/main` 的 `d27399a`，无合并冲突；上一次本地启动器与构建记录已安全保存在 `stash@{0}`。
+- 依赖更新：新增 Markdown、Mermaid、PDF/图片导出依赖后，已严格依据最新 `pnpm-lock.yaml` 执行 `pnpm install --frozen-lockfile`；锁文件供应链检查通过。
+- 验证：TypeScript 类型检查与 Vite 正式构建通过；上游两处 Rust 代码先经标准 `cargo fmt` 机械格式化，随后 `cargo fmt --check` 与 `cargo check --locked` 均通过。Mermaid、图表等若干动态块仍有超过 500 kB 的 Vite 性能提示，不影响本次启动器生成。
+- 正式启动器：使用唯一发布入口 `desktop-next/scripts/build-tauri-release.cmd` 重建内嵌正式前端的 Release，并覆盖根目录 `ozon-analytics-next.exe`。Release 与根目录文件均为 27,666,432 字节，SHA-256 `5556D9E2E606C6AE2ABDC7F161A15401E0896242516337C19883B9088988DCD8`。
+- 启动验收：根目录启动器运行 8 秒未退出，窗口标题为 `Ozon ERP`，`Responding=True`；验收进程随后关闭，未出现 `localhost:1420` 拒绝连接。
+
+### 2026-09-06：广告运营 SKU 系列分析与 AI JSON 导出
+
+- 系列管理：广告运营的单品 ACOS/TACOS 表新增 SKU 勾选列；页面可以把任意已选 SKU 保存为持久产品系列，也可以点击已有系列快速恢复成员选择。系列沿用 `product_series` / `product_series_members`，与产品分析模块复用同一组关系，不建立重复配置。
+- 周期口径：系列分析独立支持最近 7 个自然日和最近 30 个自然日，两端均包含。切换周期后必须重新计算，避免把上一周期结果误标为当前周期。
+- 后端聚合：新增 `advertising_series` 命令。广告曝光、点击、广告订单、花费和归因销售额从 `ad_daily` 按成员 SKU 精确汇总；系列全部销量和全部销售额独立从 `sales_daily` 汇总，因此成员没有广告但存在自然销量时仍会进入 TACOS 分母。店铺级未分摊广告不会强行分配给 SKU。
+- 指标公式：CTR=`点击/曝光`，广告转化率=`广告订单/点击`，CPC=`广告花费/点击`，CPA=`广告花费/广告订单`，ACOS=`广告花费/广告归因销售额`，TACOS=`广告花费/系列全部销售额`，ROAS=`广告归因销售额/广告花费`。所有系列比率均由系列汇总分子和分母重新计算，不平均各 SKU 百分比；分母为零返回 `null` 而不是伪造 0。
+- 币种与明细：本土店保持 RUB，跨境店复用现有 RUB/CNY 后端换算；结果包含系列汇总卡片和每个成员的 SKU、货号、名称、曝光、点击、广告订单、全部销量、广告费、广告销售额、全部销售额及 ACOS/TACOS/ROAS。
+- AI 导出：通过现有安全 JSON 导出命令生成 `ozon.advertising-series.ai-dataset` v1.0 文件，包含生成时间、语言、币种、系列名称与成员、日期范围、汇总、逐 SKU 明细、公式和数据纪律，明确 `null` 的含义，便于直接交给 AI 且不诱导补造缺失数据。
+- 验证：TypeScript 类型检查、Vite 正式构建、`cargo fmt --check`、`cargo check --locked` 通过；Rust 全库 38 项通过、0 失败、1 项真实浏览器测试按设计忽略。Vite 对既有 Mermaid/图表动态块仍报告超过 500 kB 的性能提示，不影响构建。
+- 正式交付：已使用唯一入口 `desktop-next/scripts/build-tauri-release.cmd` 重建并覆盖根目录启动器。Release 与根目录 `ozon-analytics-next.exe` 均为 27,691,008 字节，SHA-256 `CEBB16737DB8559A500F2E159659F122D649C49DEB96893A4F18C149195499CC`。启动器运行 8 秒未退出，窗口标题 `Ozon ERP`，`Responding=True`，未回退到 localhost。
+- 验收边界：当前会话缺少 computer-use 技能要求的 Windows 原生 `node_repl/@oai/sky` 接口，未自动点击真实广告页面，也未替用户选择真实 SKU 或写入系列；需在有商品级广告数据的店铺进入“广告运营”，勾选成员后完成一次系列计算与 JSON 导出，才能记录真实数据页面验收通过。
+
+### 2026-09-06：产品经营筛选卡死优化
+
+- 根因：产品经营诊断原本把延迟后的搜索词放在数据加载 effect 依赖中。每次输入变化都会针对当前周期、等长前期和 30 天历史重新发起约 30–60 个逐日 `product_analysis` 命令，随后再为最多 60 个 SKU 请求 `product_detail` 并重建评分。序列号只能阻止旧请求写回界面，不能取消已经开始的 SQLite 查询与聚合，快速输入时请求叠加造成界面长时间无响应。
+- 修复：周期/店铺数据现在始终按无搜索条件加载一次并以 `shopId + day + all` 缓存；搜索词从加载依赖、后端参数和缓存键中移除。输入筛选只在已聚合的 `allRows` 上通过 `useMemo` 做 SKU、货号、商品名的不区分大小写包含匹配，不再访问 SQLite、不再重新请求详情，也不会重复构建历史评分。
+- 行为边界：切换周/月/自定义日期或切换店铺仍会重新读取对应真实数据；筛选不会改变原始周期口径、系列关系和已加载详情。清空搜索框立即恢复完整内存结果。
+- 验证：优化后的 TypeScript 类型检查和 Vite 正式构建通过；此前同一交付节点的 `cargo fmt --check`、`cargo check --locked` 与 Rust 全库测试均通过。正式 Release 已通过 `desktop-next/scripts/build-tauri-release.cmd` 重建并覆盖根目录。
+- 正式启动器：Release 与根目录 `ozon-analytics-next.exe` 均为 27,691,008 字节，SHA-256 `A5304149298CF84710B9C9930FAD43792A61BD5D1BE247A0D6DC72100EC57DCA`。启动运行 8 秒未退出，窗口标题 `Ozon ERP`，`Responding=True`，未回退到 localhost。当前会话无法自动点击原生页面，需用户在真实产品列表连续输入筛选词完成最终交互手感验收。
+
+## 2026-09-06：新增独立美客多（Mercado Libre）工作区
+
+- 桌面端工作区切换扩展为 Ozon、WB、美客多三套入口；新增“美客多独立工作台”，包含经营总览、产品上架、订单与分析、API 设置四个页面。
+- 美客多数据不复用 Ozon/WB 数据表，首次进入后在应用数据目录的 `mercadolibre/mercadolibre.db` 建立独立 SQLite 数据库，当前独立保存设置、上架草稿和订单快照。
+- Access Token 使用 Windows DPAPI 加密保存；支持 MLM、MLB、MLA、MCO、MLC、MPE 站点和对应币种，支持卖家连接测试。
+- 上架流程支持标题、叶子类目、售价、库存、成色、刊登类型、图片 URL 和属性 JSON 的本地草稿管理；发布动作在用户明确确认后调用美客多 `/items`，不会自动发布测试商品。
+- 订单模块按日期分页调用卖家订单接口，并写入独立数据库；分析页展示订单、销量、销售额、客单价和每日销售趋势，不使用模拟数据。
+- 当前交付边界：已完成 OAuth Access Token 方式的 API 基础接入，但尚未实现授权码换取/自动刷新 Token、类目属性在线选择器、库存价格批量同步、退货/费用/广告和多店铺账户。真实 API 验收需要用户自己的美客多开发者应用及卖家授权。
+
+### 测试与发布
+
+- `cargo check --manifest-path desktop-next/src-tauri/Cargo.toml --locked`：通过。
+- `cargo test --manifest-path desktop-next/src-tauri/Cargo.toml mercadolibre --locked`：通过（1 个美客多草稿校验测试）。
+- `pnpm build`：通过；Vite 仍提示既有大型图表 chunk 超过 500 kB，不阻断构建。
+- 正式构建入口：`desktop-next/scripts/build-tauri-release.cmd`，通过。
+- Release 产物已覆盖根目录 `ozon-analytics-next.exe`；两者大小均为 `27,787,264` 字节，修改时间均为 `2026-09-06 18:34:21`，SHA-256 均为 `3A64ABE72C0AFCCBE3F575625FAFA4D250341DECFA1E8713198851C92D086C60`。
+- 根目录 EXE 已启动并处于响应状态。当前 Windows UI 自动化接口未返回原生应用窗口，因此未完成“切换到美客多页面”的截图级可见验收；已确认正式脚本完整执行并将 `dist` 嵌入 Release，而非把单独 `cargo build --release` 产物作为交付。
