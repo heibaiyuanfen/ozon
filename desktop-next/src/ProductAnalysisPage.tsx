@@ -5,6 +5,7 @@ import type { InsightRow, ProductAnalysisRow, ProductDetail } from "./types";
 import { adjustedScore, buildDecisionProfiles, type DecisionProfile } from "./product-decision-engine";
 import "./product-analysis.css";
 import "./product-analysis-modal.css";
+import { openExperiment } from "./AdExperimentCenter";
 
 const localDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
 const previousCompleteDay = () => { const d=new Date(); d.setDate(d.getDate()-1); return localDay(d); };
@@ -102,7 +103,7 @@ export function ProductAnalysisPage({currency,shopId}:{currency:string;shopId:st
       <button className="card engine-card clickable-card" onClick={()=>openDecisionEvidence(profile)}><ShieldAlert/><span>下一关口 / 自动停止</span><strong>{profile.vetoes.length?`${profile.vetoes.length} 项否决条件`:"可进入下一关口"}</strong><small>{profile.nextGate}</small></button>
     </section>}
     {!!migrationSeries.length&&<section className="card auto-migration-alert"><Link2/><div><h3>自动识别到 {migrationSeries.length} 个疑似变体迁移链接</h3><p>{migrationSeries.map(g=>`${g.name}：${g.hits.join("、")} 下滑，但链接总盘变化 ${n(g.linkChange,"%")}`).join("；")}</p></div><button onClick={()=>{const g=migrationSeries[0];setSelected(new Set(g.skus));const first=rows.find(r=>g.skus.includes(r.sku));if(first)setFocusedSku(first.sku);}}>查看首个链接</button></section>}
-    <section className="card product-picker"><div className="section-heading"><div><h2>产品评分卡</h2><p>勾选两个或多个 SKU 建立持久关联；点击卡片仅切换下方诊断看板</p></div><div className="series-actions"><button onClick={createSeries}><Link2 size={15}/>关联选中 SKU</button>{series.map(g=><button key={g.id} className="series-chip" onClick={()=>{setSelected(new Set(g.skus));const first=rows.find(r=>g.skus.includes(r.sku));if(first)setFocusedSku(first.sku);}}>{g.name} · {g.skus.length} SKU</button>)}</div></div><div className="product-card-grid">
+    <section className="card product-picker"><div className="section-heading"><div><h2>产品评分卡</h2><p>勾选两个或多个 SKU 建立持久关联；点击卡片仅切换下方诊断看板</p></div><div className="series-actions"><button disabled={!selected.size&&!focusedSku} onClick={()=>openExperiment({skus:selected.size?[...selected]:[focusedSku],name:"产品分析实验"})}>创建广告实验</button><button onClick={createSeries}><Link2 size={15}/>关联选中 SKU</button>{series.map(g=><button key={g.id} className="series-chip" onClick={()=>{setSelected(new Set(g.skus));const first=rows.find(r=>g.skus.includes(r.sku));if(first)setFocusedSku(first.sku);}}>{g.name} · {g.skus.length} SKU</button>)}</div></div><div className="product-card-grid">
       {rows.slice(0,60).map(r=><button type="button" key={r.sku} className={`product-score-card ${focusedSku===r.sku?"active":""}`} onClick={()=>setFocusedSku(r.sku)}>
         <label onClick={e=>e.stopPropagation()}><input type="checkbox" checked={selected.has(r.sku)} onChange={e=>toggle(r.sku,e.target.checked)}/>链接汇总</label><span className={`grade ${tone(r.overallScore)}`}>{r.grade}</span><strong>{r.offerId||r.sku}</strong><small>{r.name||r.sku}</small><div><b>{r.overallScore}</b><span>分</span><em>置信度 {r.confidence}</em></div>
       </button>)}

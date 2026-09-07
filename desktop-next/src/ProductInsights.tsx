@@ -13,6 +13,7 @@ import {
 } from "./bridge";
 import type { InsightRow, ProductDetail, ProductPrice } from "./types";
 import "./product-insights.css";
+import { openExperiment } from "./AdExperimentCenter";
 
 const cash = (value: number, currency: string) =>
   `${currency === "CNY" ? "¥" : "₽"}${value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`;
@@ -123,6 +124,7 @@ export function ProductInsights({
             }
             title={tab === "products" ? "双击打开单品经营看板" : undefined}
           >
+            <button onClick={()=>openExperiment({skus:row.skus,name:row.name,seriesId:tab==="products"?undefined:Number(row.id)})}>创建实验</button>
             {tab === "products" ? (
               <label className="series-select">
                 <input
@@ -382,6 +384,7 @@ function ProductDetailModal({
               {data.offerId} · SKU {data.sku}
             </small>
             <h2>{data.offerId || `SKU ${data.sku}`}</h2>
+            <button onClick={()=>{close();openExperiment({skus:[data.sku],name:data.offerId||data.sku});}}>创建广告实验</button>
           </div>
           <strong
             className={

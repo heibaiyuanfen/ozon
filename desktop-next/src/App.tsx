@@ -35,7 +35,6 @@ import {
 } from "lucide-react";
 import {
   advertising,
-  advertisingSeries,
   campaignAiAnalysis,
   campaignControl,
   campaignMonitor,
@@ -46,21 +45,16 @@ import {
   orders,
   openListingSupplierUrl,
   products,
-  exportProductAnalysisJson,
-  saveProductSeries,
   selectShop,
-  seriesInsights,
   syncAllData,
 } from "./bridge";
 import type {
   AdvertisingData,
-  AdvertisingSeriesReport,
   CampaignMonitorData,
   ConnectionStatus,
   DashboardData,
   DateRange,
   InventoryRow,
-  InsightRow,
   OrderRow,
   PageKey,
   ProductRow,
@@ -85,11 +79,13 @@ import {
   SyncPage,
   WbPage,
 } from "./OperationsPages";
+import { AdvertisingSeriesPanel } from "./AdvertisingSeriesPanel";
 import { ProductInsights } from "./ProductInsights";
 import { ProductDifferentiationPage } from "./ProductDifferentiationPage";
 import { CrossBorderOperationsPage } from "./CrossBorderOperationsPage";
 import { GrowthCenterPage } from "./GrowthCenterPage";
 import { ProductAnalysisPage } from "./ProductAnalysisPage";
+import { AdExperimentCenter, type ExperimentSeed } from "./AdExperimentCenter";
 import { MindMapPage } from "./MindMapPage";
 import { MercadoLibrePage } from "./MercadoLibrePage";
 
@@ -213,7 +209,7 @@ function Sidebar({
 }) {
   const groups: Array<{ id: string; label: string; icon: typeof LayoutDashboard; items: Array<[PageKey, string, typeof LayoutDashboard]> }> = [
     { id: "operations", label: "经营管理", icon: LayoutDashboard, items: [["dashboard", "经营总览", LayoutDashboard], ["orders", "订单中心", ShoppingBag], ["products", "商品中心", Box], ["fbs", "FBS 管理", Truck]] },
-    { id: "marketing", label: "营销与洞察", icon: Target, items: [["growth_center", "增长中心", BarChart3], ["product_analysis", "产品分析", Target], ["advertising", "广告运营", Megaphone], ["competitors", "竞品跟踪", PackageSearch], ["differentiation", "亚马逊差异化选品", Target], ["ai", "AI 分析", BrainCircuit]] },
+    { id: "marketing", label: "营销与洞察", icon: Target, items: [["growth_center", "增长中心", BarChart3], ["product_analysis", "产品分析", Target], ["advertising", "广告运营", Megaphone], ["ad_experiments", "广告优化实验中心", Target], ["competitors", "竞品跟踪", PackageSearch], ["differentiation", "亚马逊差异化选品", Target], ["ai", "AI 分析", BrainCircuit]] },
     { id: "reports", label: "报表与利润", icon: BarChart3, items: [["reports", "数据报告", BarChart3], ["monthly_profit", "月度盈亏", BarChart3], ["weekly_report", "经营周报", CalendarDays], ["cross_profit", "跨境店铺利润", BarChart3]] },
     { id: "inventory", label: "库存与供应链", icon: PackageSearch, items: [["inventory", "库存管理", PackageSearch], ["supply", "约仓计划", Truck]] },
     { id: "cross", label: "跨境运营", icon: Truck, items: [["cross_border_ops", "俄罗斯跨境经营", Truck], ["listing", "产品台账", PackageSearch]] },
@@ -955,7 +951,7 @@ function Advertising({
   setDays,
   refreshing,
   refresh,
-  range,
+  shopId,
 }: {
   data: AdvertisingData;
   currency: string;
@@ -963,22 +959,13 @@ function Advertising({
   setDays: (n: number) => void;
   refreshing: boolean;
   refresh: () => void;
-  range: DateRange;
+  shopId: string;
 }) {
   const [campaignQuery, setCampaignQuery] = useState("");
   const [productQuery, setProductQuery] = useState("");
   const [monitorId, setMonitorId] = useState<string | null>(null);
   const [monitorCache, setMonitorCache] = useState<Record<string, { data: CampaignMonitorData; at: number }>>({});
-  const [seriesRows, setSeriesRows] = useState<InsightRow[]>([]);
   const [seriesSelection, setSeriesSelection] = useState<Set<string>>(new Set());
-  const [seriesName, setSeriesName] = useState("");
-  const [seriesPeriod, setSeriesPeriod] = useState<7 | 30>(7);
-  const [seriesReport, setSeriesReport] = useState<AdvertisingSeriesReport | null>(null);
-  const [seriesBusy, setSeriesBusy] = useState(false);
-  const [seriesMessage, setSeriesMessage] = useState("");
-  useEffect(() => {
-    void seriesInsights(range.to).then(setSeriesRows).catch((error) => setSeriesMessage(String(error)));
-  }, [range.to]);
   const visibleCampaigns = data.campaigns.filter((x) =>
       `${x.name} ${x.id}`
         .toLowerCase()
@@ -987,58 +974,11 @@ function Advertising({
   const visibleProducts = data.products.filter((x) =>
     `${x.sku} ${x.offerId} ${x.name}`.toLowerCase().includes(productQuery.trim().toLowerCase()),
   );
-  const seriesRange = useMemo(() => {
-    const to = new Date(), from = new Date();
-    from.setDate(to.getDate() - (seriesPeriod - 1));
-    return { from: iso(from), to: iso(to) };
-  }, [seriesPeriod]);
-  const toggleSeriesSku = (sku: string) => setSeriesSelection((current) => {
+  const toggleSeriesSku = (sku: string) => setSeriesSelection(current => {
     const next = new Set(current);
-    if (next.has(sku)) next.delete(sku); else next.add(sku);
+    next.has(sku) ? next.delete(sku) : next.add(sku);
     return next;
   });
-  const saveSeries = async () => {
-    if (!seriesName.trim()) return setSeriesMessage("请输入系列名称");
-    if (!seriesSelection.size) return setSeriesMessage("请至少选择一个 SKU");
-    setSeriesBusy(true); setSeriesMessage("");
-    try {
-      await saveProductSeries(null, seriesName, [...seriesSelection]);
-      setSeriesRows(await seriesInsights(seriesRange.to));
-      setSeriesMessage(`已保存系列“${seriesName}”，共 ${seriesSelection.size} 个 SKU`);
-      setSeriesName("");
-    } catch (error) { setSeriesMessage(`保存失败：${String(error)}`); }
-    finally { setSeriesBusy(false); }
-  };
-  const calculateSeries = async () => {
-    if (!seriesSelection.size) return setSeriesMessage("请先选择一个已保存系列，或勾选 SKU");
-    setSeriesBusy(true); setSeriesMessage("");
-    try { setSeriesReport(await advertisingSeries(seriesRange, [...seriesSelection])); }
-    catch (error) { setSeriesMessage(`计算失败：${String(error)}`); }
-    finally { setSeriesBusy(false); }
-  };
-  const exportSeries = async () => {
-    if (!seriesReport) return;
-    setSeriesBusy(true); setSeriesMessage("");
-    try {
-      const active = seriesRows.find((row) => row.skus.length === seriesSelection.size && row.skus.every((sku) => seriesSelection.has(sku)));
-      const payload = {
-        schema: "ozon.advertising-series.ai-dataset",
-        schemaVersion: "1.0",
-        generatedAt: new Date().toISOString(),
-        language: "zh-CN",
-        currency,
-        series: { name: active?.name || seriesName || "临时系列", skus: [...seriesSelection] },
-        period: { type: seriesPeriod === 7 ? "last_7_days" : "last_30_days", ...seriesRange, timezone: "Asia/Shanghai", inclusive: true },
-        summary: seriesReport,
-        formulas: { ctr: "clicks / impressions × 100", conversionRate: "adOrders / clicks × 100", cpc: "spend / clicks", cpa: "spend / adOrders", acos: "spend / adRevenue × 100", tacos: "spend / totalRevenue × 100", roas: "adRevenue / spend" },
-        dataRules: ["所有系列比率均由系列汇总后的分子和分母重新计算，不平均单品百分比。", "totalUnits 与 totalRevenue 来自全部销售；adOrders 与 adRevenue 仅来自广告归因。", "null 表示分母为零或当前数据不可计算，不等于 0。", "店铺级未分摊广告费用不会强行分配给 SKU。"],
-      };
-      const stem = `ozon_ad_series_${(active?.name || "custom").replace(/[^a-zA-Z0-9_-]+/g, "_")}_${seriesRange.from}_${seriesRange.to}`;
-      const path = await exportProductAnalysisJson(stem, payload);
-      setSeriesMessage(`AI JSON 已导出：${path}`);
-    } catch (error) { setSeriesMessage(`导出失败：${String(error)}`); }
-    finally { setSeriesBusy(false); }
-  };
   return (
     <>
       <Header
@@ -1049,39 +989,7 @@ function Advertising({
         refresh={refresh}
       />
       <RangeTabs days={days} setDays={setDays} />
-      <section className="card ad-series-panel">
-        <div className="section-heading">
-          <div><h2>SKU 系列广告分析</h2><p>组合多个 SKU，按最近 7 天或 30 天统一计算系列广告与销售指标</p></div>
-          <div className="ad-series-actions">
-            <div className="tabs">
-              <button className={seriesPeriod === 7 ? "selected" : ""} onClick={() => { setSeriesPeriod(7); setSeriesReport(null); }}>最近7天</button>
-              <button className={seriesPeriod === 30 ? "selected" : ""} onClick={() => { setSeriesPeriod(30); setSeriesReport(null); }}>最近30天</button>
-            </div>
-            <button disabled={seriesBusy || !seriesSelection.size} onClick={() => void calculateSeries()}>计算系列</button>
-            <button disabled={seriesBusy || !seriesReport} onClick={() => void exportSeries()}><Download size={15}/>导出 AI JSON</button>
-          </div>
-        </div>
-        <div className="ad-series-builder">
-          <input value={seriesName} onChange={(event) => setSeriesName(event.target.value)} placeholder="输入新系列名称" />
-          <button disabled={seriesBusy || !seriesName.trim() || !seriesSelection.size} onClick={() => void saveSeries()}><Link2 size={15}/>保存当前 SKU 为系列</button>
-          <span>已选择 {seriesSelection.size} 个 SKU</span>
-          <div className="ad-series-chips">{seriesRows.map((row) => <button key={row.id} className={row.skus.length === seriesSelection.size && row.skus.every((sku) => seriesSelection.has(sku)) ? "selected" : ""} onClick={() => { setSeriesSelection(new Set(row.skus)); setSeriesName(row.name); setSeriesReport(null); }}>{row.name} · {row.skus.length}</button>)}</div>
-        </div>
-        {seriesMessage && <div className="sync-message">{seriesMessage}</div>}
-        {seriesReport && <>
-          <div className="ad-series-summary">
-            <Stat tone="purple" label="广告花费" value={money(seriesReport.spend,currency)} note={`${seriesReport.skuCount} 个 SKU`} />
-            <Stat tone="blue" label="系列销量" value={`${seriesReport.totalUnits} 件`} note="全部销售销量" />
-            <Stat tone="green" label="系列销售额" value={money(seriesReport.totalRevenue,currency)} note="全部销售额" />
-            <Stat tone="blue" label="广告归因销售额" value={money(seriesReport.adRevenue,currency)} note={`${seriesReport.adOrders} 个广告订单`} />
-            <Stat tone="orange" label="ACOS" value={pct(seriesReport.acos)} note="广告费 / 广告销售额" />
-            <Stat tone="pink" label="TACOS" value={pct(seriesReport.tacos)} note="广告费 / 全部销售额" />
-            <Stat tone="cyan" label="ROAS" value={seriesReport.roas?.toFixed(2) ?? "—"} note="广告销售额 / 广告费" />
-            <Stat tone="green" label="CTR / 转化率" value={`${pct(seriesReport.ctr)} / ${pct(seriesReport.conversionRate)}`} note={`${seriesReport.impressions} 曝光 · ${seriesReport.clicks} 点击`} />
-          </div>
-          <div className="ad-series-period">统计范围：{seriesReport.dateFrom} 至 {seriesReport.dateTo}；系列比率使用汇总分子/分母重新计算。</div>
-        </>}
-      </section>
+      <AdvertisingSeriesPanel shopId={shopId} selection={seriesSelection} setSelection={setSeriesSelection} />
       <section className="card trend-card">
         <div className="section-heading">
           <div>
@@ -1363,6 +1271,12 @@ function CampaignEffectChart({ data }: { data: Array<{ label: string; spend: num
 }
 
 export function App() {
+  const [experimentSeed, setExperimentSeed] = useState<ExperimentSeed | undefined>();
+  useEffect(() => {
+    const open = (event: Event) => { setExperimentSeed((event as CustomEvent<ExperimentSeed>).detail); setPage("ad_experiments"); };
+    window.addEventListener("create-ad-experiment", open);
+    return () => window.removeEventListener("create-ad-experiment", open);
+  }, []);
   const [page, setPage] = useState<PageKey>("dashboard"),
     [workspace, setWorkspace] = useState<Workspace>("ozon"),
     [sidebarCollapsed, setSidebarCollapsed] = useState(false),
@@ -1389,6 +1303,7 @@ export function App() {
     ),
     monthRange = useMemo(currentMonthRange, []),
     deferredQuery = useDeferredValue(query);
+  useEffect(()=>{setExperimentSeed(undefined);},[activeShop?.id]);
   const load = async () => {
     setRefreshing(true);
     try {
@@ -1500,13 +1415,13 @@ export function App() {
             {page === "advertising" && (
               <Advertising
                 key={activeShop?.id}
+                shopId={activeShop?.id || ""}
                 data={ads}
                 currency={currency}
                 days={days}
                 setDays={setDays}
                 refreshing={refreshing}
                 refresh={load}
-                range={range}
               />
             )}{" "}
             {page === "reports" && (
@@ -1544,6 +1459,7 @@ export function App() {
             {page === "ai" && <AiPage range={range} />}{" "}
             {page === "growth_center" && <GrowthCenterPage range={range} currency={currency} shopName={activeShop?.name || "当前店铺"} />}{" "}
             {page === "product_analysis" && <ProductAnalysisPage currency={currency} shopId={activeShop?.id || ""} />}{" "}
+            {page === "ad_experiments" && <AdExperimentCenter key={activeShop?.id} shopId={activeShop?.id || ""} seed={experimentSeed} />}
             {page === "mind_map" && <MindMapPage shopId={activeShop?.id || ""} />}{" "}
             {page === "inventory" && (
               <InventoryPage

@@ -1042,3 +1042,54 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 正式构建入口：`desktop-next/scripts/build-tauri-release.cmd`，通过。
 - Release 产物已覆盖根目录 `ozon-analytics-next.exe`；两者大小均为 `27,787,264` 字节，修改时间均为 `2026-09-06 18:34:21`，SHA-256 均为 `3A64ABE72C0AFCCBE3F575625FAFA4D250341DECFA1E8713198851C92D086C60`。
 - 根目录 EXE 已启动并处于响应状态。当前 Windows UI 自动化接口未返回原生应用窗口，因此未完成“切换到美客多页面”的截图级可见验收；已确认正式脚本完整执行并将 `dist` 嵌入 Release，而非把单独 `cargo build --release` 产物作为交付。
+
+## 2026-09-07：产品系列逐日广告 JSON v2
+
+- 新增 AdvertisingSeriesPanel 和 Rust ad_series 模块：从商品、销售、广告 SKU 并集中选产品，可保存系列；支持最近 7 天、最近 30 天、自然月、自选 1～366 天。
+- JSON 固定为单品每日、单品周期、系列每日、系列周期四层，包含字段解释、CTR/CPC/CPA/ACOS/TACOS/ROAS 等公式、店铺/币种/汇率及日期口径。预览可切换产品，日期连续补齐，SKU 去重，店铺空 SKU 广告总计不重复加入。
+- 缺失为 null，不伪造零；已有记录因缺乏同步完成凭证标记 partial，无记录 missing；相应提示同时出现在界面和文件。产品、名称或日期变化后旧预览不能导出，过期计算响应被丢弃。后端使用店铺快照和数据库只读事务。
+- 验证：pnpm build 通过；cargo check --locked 通过；cargo test --locked ad_series::tests 通过，3 个专项测试覆盖周/月四层核对、非平均比率、重复 SKU、空 SKU 排除、汇率、缺失与零值、无效日期和闰月。
+- 正式脚本 desktop-next/scripts/build-tauri-release.cmd 构建成功并嵌入 dist，产物已覆盖根目录 ozon-analytics-next.exe。两文件均为 27,899,392 字节，修改时间 2026-09-07 10:28:14，SHA-256 均为 A5A92BE7063E717BE840B44E06D56A02E19C6A47485FF3A2FE54C51321382C1A。
+- 已通过 computer-use 启动根目录正式 EXE，窗口列表返回 Ozon ERP。读取窗口开始可见验收时用户按下物理 Escape 停止 Computer Use，按要求停止所有 UI 操作。本次未完成内嵌页面截图、实际产品勾选/导出及过期预览的可见验收，不能将构建成功视为交互验收通过。
+
+## 2026-09-07：修复历史 SKU 广告缺失
+
+- Performance 同步不再用混有店铺汇总的 ad_daily 最大日期跳过 SKU 明细；保留今天/昨天即时接口，较早日期改用 statistics/json 异步报告，按最多 31 天、10 个计划分批，支持 UUID 断点续取。
+- 历史解析保留计划上下文和逐日日期，适配真实 ordersMoney / moneySpent、逗号小数；同键行合并并 UPSERT，重复同步不累加。缺失必需字段明确失败，不伪造零值。当前历史补数针对 CPC/未知计费类型的有活动计划，不宣称已覆盖 CPO 等其他报表。
+- 系列面板新增“同步所选期限广告”，成功后自动重新计算预览。
+- 真实回填：本土店 9ce5632eec80，四个 SKU 2578856473、2846371132、2846376063、2963399835 在 2026-09-04/05 的 8 条明细已保存；已验证 8/31～9/6 每天均有 4 个 SKU。9/4 系列广告费用 6146.33 RUB，9/5 为 6316.71 RUB。
+- 真实全店报告验证未全通过：后续批次其他商品的源报告缺少 orders 字段，严格校验使该批次失败，已成功批次保留。未把该情况误报为全店历史数据均完整。普通缺失及完整性表达仍保持 null/partial。
+- cargo check --locked、pnpm build 通过；cargo test --locked ad_ 通过 7 个测试、跳过 1 个需真实凭据的测试。另行真实补数测试结果如上；一次重链接因真实测试仍在运行占用 EXE 失败，待结束后重试测试通过。
+- desktop-next/scripts/build-tauri-release.cmd 正式构建成功，已覆盖根目录 EXE；二者 27,952,128 字节，修改时间 2026-09-07 10:56:38，SHA-256 8E05CB9E634EED94E4363182F9B7FA7738D44C3FC449FC4C90DF2A2929299C85。
+- 可见验收：读取到了旧版真实广告页面；覆盖新版后启动 computer-use 时用户按物理 Escape 停止。停止所有 UI 操作，未完成新版启动及页面点击验收，不宣称真实 UI 验收通过。
+
+## 2026-09-07：广告模块缺失字段与已知合计修复（JSON 2.1）
+
+- 移除缺失订单/加购自动填零：指标独立解析，缺失/无效值保持未知，异常日期/计划行跳过，其他商品继续保存。
+- 新增 ad_partial_daily 保存带未知字段的历史记录，避免破坏旧 ad_daily NOT NULL 约束。系列读取时按日/计划/SKU 排除重复旧记录；完整报告更新原表并清除对应部分记录。旧广告页面仍读取原完整记录，部分指标通过本系列面板查询。
+- 系列及单品周期按已知基础值合计，全部缺失才为 null；missingMetrics 标记不完整指标，dataQuality.missingData 提供日期/SKU/货号/指标清单，界面使用 * 标注。不完整分子或分母对应比率仍为 null。JSON schemaVersion=2.1。
+- 同步发生部分失败时仍重新加载已保存数据，并保留错误提示；异步结果检查请求与选择快照。
+- cargo check --locked 和 pnpm build 通过；cargo test --locked --lib：46 通过、2 跳过。新增跨解析/存储/系列回归验证缺失订单不丢曝光花费、正常商品仍入库、缺失清单、关联比率及重复同步不累计。
+- 本土店真实 2026-08-31～09-05 回填验证已写入多批记录，观察到 15 条部分字段记录并产生 WARNING 日志；最终全量完成状态未确认，不宣称全店历史数据完整。
+- 正式构建入口 desktop-next/scripts/build-tauri-release.cmd 成功，已覆盖根目录 EXE。根目录与 Release 产物均 27,950,592 字节，2026-09-07 14:01:39，SHA-256 92388AA5E49A62AD52D8F6E55DC4E0A8D5C5B8911070773229AA7E0C608A019E。
+- 新版启动验收时用户按物理 Escape 停止 Computer Use，已停止 UI 操作；新版启动、缺失清单可见验收与实际导出点击未完成。停止仍在等待外部报告的验证任务，已提交报告的 UUID 保留以供下次同步继续。
+
+## 2026-09-07 广告同步速度与进度优化
+- 历史报告按店铺数据库、日期范围、计划批次缓存原始 payload 15 分钟；普通同步复用并重新解析入库，不将部分字段误标完整；强制同步绕过完成缓存；一天前的报告缓存自动清理。
+- 保留未完成报告 UUID 续传；日志显示日期范围、第几批/总批次和等待秒数。同步页面每 3 秒刷新日志，限制重叠请求并在卸载时停止。
+- 读取同步记录时仅在取得广告同步互斥锁后，将无本进程广告任务的残留 running 广告记录标记中断失败，保留已有行数和数据。该锁是进程级，使用单实例桌面程序；独立调试补数时不应同时打开同步页。
+- 广告运营页普通补数启用报告复用；数据同步页强制同步仍可重取。此优化不承诺首次远端报告生成更快，也不解决源报告缺失指标。
+- cargo check --locked 通过；Rust 48 项通过、2 项需要真实环境的测试忽略。新增无网络缓存复用/重复入库/过期回归测试通过。最终前端与正式构建、覆盖验收结果续记。
+
+- 最终 pnpm build 和正式 build-tauri-release.cmd 均通过；根目录 EXE 已覆盖，SHA-256 与 release 一致：ACEE2D672C41656E580F6CF4EF710D087AD4B90A5F5452BF2F83D203E1A1CC92。启动及可见验收待执行。数据库 quick_check=ok。
+- 已启动根目录正式 EXE，实际截图确认经营总览正常加载内嵌页面，无 localhost 错误。同步页验收期间检测到用户正在操作窗口，未继续抢占；实时同步进度与远端重复同步耗时尚未完成可见验收，不能据此声称全部功能验收通过。
+- 2026-09-07：广告完整性修复已完成。比率保留正式值为 null 的完整性语义，同时新增 referenceMetrics/ratioStatus；不完整覆盖时提供带“参考”标记的已知合计计算值。缺失清单增加 reasons 和 reportCoverage，区分销量源记录缺失、源字段未返回/无效、已下载报告不含 SKU、报告覆盖未核验。历史解析不再把 modelOrders/modelSales 当作 orders/ordersMoney 的替代字段。官方 CSV 已核查计划 37641191、SKU 3691307941；本地重放导出 8 产品 x 7 天，schemaVersion 2.2，周期参考 ACOS 39.6673%、TACOS 12.7776%、ROAS 2.521。cargo check、Rust 51 项、pnpm build、build-tauri-release.cmd 均通过；正式 EXE 已覆盖，SHA256 DC9A83FBE0EA4AD66E848473BA707273E71CE3E7F7DEFCF38A9AE18D1E565D2F。
+
+## 2026-09-07 广告优化实验中心
+
+- 新增 `ad_experiments`、目标阶段、SKU 变更、事件、逐日指标、评分、决策和稳定基线表；实验启动时锁定基准快照，后续只追加观察、事件和评估结果，不覆盖基准。
+- 新增 `ad_experiment_command`：支持草稿、启动、执行确认、重评估、延长观察、阶段晋级、重测、稳定、回退、停止、事件记录、详情、JSON 导出和 AI 事实/推断分离。现有广告计划操作与价格验证成功后会自动写入实验事件；没有匹配实验时自动建立待确认的跟踪草稿。
+- 新增广告优化实验中心页面：产品/系列选择、实验类型、阶段目标、变更计划、SKU 矩阵、库存覆盖、逐日趋势、规则命中、事件时间线、AI 决策卡和 GJYB001 示例。导出 JSON 保留 baseline/current/daily/baselineDaily/quality/vetoes/facts/inference/nextAction 等字段。
+- 评分按销量、TACOS、CVR、CPA、CPC、稳定性和数据质量计算；TACOS、CPA、连续下降、CVR、库存覆盖等 VETO 规则优先。缺失值保持 null，部分数据降低置信度；没有执行确认时不能进入下一阶段，不能自动放量或回退。
+- 新增实验回归测试，覆盖成功示例、缺失/部分/null、零点击/零订单、TACOS/CPA/CVR/库存 VETO、多变量降置信度、基准锁定、暂停恢复、多 SKU、延长观察、重测和回退配置。cargo test --locked：74 通过、4 忽略；pnpm build 和正式 build-tauri-release.cmd 均通过。
+- 正式 EXE 已由 `desktop-next/src-tauri/target/release/ozon-analytics-next.exe` 覆盖根目录版本，Release 与根目录 SHA-256 均为 `858AA931DF149067251F61B218D3D577690A852F0E2DF23608923A456B5F96A1`。正式页面点击验收待下一次打开窗口时执行。

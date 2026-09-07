@@ -3,6 +3,7 @@ export type PageKey =
   | "orders"
   | "products"
   | "advertising"
+  | "ad_experiments"
   | "reports"
   | "monthly_profit"
   | "weekly_report"

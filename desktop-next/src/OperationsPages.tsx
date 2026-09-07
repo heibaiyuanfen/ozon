@@ -4129,6 +4129,21 @@ export function SyncPage({ range }: { range: DateRange }) {
   useEffect(() => {
     void load();
   }, []);
+  useEffect(() => {
+    let cancelled = false;
+    let pending = false;
+    const timer = window.setInterval(async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const next = await syncLogs();
+        if (!cancelled) setLogs(next);
+      } catch (error) {
+        if (!cancelled) setMessage(`同步进度读取失败：${String(error)}`);
+      } finally { pending = false; }
+    }, 3000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
   const seller = async () => {
     setBusy("seller");
     setMessage("");

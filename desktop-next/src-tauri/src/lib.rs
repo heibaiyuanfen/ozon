@@ -11,6 +11,9 @@ use std::{
 };
 use tauri::{Manager, State};
 mod insights;
+mod ad_series;
+mod ad_history;
+mod ad_experiments;
 mod listing;
 mod mercadolibre;
 mod secrets;
@@ -1087,6 +1090,8 @@ pub(crate) fn db(state: &AppState) -> Result<Connection, String> {
     c.busy_timeout(std::time::Duration::from_secs(30))
         .map_err(|e| e.to_string())?;
     initialize_extensions(&c)?;
+    ad_history::ensure(&c)?;
+    ad_experiments::ensure(&c)?;
     Ok(c)
 }
 pub(crate) fn background_state(state: &AppState) -> Result<AppState, String> {
@@ -2115,6 +2120,30 @@ fn advertising_series(
     })
 }
 
+#[tauri::command]
+fn advertising_series_dataset(range: DateRange, skus: Vec<String>, name: String, shop_id: String, state: State<AppState>) -> Result<serde_json::Value,String> {
+    let snapshot = AppState { data_dir: state.data_dir.clone(), active_shop_id: Mutex::new(shop_id.clone()) };
+    if *state.active_shop_id.lock().map_err(|e|e.to_string())? != shop_id { return Err("店铺已切换，请重新计算".into()); }
+    let (id,shop_name)=active_shop_identity(&snapshot)?;
+    let c=db(&snapshot)?;
+    let cross=active_shop_kind(&snapshot)? == "cross_border";
+    let rate=rub_per_cny_for(&snapshot,&c)?;
+    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(|e|e.to_string())?;
+    let mut result=ad_series::build(&c,&range.from,&range.to,skus,&name,display_amount(1.0,cross,rate))?;
+    result["shop"]=serde_json::json!({"id":id,"name":shop_name});
+    result["currency"]=serde_json::json!(if cross {"CNY"}else{"RUB"});
+    result["currencyConversion"]=serde_json::json!({"sourceCurrency":"RUB","rubPerCny":if cross {Some(rate)}else{None},"basis":"current_configured_rate"});
+    Ok(result)
+}
+
+#[tauri::command]
+fn advertising_series_candidates(state: State<AppState>) -> Result<Vec<serde_json::Value>,String> {
+    let c=db(&state)?;
+    let mut stmt=c.prepare("WITH known AS (SELECT sku FROM products UNION SELECT sku FROM sales_daily UNION SELECT sku FROM ad_daily WHERE sku<>'' UNION SELECT sku FROM ad_partial_daily) SELECT k.sku,COALESCE(p.offer_id,''),COALESCE(NULLIF(p.name,''),(SELECT MAX(product_name) FROM sales_daily WHERE sku=k.sku),'') FROM known k LEFT JOIN products p ON p.sku=k.sku WHERE k.sku<>'' ORDER BY k.sku").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([],|r|Ok(serde_json::json!({"sku":r.get::<_,String>(0)?,"offerId":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?}))).map_err(|e|e.to_string())?;
+    rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
+}
+
 fn campaign_metrics(
     c: &Connection,
     campaign_id: &str,
@@ -2344,6 +2373,8 @@ fn campaign_control_blocking(
         Ok((after_state, after_budget, message)) => {
             c.execute("UPDATE campaigns SET state=?1,budget=?2,budget_known=1,budget_updated_at=CURRENT_TIMESTAMP,budget_scale_version=1,updated_at=CURRENT_TIMESTAMP WHERE campaign_id=?3",params![after_state,after_budget,input.campaign_id]).map_err(|e|e.to_string())?;
             c.execute("UPDATE campaign_action_logs SET after_state=?1,after_budget=?2,status='success',message=?3 WHERE id=?4",params![after_state,after_budget,message,log_id]).map_err(|e|e.to_string())?;
+            let skus=c.prepare("SELECT DISTINCT sku FROM ad_daily WHERE campaign_id=?1 AND sku<>''").and_then(|mut q|q.query_map([&input.campaign_id],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()).unwrap_or_default();
+            if let Err(error)=ad_experiments::capture_operation(state,skus,"campaign_change",serde_json::json!({"campaignId":input.campaign_id,"budget":before_budget,"state":before_state}),serde_json::json!({"campaignId":input.campaign_id,"budget":after_budget,"state":after_state,"action":input.action}),&format!("campaign-operation:{log_id}")){return Ok(format!("{message}；实验记录失败：{error}"));}
             Ok(message)
         }
         Err(error) => {
@@ -6924,6 +6955,11 @@ fn performance_budget_rub(value: Option<&serde_json::Value>) -> Option<f64> {
 #[tauri::command]
 fn sync_logs(state: State<AppState>) -> Result<Vec<SyncLogRow>, String> {
     let c = db(&state)?;
+    // Only reconcile when no advertising worker owns the process-wide sync lock.
+    if let Ok(_guard) = PERFORMANCE_SYNC_LOCK.try_lock() {
+        c.execute("UPDATE sync_logs SET status='failed',finished_at=CURRENT_TIMESTAMP,message='上次广告同步已中断；已保存的数据保留，可重新同步继续报告' WHERE status='running' AND source IN ('Performance Ads','Performance history repair')", []).map_err(|e|e.to_string())?;
+    }
+
     let mut stmt=c.prepare("SELECT id,started_at,COALESCE(finished_at,''),source,status,rows_count,message FROM sync_logs ORDER BY id DESC LIMIT 100").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
@@ -7271,6 +7307,7 @@ async fn sync_seller_sales(
     let owned = background_state(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
         let count = sync_seller_sales_blocking(range.clone(), force, &owned)?;
+        ad_experiments::after_sync(&owned);
         // Orders are a separate Seller endpoint. Cache them after analytics so
         // the order center is populated by the same user-visible sync action.
         let _ = sync_fbs_orders_blocking(range.clone(), &owned);
@@ -7373,9 +7410,10 @@ fn sync_performance_ads_blocking(
     c.execute("INSERT INTO sync_logs(started_at,source,status) VALUES(CURRENT_TIMESTAMP,'Performance Ads','running')",[]).map_err(|e|e.to_string())?;
     let log_id = c.last_insert_rowid();
     let result = (|| -> Result<i64, String> {
-        let Some(range) = smart_sync_range(&c, "ad_daily", "day", &range, 3, force)? else {
-            return Ok(0);
-        };
+        let first=chrono::NaiveDate::parse_from_str(&range.from,"%Y-%m-%d").map_err(|_|"开始日期无效")?;
+        let last=chrono::NaiveDate::parse_from_str(&range.to,"%Y-%m-%d").map_err(|_|"结束日期无效")?;
+        if last<first || (last-first).num_days()>365 {return Err("请选择 1 至 366 天的广告同步范围".into());}
+        // Store totals do not prove historical SKU detail coverage.
         let token = performance_token(&c)?;
         let campaigns_payload = performance_get("/api/client/campaign", &token)?;
         let source = campaigns_payload
@@ -7499,6 +7537,8 @@ fn sync_performance_ads_blocking(
                 detail_tx.commit().map_err(|e| e.to_string())?;
             }
         }
+        let history_to=chrono::NaiveDate::parse_from_str(&range.to,"%Y-%m-%d").map_err(|_|"结束日期无效")?.min(today-chrono::Duration::days(2)).to_string();
+        count += ad_history::sync_with_refresh(&mut c,&token,&range.from,&history_to,&names,log_id,force)?;
         Ok(count)
     })();
     match result {
@@ -7521,7 +7561,9 @@ async fn sync_performance_ads(
 ) -> Result<i64, String> {
     let owned = background_state(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        sync_performance_ads_blocking(range, force, &owned)
+        let count = sync_performance_ads_blocking(range, force, &owned)?;
+        ad_experiments::after_sync(&owned);
+        Ok(count)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -7746,6 +7788,7 @@ async fn sync_all_data(
     let performance_range = range.clone();
     let seller = tauri::async_runtime::spawn_blocking(move || {
         let count = sync_seller_sales_blocking(seller_range.clone(), force, &seller_state)?;
+        ad_experiments::after_sync(&seller_state);
         let _ = sync_fbs_orders_blocking(seller_range.clone(), &seller_state);
         let _ = sync_fbo_orders_blocking(seller_range.clone(), &seller_state);
         let _ = rebuild_cancellation_events(&seller_range, &seller_state);
@@ -7753,7 +7796,9 @@ async fn sync_all_data(
         Ok::<i64, String>(count)
     });
     let performance = tauri::async_runtime::spawn_blocking(move || {
-        sync_performance_ads_blocking(performance_range, force, &performance_state)
+        let count = sync_performance_ads_blocking(performance_range, force, &performance_state)?;
+        ad_experiments::after_sync(&performance_state);
+        Ok::<i64,String>(count)
     });
     let finance = tauri::async_runtime::spawn_blocking(move || {
         sync_finance_blocking(range, force, &finance_state)
@@ -9427,6 +9472,9 @@ pub fn run() {
             orders,
             advertising,
             advertising_series,
+            advertising_series_dataset,
+            advertising_series_candidates,
+            ad_experiments::ad_experiment_command,
             campaign_monitor,
             campaign_control,
             campaign_ai_analysis,
