@@ -1093,3 +1093,55 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 评分按销量、TACOS、CVR、CPA、CPC、稳定性和数据质量计算；TACOS、CPA、连续下降、CVR、库存覆盖等 VETO 规则优先。缺失值保持 null，部分数据降低置信度；没有执行确认时不能进入下一阶段，不能自动放量或回退。
 - 新增实验回归测试，覆盖成功示例、缺失/部分/null、零点击/零订单、TACOS/CPA/CVR/库存 VETO、多变量降置信度、基准锁定、暂停恢复、多 SKU、延长观察、重测和回退配置。cargo test --locked：74 通过、4 忽略；pnpm build 和正式 build-tauri-release.cmd 均通过。
 - 正式 EXE 已由 `desktop-next/src-tauri/target/release/ozon-analytics-next.exe` 覆盖根目录版本，Release 与根目录 SHA-256 均为 `858AA931DF149067251F61B218D3D577690A852F0E2DF23608923A456B5F96A1`。正式页面点击验收待下一次打开窗口时执行。
+
+## 2026-09-08 每日任务中心
+
+- 经营管理导航新增“每日任务”。支持单次、每日、工作日任务，设置优先级、截止时间和完成说明；任务模板及每日进度按当前店铺数据库隔离保存。
+- 新增 `daily_tasks` 与 `daily_task_logs`，每日记录支持 0–100% 进度、待处理/进行中/已完成状态、完成时间和备注。重复任务按日期动态生成，不复制大量模板数据。
+- 页面提供日期切换、整体进度、完成率、逾期统计、筛选、进度滑杆、快速完成和归档；今天逾期或一小时内到期任务显示应用内提醒，每分钟刷新。
+- 输入校验、时间校验、进度汇总 3 项 Rust 测试通过；`cargo check --locked` 与 `pnpm build` 通过；正式构建成功并覆盖根目录 EXE，SHA-256 为 `558F6D40CE2D573B2FAA8B9C430D9859648953EEA3249C0F4651F1C9211850DC`。
+
+## 2026-09-08：采购合同模块
+
+- 在“经营管理”新增“采购合同”，支持固定甲方资料、动态乙方资料、多产品行、合同编号、签订日期、税率与条款维护。
+- 新增采购合同及明细 SQLite 表，草稿可保存、列表查看、再次编辑和归档；商品金额、未税合计、税额、价税合计由明细实时计算。
+- 增加人民币金额中文大写转换及 A4 正式合同预览，打印时仅输出合同正文，可由系统打印对话框保存为 PDF。
+- 生成 `docs/contracts/采购合同示例.docx` 作为 Word 版式样例。当前环境未安装 LibreOffice，DOCX 已生成但自动 PNG 渲染工具无法执行；桌面端 A4 页面将在正式程序中进行可见验收。
+- 验证：`cargo check --locked`、`cargo test --locked contracts::tests` 和 `pnpm build` 均通过。
+- 使用 `desktop-next/scripts/build-tauri-release.cmd` 完成正式构建，Release 产物已覆盖根目录 EXE；两者 SHA-256 均为 `816F533E75BCE3F9D4B89D5120116A222D5D8A49A0C6616A53772191B30D7AB1`。
+- 可见验收确认“经营管理 → 采购合同”入口、固定甲方信息、动态产品表、自动合计/大写金额、合同条款及 A4 预览均正常显示；窄工作区下补充了预览宽度约束，避免横向裁切。
+
+### 2026-09-08：采购合同打印及 Word 导出修复
+
+- 打印模式解除主界面 Grid、侧边栏和主内容区偏移，合同固定从 A4 左上角开始，占满可打印宽度，页边距缩为上下 9mm、左右 12mm，并压缩段落与表格间距。
+- 新增“导出 Word”按钮，按当前乙方、产品明细、税率、金额、人民币大写和合同条款生成真正的 `.docx` 文件，并自动打开。
+- `cargo check --locked`、合同 Rust 测试、`pnpm build` 和正式 Tauri Release 构建通过；根目录 EXE 已覆盖并启动，SHA-256 为 `3F46A812E7C2E7F1C8C62A71F38D40B6D3E996C5A0EEFC2287865960377DFAC7`。
+
+### 2026-09-08：系列广告归因
+
+- 在“营销与洞察”新增“系列广告归因”，按产品系列和日期区间汇总活动 × SKU 的广告花费、API 归因销售额、API ROAS及 Seller 总销售额。
+- API 商品报告没有“点击 SKU → 成交 SKU”矩阵，因此 Own ROAS 仅展示 API 口径参考值，Assisted ROAS 与 Cross-size Halo 明确标记为接口未提供，不做虚构分摊。
+- Series Marginal ROAS 使用等长前周期作为基线，公式为 `(本期系列销售额 - 基线系列销售额) / (本期广告花费 - 基线广告花费)`，页面同步提示价格、库存、促销等混杂因素及实验中心的更高可信口径。
+- `cargo check --locked`、`pnpm build` 和正式 Tauri Release 构建通过；根目录 EXE 已覆盖并启动，SHA-256 为 `FE957BF9FDFDBBE4FF53C05EB275B16E2706F8AF2B02B89267AB8936D6532F16`。
+
+### 2026-09-08：Ozon 推广分析 Excel 直接归因导入
+
+- 验证 Ozon 推广分析工作簿：`Statistics` 提供入口 SKU 广告花费与自身促销销售额，`Union` 提供入口 SKU 到其它成交 SKU 的跨尺寸销售额与件数。
+- “系列广告归因”新增 Excel 路径导入，校验两个工作表及关键列，自动读取报告时期；按时期、SKU、活动 ID 去重更新。
+- Direct 指标：`Own ROAS = Statistics 自身促销销售额 / 花费`；`Assisted ROAS = (自身销售额 + Union 跨尺寸销售额) / 花费`；`Halo Rate = Union 跨尺寸销售额 / (自身 + 跨尺寸销售额)`。
+- `cargo check --locked`、`pnpm build` 和正式 Tauri Release 构建通过；根目录 EXE 已覆盖并启动，SHA-256 为 `6CC36C506AB5482612E68F80D40C5774D944CE18FB9B4D24C32A4F55D78CEE86`。
+
+### 2026-09-08：变体引流网络 MVP
+
+- “系列广告归因”扩展为变体引流网络：按 SKU 展示角色、贡献分、自身投放弹性、系列弹性、内耗风险和建议动作，并新增跨尺寸成交网络与价格阶梯。
+- 补充本期/前期销量、曝光、点击、广告订单、价格、库存与日级数据质量；角色分类在点击或系列销量不足时保持“数据不足”，避免低样本直接给出扩量建议。
+- Excel Direct Attribution 使用 `Statistics` 计算自身广告销售额，使用 `Union` 汇总入口 SKU 到最终成交 SKU 的跨尺寸销售额与件数；页面展示真实流向。
+- 验证：`cargo check --locked`、完整 `cargo test --locked`（79 通过、4 忽略）和 `pnpm build` 均通过；使用官方 `desktop-next/scripts/build-tauri-release.cmd` 构建，Release 已覆盖根目录并启动。两处 EXE SHA-256 均为 `C33823F7A5E1D5433FB78E03E90275B8508DB256876ECD7BFA0216817CBEC106`。
+
+### 2026-09-08：Variant Traffic Network V2
+
+- Direct Attribution 增加 Outbound Cross Revenue、Inbound Assisted Revenue、Inbound Assist Share、Outbound Halo 与 Net Flow；无 Union 数据时维持 Experimental Inference，不展示精确跨 SKU 路径。
+- 角色模型升级为引流款、主成交款、升级承接款、利润款、双向枢纽、内耗风险、低效款和数据不足，并加入 Own Ad Dependency、Traffic-Sales Gap、Own/Series Elasticity、Cannibalization、Confidence 与小样本 Do Not Rank。
+- 新增 Budget Opportunity Score、Next Best Action、Series Health Score、增长阶段、边际新增销量和自动预算迁移建议；低置信样本不能进入 Priority Scale。
+- 页面支持把单 SKU 动作或 From/To 预算迁移方案带入广告优化实验中心，预填实验类型、SKU、动作、观察天数、原因、成功条件和回退条件。
+- 新增 6 项 V2 边界测试；完整回归为 85 项通过、4 项按设计忽略。`cargo check --locked`、`cargo test --locked`、`pnpm build` 及官方 Release 构建通过。根目录 EXE 已覆盖并启动，Release 与根目录 SHA-256 均为 `38E5F62593DF654F4D6EBBBF928E8EB2CF83254DAD89653C3C8FDABEF309ED6C`。

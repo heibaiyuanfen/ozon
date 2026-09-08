@@ -14,6 +14,9 @@ mod insights;
 mod ad_series;
 mod ad_history;
 mod ad_experiments;
+mod ad_attribution;
+mod daily_tasks;
+mod contracts;
 mod listing;
 mod mercadolibre;
 mod secrets;
@@ -1092,6 +1095,9 @@ pub(crate) fn db(state: &AppState) -> Result<Connection, String> {
     initialize_extensions(&c)?;
     ad_history::ensure(&c)?;
     ad_experiments::ensure(&c)?;
+    daily_tasks::ensure(&c)?;
+    contracts::ensure(&c)?;
+    ad_attribution::ensure(&c)?;
     Ok(c)
 }
 pub(crate) fn background_state(state: &AppState) -> Result<AppState, String> {
@@ -9475,6 +9481,10 @@ pub fn run() {
             advertising_series_dataset,
             advertising_series_candidates,
             ad_experiments::ad_experiment_command,
+            ad_attribution::ad_attribution_command,
+            ad_attribution::import_variant_report,
+            daily_tasks::daily_task_command,
+            contracts::purchase_contract_command,
             campaign_monitor,
             campaign_control,
             campaign_ai_analysis,

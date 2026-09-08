@@ -8,6 +8,10 @@ export type ExperimentSeed = {
   skus: string[];
   name?: string;
   seriesId?: number;
+  experimentType?: string;
+  observationDays?: number;
+  notes?: string;
+  actions?: Record<string, string>;
 };
 export function openExperiment(seed: ExperimentSeed) {
   window.dispatchEvent(
@@ -195,14 +199,14 @@ const blankChange = (sku: string): Change => ({
 function draftFor(seed?: ExperimentSeed): Draft {
   return {
     name: seed?.name ? `${seed.name} 广告实验` : "",
-    experimentType: "budget_reallocation",
+    experimentType: seed?.experimentType || "budget_reallocation",
     seriesId: seed?.seriesId ?? null,
     baselineStart: date(-3),
     baselineEnd: date(-1),
-    observationDays: 3,
+    observationDays: seed?.observationDays || 3,
     operator: "本地运营人员",
-    notes: "",
-    changes: (seed?.skus || []).map(blankChange),
+    notes: seed?.notes || "",
+    changes: (seed?.skus || []).map(sku => ({ ...blankChange(sku), action: seed?.actions?.[sku] || "hold" })),
     targets: {
       stages: [target(35, 8), target(42, 8), target(45, 9), target(50, 10)],
       finalTarget: target(50, 10),

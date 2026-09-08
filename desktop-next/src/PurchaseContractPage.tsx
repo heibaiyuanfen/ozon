@@ -1,0 +1,50 @@
+import {useEffect,useMemo,useState} from "react";
+import {invoke} from "@tauri-apps/api/core";
+import {FileDown,FilePlus2,Plus,Printer,Save,Trash2} from "lucide-react";
+import "./purchase-contracts.css";
+
+type Item={id?:number;productName:string;unit:string;quantity:number;unitPriceExTax:number};
+type Form={contractNo:string;sellerName:string;sellerTaxNo:string;sellerBank:string;sellerAccount:string;sellerAddress:string;sellerPhone:string;taxRate:number;contractDate:string;deliveryTerms:string;paymentTerms:string;breachTerms:string;otherTerms:string;items:Item[]};
+type Row={id:number;contractNo:string;sellerName:string;contractDate:string;taxRate:number;total:number};
+const BUYER={name:"厦门非凡智汇电子商务有限公司",taxNo:"91350203MAEB4G4K7T",bank:"招商银行股份有限公司厦门体育中心支行",account:"592910153310001",address:"厦门市思明区体育路78号801室"};
+const day=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`};
+const blank=():Form=>({contractNo:`CG-${day().replaceAll("-","")}`,sellerName:"",sellerTaxNo:"",sellerBank:"",sellerAccount:"",sellerAddress:"",sellerPhone:"",taxRate:1,contractDate:day(),deliveryTerms:"乙方需提供每个产品的包装袋及贴标及装箱，并为箱子提供防水措施，并且拍照上传记录。甲方负责托运，运费由甲方支付。",paymentTerms:"甲方应在本合同书签订之日起一次性向乙方预付100%货款，乙方收到预付款后生产制作，具体生产周期由双方约定。",breachTerms:"本合同签订后，任何一方违约，都应承担总货款10%的违约金。",otherTerms:"本合同未约定的事项，由双方另行签订补充协议。补充协议与本合同具有同等法律效力。",items:[{productName:"",unit:"个",quantity:1,unitPriceExTax:0}]});
+const money=(n:number)=>`¥ ${n.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+export function rmbUpper(value:number){
+ const n=Math.round((Number.isFinite(value)?Math.max(0,value):0)*100),digits="零壹贰叁肆伍陆柒捌玖",units=["","拾","佰","仟"],groups=["","万","亿","兆"];
+ if(!n)return "人民币零元整";let integer=Math.floor(n/100),result="";
+ if(integer){let gi=0,zero=false;while(integer>0){const section=integer%10000;let text="",innerZero=false,x=section;for(let i=0;i<4;i++){const d=x%10;if(d){if(innerZero)text="零"+text;text=digits[d]+units[i]+text;innerZero=false}else if(text)innerZero=true;x=Math.floor(x/10)}if(section){if(zero&&result&&!result.startsWith("零"))result="零"+result;result=text+groups[gi]+result}zero=section<1000&&section>0;integer=Math.floor(integer/10000);gi++}result+="元"}else result="零元";
+ const jiao=Math.floor(n/10)%10,fen=n%10;if(jiao)result+=digits[jiao]+"角";else if(fen)result+="零";if(fen)result+=digits[fen]+"分";if(!jiao&&!fen)result+="整";return "人民币"+result;
+}
+
+export function PurchaseContractPage(){
+ const [form,setForm]=useState<Form>(blank),[id,setId]=useState<number|null>(null),[rows,setRows]=useState<Row[]>([]),[message,setMessage]=useState("");
+ const subtotal=useMemo(()=>Math.round(form.items.reduce((s,x)=>s+(Number(x.quantity)||0)*(Number(x.unitPriceExTax)||0),0)*100)/100,[form.items]);
+ const tax=Math.round(subtotal*(Number(form.taxRate)||0))/100,total=Math.round((subtotal+tax)*100)/100;
+ const loadList=async()=>{const v=await invoke<{contracts:Row[]}>("purchase_contract_command",{command:"list",id:null,payload:null});setRows(v.contracts)};
+ useEffect(()=>{void loadList().catch(e=>setMessage(String(e)))},[]);
+ const set=(key:keyof Form,value:unknown)=>setForm(f=>({...f,[key]:value}));
+ const setItem=(index:number,key:keyof Item,value:string|number)=>setForm(f=>({...f,items:f.items.map((x,i)=>i===index?{...x,[key]:value}:x)}));
+ const save=async()=>{try{const v=await invoke<{id:number}>("purchase_contract_command",{command:"save",id,payload:form});setId(v.id);setMessage("合同草稿已保存");await loadList()}catch(e){setMessage(String(e))}};
+ const open=async(row:Row)=>{try{setForm(await invoke<Form>("purchase_contract_command",{command:"detail",id:row.id,payload:null}));setId(row.id);setMessage("")}catch(e){setMessage(String(e))}};
+ const print=()=>{if(!form.sellerName.trim()){setMessage("请先填写乙方名称");return}window.print()};
+ const exportWord=async()=>{try{const v=await invoke<{path:string}>("purchase_contract_command",{command:"export_word",id:null,payload:{...form,amountUppercase:rmbUpper(total)}});setMessage(`Word 已导出：${v.path}`)}catch(e){setMessage(String(e))}};
+ return <div className="contract-page">
+  <header className="contract-hero"><div><span>合同与供应商管理</span><h1>采购合同</h1><p>维护乙方和商品明细，金额、税额及人民币大写自动计算。</p></div><div><button onClick={()=>{setId(null);setForm(blank());setMessage("")}}><FilePlus2/>新建</button><button className="primary" onClick={()=>void save()}><Save/>保存草稿</button><button onClick={()=>void exportWord()}><FileDown/>导出 Word</button><button onClick={print}><Printer/>打印 / 导出 PDF</button></div></header>
+  <div className="contract-workspace">
+   <aside className="contract-history card"><h2>合同记录</h2><p>{rows.length} 份有效合同</p>{rows.map(r=><button key={r.id} className={id===r.id?"active":""} onClick={()=>void open(r)}><b>{r.sellerName}</b><span>{r.contractNo||"未编号"} · {r.contractDate}</span><strong>{money(r.total)}</strong></button>)}{!rows.length&&<div className="empty">保存后会在这里显示</div>}</aside>
+   <main className="contract-editor">
+    <section className="contract-form card"><div className="form-head"><h2>合同信息</h2><span>{id?`正在编辑 #${id}`:"新合同"}</span></div><div className="field-grid">
+     <label>合同编号<input value={form.contractNo} onChange={e=>set("contractNo",e.target.value)}/></label><label>签订日期<input type="date" value={form.contractDate} onChange={e=>set("contractDate",e.target.value)}/></label><label>税率（%）<input type="number" min="0" max="100" step="0.01" value={form.taxRate} onChange={e=>set("taxRate",Number(e.target.value))}/></label>
+    </div><div className="parties"><div><h3>甲方（固定）</h3><b>{BUYER.name}</b><span>税号：{BUYER.taxNo}</span><span>地址：{BUYER.address}</span><span>开户行：{BUYER.bank}</span><span>账号：{BUYER.account}</span></div><div><h3>乙方（可编辑）</h3><input placeholder="乙方名称 *" value={form.sellerName} onChange={e=>set("sellerName",e.target.value)}/><input placeholder="统一社会信用代码 / 税号" value={form.sellerTaxNo} onChange={e=>set("sellerTaxNo",e.target.value)}/><input placeholder="地址" value={form.sellerAddress} onChange={e=>set("sellerAddress",e.target.value)}/><div><input placeholder="联系电话" value={form.sellerPhone} onChange={e=>set("sellerPhone",e.target.value)}/><input placeholder="开户行" value={form.sellerBank} onChange={e=>set("sellerBank",e.target.value)}/></div><input placeholder="银行账号" value={form.sellerAccount} onChange={e=>set("sellerAccount",e.target.value)}/></div></div>
+    <div className="items-head"><h3>产品明细</h3><button onClick={()=>set("items",[...form.items,{productName:"",unit:"个",quantity:1,unitPriceExTax:0}])}><Plus/>添加产品</button></div><div className="item-table"><div className="thead"><span>货物名称</span><span>单位</span><span>数量</span><span>不含税单价</span><span>金额</span><span/></div>{form.items.map((x,i)=><div className="tr" key={i}><input value={x.productName} placeholder="产品名称" onChange={e=>setItem(i,"productName",e.target.value)}/><input value={x.unit} onChange={e=>setItem(i,"unit",e.target.value)}/><input type="number" min="0" step="0.01" value={x.quantity} onChange={e=>setItem(i,"quantity",Number(e.target.value))}/><input type="number" min="0" step="0.01" value={x.unitPriceExTax} onChange={e=>setItem(i,"unitPriceExTax",Number(e.target.value))}/><b>{money(x.quantity*x.unitPriceExTax)}</b><button disabled={form.items.length===1} onClick={()=>set("items",form.items.filter((_,n)=>n!==i))}><Trash2/></button></div>)}</div>
+    <div className="totals"><span>未税金额 <b>{money(subtotal)}</b></span><span>税额 <b>{money(tax)}</b></span><span>价税合计 <strong>{money(total)}</strong></span><p>{rmbUpper(total)}</p></div>
+    <div className="clause-grid">{[["deliveryTerms","产品交付"],["paymentTerms","价款结算"],["breachTerms","违约责任"],["otherTerms","其他约定"]].map(([key,label])=><label key={key}>{label}<textarea value={String(form[key as keyof Form])} onChange={e=>set(key as keyof Form,e.target.value)}/></label>)}</div></section>
+    <ContractPrint form={form} subtotal={subtotal} tax={tax} total={total}/>
+   </main>
+  </div>{message&&<div className="contract-message">{message}</div>}
+ </div>
+}
+
+function ContractPrint({form,subtotal,tax,total}:{form:Form;subtotal:number;tax:number;total:number}){const d=form.contractDate.split("-");return <section className="contract-paper" id="contract-print"><h1>采购合同</h1><div className="contract-meta"><span>合同编号：{form.contractNo||"—"}</span></div><p><b>购买方：</b>{BUYER.name}　（以下简称：甲方）</p><p><b>销售方：</b>{form.sellerName||"________________"}　（以下简称：乙方）</p><p className="indent">甲、乙双方根据《中华人民共和国合同法》等有关法律规定，在平等、自愿的基础上，经充分协商，就甲方向乙方购买产品达成以下购销合同条款。</p><h2>一、产品名称</h2><table><thead><tr><th>货物名称</th><th>单位</th><th>数量</th><th>不含税单价</th><th>金额</th></tr></thead><tbody>{form.items.map((x,i)=><tr key={i}><td>{x.productName||"—"}</td><td>{x.unit}</td><td>{x.quantity}</td><td>{money(x.unitPriceExTax)}</td><td>{money(x.quantity*x.unitPriceExTax)}</td></tr>)}</tbody></table><p><b>合计：</b>以上为不含税价，税率 {form.taxRate}%，税费 {money(tax)}，价税合计：<b>{rmbUpper(total)}</b>（{money(total)}）。未税金额：{money(subtotal)}。</p>{[["二、产品交付",form.deliveryTerms],["三、价款结算",form.paymentTerms],["四、违约责任",form.breachTerms],["五、其他约定",form.otherTerms]].map(([h,t])=><div className="clause" key={h}><h2>{h}</h2><p className="indent">{t}</p></div>)}<p className="copies"><b>注：本合同书一式两份，双方各执一份。</b></p><div className="signatures"><Party title="乙方（公章）" name={form.sellerName} tax={form.sellerTaxNo} address={form.sellerAddress} phone={form.sellerPhone} bank={form.sellerBank} account={form.sellerAccount}/><Party title="甲方（公章）" name={BUYER.name} tax={BUYER.taxNo} address={BUYER.address} bank={BUYER.bank} account={BUYER.account}/></div><p className="contract-date">日期：{d[0]||"　"} 年 {d[1]||"　"} 月 {d[2]||"　"} 日</p></section>}
+function Party(p:{title:string;name:string;tax:string;address:string;phone?:string;bank:string;account:string}){return <div><h3>{p.title}：</h3><p>名称：{p.name||"________________"}</p><p>税号：{p.tax||"________________"}</p><p>地址：{p.address||"________________"}</p>{p.phone!==undefined&&<p>电话：{p.phone||"________________"}</p>}<p>开户行：{p.bank||"________________"}</p><p>账号：{p.account||"________________"}</p></div>}

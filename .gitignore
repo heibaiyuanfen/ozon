@@ -11,6 +11,7 @@ desktop-next/src-tauri/target-*/
 data/
 data-next/
 exports/
+cloud-data/devices/*/*.tmp
 dist/
 build/
 release/
