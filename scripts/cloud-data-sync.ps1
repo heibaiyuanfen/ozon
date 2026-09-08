@@ -9,7 +9,7 @@ $configFile=Join-Path $configDir 'cloud-device.json'
 $keyFile=Join-Path $configDir 'cloud-sync.key'
 $dataDir=Join-Path $RepositoryRoot 'data-next'
 $safeRoot=$RepositoryRoot.Replace('\','/')
-function Git([string[]]$Arguments){& git -c "safe.directory=$safeRoot" -C $RepositoryRoot @Arguments;if($LASTEXITCODE-ne 0){throw "Git 命令失败：git $($Arguments -join ' ')"}}
+function Invoke-GitStrict([string[]]$Arguments){& git.exe -c "safe.directory=$safeRoot" -C $RepositoryRoot @Arguments;if($LASTEXITCODE-ne 0){throw "Git 命令失败：git $($Arguments -join ' ')"}}
 
 function Read-Config { if(!(Test-Path -LiteralPath $configFile)){throw '本机尚未绑定数据库槽位，请先运行 Configure -Slot A 或 B'}; Get-Content -Raw -LiteralPath $configFile|ConvertFrom-Json }
 function Bytes([string]$s){[Text.Encoding]::UTF8.GetBytes($s)}
@@ -49,9 +49,9 @@ try{
   foreach($dir in @('shops','wb','mercadolibre')){if(Test-Path (Join-Path $dataDir $dir)){Copy-Item -Recurse -LiteralPath (Join-Path $dataDir $dir) -Destination $payload}}
   $zip=Join-Path $work 'snapshot.zip';Compress-Archive -Path (Join-Path $payload '*') -DestinationPath $zip -CompressionLevel Optimal;New-Item -ItemType Directory -Force -Path $deviceDir|Out-Null;Encrypt-File $zip $package (Get-Key)
   $hash=(Get-FileHash -Algorithm SHA256 $package).Hash;@{schemaVersion=1;slot=$slotName;machine=$env:COMPUTERNAME;createdAt=(Get-Date).ToUniversalTime().ToString('o');sha256=$hash;size=(Get-Item $package).Length}|ConvertTo-Json|Set-Content -LiteralPath $manifest -Encoding UTF8
-  Git @('pull','--rebase','origin','main');Git @('add','--',"cloud-data/devices/$slotName");Git @('commit','-m',"data($slotName): update encrypted database snapshot");Git @('push','origin','main')
+  Invoke-GitStrict @('pull','--rebase','origin','main');Invoke-GitStrict @('add','--',"cloud-data/devices/$slotName");Invoke-GitStrict @('commit','-m',"data($slotName): update encrypted database snapshot");Invoke-GitStrict @('push','origin','main')
  } else {
-  Git @('pull','--ff-only','origin','main');if(!(Test-Path $package)){throw "云端没有数据库 $slotName 快照"};$m=Get-Content -Raw $manifest|ConvertFrom-Json;$actual=(Get-FileHash -Algorithm SHA256 $package).Hash;if($actual-ne$m.sha256){throw '云端数据包 SHA-256 校验失败'}
+  Invoke-GitStrict @('pull','--ff-only','origin','main');if(!(Test-Path $package)){throw "云端没有数据库 $slotName 快照"};$m=Get-Content -Raw $manifest|ConvertFrom-Json;$actual=(Get-FileHash -Algorithm SHA256 $package).Hash;if($actual-ne$m.sha256){throw '云端数据包 SHA-256 校验失败'}
   $zip=Join-Path $work 'snapshot.zip';Decrypt-File $package $zip (Get-Key);$payload=Join-Path $work 'payload';Expand-Archive -LiteralPath $zip -DestinationPath $payload
   $backup=Join-Path $configDir ("backups\$slotName\"+(Get-Date -Format 'yyyyMMdd-HHmmss'));New-Item -ItemType Directory -Force -Path $backup|Out-Null;if(Test-Path $dataDir){Copy-Item -Recurse -LiteralPath $dataDir -Destination $backup}
   foreach($name in @('shops.json','database-generation.json','shops','wb','mercadolibre')){$src=Join-Path $payload $name;if(Test-Path $src){$dst=Join-Path $dataDir $name;if(Test-Path $dst){Remove-Item -Recurse -Force -LiteralPath $dst};Copy-Item -Recurse -LiteralPath $src -Destination $dst}}
