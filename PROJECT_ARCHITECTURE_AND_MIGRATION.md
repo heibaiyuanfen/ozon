@@ -1145,3 +1145,10 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 新增 Budget Opportunity Score、Next Best Action、Series Health Score、增长阶段、边际新增销量和自动预算迁移建议；低置信样本不能进入 Priority Scale。
 - 页面支持把单 SKU 动作或 From/To 预算迁移方案带入广告优化实验中心，预填实验类型、SKU、动作、观察天数、原因、成功条件和回退条件。
 - 新增 6 项 V2 边界测试；完整回归为 85 项通过、4 项按设计忽略。`cargo check --locked`、`cargo test --locked`、`pnpm build` 及官方 Release 构建通过。根目录 EXE 已覆盖并启动，Release 与根目录 SHA-256 均为 `38E5F62593DF654F4D6EBBBF928E8EB2CF83254DAD89653C3C8FDABEF309ED6C`。
+
+### 2026-09-08：GitHub A/B 数据库同步标准
+
+- 新增 `scripts/cloud-data-sync.ps1`，支持 Configure、Push、Pull、Status；设备身份保存在仓库外的 `%LOCALAPPDATA%\OzonERP\cloud-device.json`，A/B 设备只能访问各自槽位。
+- 上传前要求关闭桌面程序，将 shops、WB 和 Mercado Libre SQLite 数据及店铺登记打包；使用 PBKDF2-SHA256、AES-256-CBC 和 HMAC-SHA256 加密，仓库只保存 `.ozondb` 密文及 SHA-256 manifest。
+- Pull 在解密恢复前验证 SHA-256 与 HMAC，并将当前 `data-next` 备份到本机 `%LOCALAPPDATA%\OzonERP\backups`。新增 `scripts/update-workstation.ps1`，以 fast-forward 方式更新代码后仅拉取本机绑定数据库。
+- 当前电脑 `DESKTOP-FRGV4RQ` 已绑定数据库 A，本机 A 加密快照已生成并提交；GitHub HTTPS 连续三次连接失败，因此提交仍在本地等待网络恢复后推送。
