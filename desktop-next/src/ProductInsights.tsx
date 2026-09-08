@@ -1,5 +1,5 @@
 import { useDeferredValue, useEffect, useState } from "react";
-import { Layers3, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { Layers3, Plus, RefreshCw, Search, Target, Trash2 } from "lucide-react";
 import * as echarts from "./charts";
 import {
   deleteProductSeries,
@@ -124,7 +124,6 @@ export function ProductInsights({
             }
             title={tab === "products" ? "双击打开单品经营看板" : undefined}
           >
-            <button onClick={()=>openExperiment({skus:row.skus,name:row.name,seriesId:tab==="products"?undefined:Number(row.id)})}>创建实验</button>
             {tab === "products" ? (
               <label className="series-select">
                 <input
@@ -198,6 +197,20 @@ export function ProductInsights({
               ))}
               {!row.clusters.length && <small>近 30 天无可识别订单集群</small>}
             </div>
+            <button
+              type="button"
+              className="insight-experiment-button"
+              onClick={() =>
+                openExperiment({
+                  skus: row.skus,
+                  name: row.name,
+                  seriesId: tab === "products" ? undefined : Number(row.id),
+                })
+              }
+            >
+              <Target size={15} />
+              创建实验
+            </button>
           </article>
         ))}
       </div>
