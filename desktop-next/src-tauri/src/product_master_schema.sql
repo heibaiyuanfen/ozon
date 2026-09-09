@@ -1,0 +1,15 @@
+CREATE TABLE IF NOT EXISTS pm_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS pm_spus(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL DEFAULT 'local',code TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(organization_id,code));
+CREATE TABLE IF NOT EXISTS pm_skus(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL DEFAULT 'local',code TEXT NOT NULL,spu_id TEXT REFERENCES pm_spus(id),name TEXT NOT NULL,brand TEXT,color TEXT,size TEXT,category TEXT,supplier TEXT,attributes_json TEXT NOT NULL DEFAULT '{}',media_json TEXT NOT NULL DEFAULT '[]',purchase_cost TEXT,status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(organization_id,code));
+CREATE INDEX IF NOT EXISTS pm_sku_spu ON pm_skus(spu_id);
+CREATE TABLE IF NOT EXISTS pm_raw(id INTEGER PRIMARY KEY AUTOINCREMENT,shop_id TEXT NOT NULL REFERENCES wb_shops(id),run_id TEXT NOT NULL,payload TEXT NOT NULL,fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS pm_listings(id TEXT PRIMARY KEY,shop_id TEXT NOT NULL REFERENCES wb_shops(id),sku_id TEXT REFERENCES pm_skus(id),marketplace TEXT NOT NULL DEFAULT 'wildberries',nm_id TEXT NOT NULL,chrt_id TEXT NOT NULL,vendor_code TEXT,title TEXT,brand TEXT,category TEXT,snapshot_json TEXT NOT NULL,mapping_status TEXT NOT NULL DEFAULT 'UNMAPPED',confidence TEXT NOT NULL DEFAULT 'low',data_status TEXT NOT NULL DEFAULT 'partial',last_synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,raw_id INTEGER REFERENCES pm_raw(id),UNIQUE(shop_id,nm_id,chrt_id));
+CREATE INDEX IF NOT EXISTS pm_listing_sku ON pm_listings(sku_id);
+CREATE INDEX IF NOT EXISTS pm_listing_chrt ON pm_listings(shop_id,chrt_id);
+CREATE INDEX IF NOT EXISTS pm_listing_vendor ON pm_listings(shop_id,vendor_code);
+CREATE INDEX IF NOT EXISTS pm_listing_mapping ON pm_listings(mapping_status);
+CREATE TABLE IF NOT EXISTS pm_barcodes(listing_id TEXT NOT NULL REFERENCES pm_listings(id),barcode TEXT NOT NULL,PRIMARY KEY(listing_id,barcode));
+CREATE INDEX IF NOT EXISTS pm_barcode_lookup ON pm_barcodes(barcode);
+CREATE TABLE IF NOT EXISTS pm_history(id INTEGER PRIMARY KEY AUTOINCREMENT,entity_id TEXT NOT NULL,event_type TEXT NOT NULL,before_json TEXT,after_json TEXT,actor TEXT NOT NULL,reason TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS pm_history_entity ON pm_history(entity_id,id);
+INSERT OR IGNORE INTO pm_migrations(version)VALUES(2);

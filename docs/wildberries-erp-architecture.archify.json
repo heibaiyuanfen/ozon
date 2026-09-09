@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "WBerp 本地优先重构架构",
+    "output": "wildberries-erp-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "user-flow", "label": "本地业务主链路", "focus": ["ui", "controllers", "application", "domain", "repositories", "normalized", "derived"], "note": "页面只调用用例；领域逻辑不依赖 Wildberries 接口。" },
+      { "id": "sync-flow", "label": "同步与恢复", "focus": ["scheduler", "application", "adapters", "wb-api", "raw", "normalized"], "note": "所有同步均有运行记录、游标、幂等键、重试与部分恢复。" },
+      { "id": "data-governance", "label": "数据治理", "focus": ["repositories", "raw", "normalized", "derived", "security"], "note": "RAW 可追溯，NORMALIZED 可信，DERIVED 可重建；密钥不得明文导出。" }
+    ]
+  },
+  "components": [
+    { "id": "ui", "type": "external", "label": "React WB 工作台", "sublabel": "9 个业务模块", "pos": [30, 250], "size": [150, 68], "tag": "本地桌面" },
+    { "id": "controllers", "type": "backend", "label": "Tauri Controllers", "sublabel": "DTO / 校验 / 权限", "pos": [230, 250], "size": [150, 68] },
+    { "id": "application", "type": "backend", "label": "Application Services", "sublabel": "用例 / 事务边界", "pos": [430, 250], "size": [160, 68] },
+    { "id": "domain", "type": "backend", "label": "WB Domain", "sublabel": "实体 / 规则 / Decimal", "pos": [640, 250], "size": [155, 68] },
+    { "id": "repositories", "type": "backend", "label": "Repositories", "sublabel": "按店铺隔离", "pos": [845, 250], "size": [145, 68] },
+    { "id": "raw", "type": "database", "label": "RAW Store", "sublabel": "原始响应 / 批次", "pos": [1040, 110], "size": [145, 66], "tag": "只追加" },
+    { "id": "normalized", "type": "database", "label": "NORMALIZED Store", "sublabel": "规范业务表", "pos": [1040, 250], "size": [145, 66], "tag": "SQLite v2" },
+    { "id": "derived", "type": "database", "label": "DERIVED Store", "sublabel": "KPI / 快照 / 报表", "pos": [1040, 390], "size": [145, 66], "tag": "可重建" },
+    { "id": "scheduler", "type": "messagebus", "label": "Sync Orchestrator", "sublabel": "计划 / 重试 / 游标", "pos": [430, 80], "size": [160, 68] },
+    { "id": "adapters", "type": "cloud", "label": "WB Adapter Clients", "sublabel": "限流 / 分页 / 能力", "pos": [640, 80], "size": [155, 68] },
+    { "id": "wb-api", "type": "external", "label": "Wildberries API", "sublabel": "官方能力边界", "pos": [845, 80], "size": [145, 68] },
+    { "id": "security", "type": "security", "label": "Security & Audit", "sublabel": "DPAPI / RBAC / 审计", "pos": [640, 410], "size": [155, 68] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "WBerp 本地应用进程", "wraps": ["ui", "controllers", "application", "domain", "repositories", "scheduler", "adapters", "raw", "normalized", "derived", "security"] },
+    { "kind": "security-group", "label": "基础设施与数据边界", "wraps": ["repositories", "raw", "normalized", "derived", "security"] }
+  ],
+  "connections": [
+    { "id": "ui-controller", "from": "ui", "to": "controllers", "variant": "emphasis" },
+    { "id": "controller-application", "from": "controllers", "to": "application", "label": "use case", "variant": "emphasis" },
+    { "id": "application-domain", "from": "application", "to": "domain", "variant": "emphasis" },
+    { "id": "domain-repository", "from": "domain", "to": "repositories", "label": "ports", "variant": "emphasis" },
+    { "id": "repository-normalized", "from": "repositories", "to": "normalized" },
+    { "id": "repository-derived", "from": "repositories", "to": "derived", "label": "projection", "fromSide": "right", "toSide": "left" },
+    { "id": "scheduler-application", "from": "scheduler", "to": "application", "variant": "dashed", "fromSide": "bottom", "toSide": "top" },
+    { "id": "application-adapter", "from": "application", "to": "adapters", "label": "capability port", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "id": "adapter-api", "from": "adapters", "to": "wb-api", "label": "HTTPS", "variant": "dashed" },
+    { "id": "adapter-raw", "from": "adapters", "to": "raw", "variant": "dashed", "fromSide": "top", "toSide": "top", "via": [[717.5, 42], [1112.5, 42]] },
+    { "id": "raw-normalized", "from": "raw", "to": "normalized", "fromSide": "bottom", "toSide": "top" },
+    { "id": "normalized-derived", "from": "normalized", "to": "derived", "fromSide": "bottom", "toSide": "top" },
+    { "id": "security-application", "from": "security", "to": "application", "label": "authorize + audit", "variant": "security", "fromSide": "top", "toSide": "bottom" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "身份规则", "items": ["Internal SKU 是 ERP 主身份", "MarketplaceListing 保存 shop、nmId、chrtId 等外部映射", "同一商品、系列、变体不再用 nmId 互相代替"] },
+    { "dot": "emerald", "title": "同步规则", "items": ["首次全量、增量、手动、定时使用同一任务模型", "幂等键 + 游标 + 指数退避 + 部分恢复", "空值保留 NULL，不自动转换为 0"] },
+    { "dot": "rose", "title": "迁移保护", "items": ["旧库先只读备份，再迁移与对账", "新旧双读验证通过后才删除旧实现", "Token 使用 DPAPI；禁止明文导出"] }
+  ]
+}

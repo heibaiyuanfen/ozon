@@ -556,6 +556,9 @@ export async function notifyShipment(trackingId: string): Promise<string> {
 export async function wbSettings(): Promise<WbSettings> {
   return invoke("wb_settings");
 }
+export async function wbShopCenter<T = unknown>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
+  return invoke("wb_shop_center", { action, payload });
+}
 export async function exportWbApiBundle(): Promise<string> {
   return invoke("export_wb_api_bundle");
 }

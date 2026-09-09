@@ -1152,3 +1152,27 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 上传前要求关闭桌面程序，将 shops、WB 和 Mercado Libre SQLite 数据及店铺登记打包；使用 PBKDF2-SHA256、AES-256-CBC 和 HMAC-SHA256 加密，仓库只保存 `.ozondb` 密文及 SHA-256 manifest。
 - Pull 在解密恢复前验证 SHA-256 与 HMAC，并将当前 `data-next` 备份到本机 `%LOCALAPPDATA%\OzonERP\backups`。新增 `scripts/update-workstation.ps1`，以 fast-forward 方式更新代码后仅拉取本机绑定数据库。
 - 当前电脑 `DESKTOP-FRGV4RQ` 已绑定数据库 A，本机 A 加密快照已生成并提交；GitHub HTTPS 连续三次连接失败，因此提交仍在本地等待网络恢复后推送。
+
+## 2026-09-09 — WBerp Module 01 店铺与 API 中心
+
+- 新增独立 `wb-v2/shop_api_center.db`，旧 `wb/wb_analytics.db` 保持不变，支持安全回滚。
+- 新增 WB Organization、Shop、Credential、Capability、Health、SyncJob、SyncJobRun、SyncError、Audit 表及店铺隔离索引。
+- Token 使用 Windows DPAPI 加密，前端仅接收掩码；轮换时保留旧凭据为 disabled，审计不保存明文。
+- 新增 Content、Marketplace、Promotion 真实能力探测；尚未建立安全探测契约的业务域显示 unknown。
+- 新增 WB 工作区“店铺与 API 中心”页面，包括空状态、添加店铺、能力健康、凭据轮换、同步任务去重、取消/重试和审计记录。
+- 验证：`cargo check --locked` 通过；`cargo test --locked wb_shop_center` 2/2 通过；`pnpm build` 通过。
+- 发布：使用 `desktop-next/scripts/build-tauri-release.cmd` 构建嵌入式正式前端；Release EXE 构建成功。
+- 覆盖与启动：根目录 EXE 已覆盖，Release 与根目录文件 SHA-256 均为 `24F8841700D476D070BB502BDE79AA7E452BCC917DF0FFB36429A927AD0ADB4E`；进程已启动且 Windows 报告 Responding。
+- 已知限制：当前同步中心完成持久化排队、去重、取消和重试控制面；各资源 worker 将由对应业务模块接入，因此新建任务保持 pending，不伪造同步成功。
+# 2026-09-09 Module 02 Product Master 完整交付
+
+- 对照 `02_PRODUCT_MASTER.md` 补齐 SPU/SKU、Listing、条码、RAW、数据质量、冲突、映射历史、CSV/XLSX 导入预览提交、批量操作、详情页、媒体/属性维护、全量/增量同步及回收站状态。
+- 增加本地事务迁移 `pm_metadata`、`pm_imports`、`pm_external_references`，Listing 增加状态、缺失字段、创建/更新时间；不清空旧数据。
+- MarketplaceSkuResolver 增加店铺隔离、nmID/chrtID 别名兼容、尺寸歧义阻断、重复标识双向冲突及未解析引用重算。
+- 增加同步取消、30 分钟上限、429/5xx 重试、RAW 保留、应用级 worker 互斥，避免重复启动进程互相标记同步失败。
+- 验证：38 项 Product Master 测试通过，2 项 Shop Center 测试通过；`cargo check --locked`、`pnpm build`、`cargo clippy --locked --lib` 通过。前端 Prettier 检查通过。Clippy 剩余警告来自旧模块的既有代码。
+- 正式构建：使用 `desktop-next/scripts/build-tauri-release.cmd`。Release EXE 已复制到根目录 `ozon-analytics-next.exe`。
+- Release/root SHA-256：`B198F9DE7F31DFD8B22EA1C7F4EC44E9F4B67F51ABA376FB09D1CA627333EEC1`，两者一致。
+- 可见验收：启动根目录 EXE，窗口标题 Ozon ERP，导航显示“商品资料中心”；页面显示同步状态 success、处理 37、成功 37、失败 0、未匹配 37。由于当前数据库没有内部 SKU，未匹配数量符合预期。
+- 已知边界：本模块未实现 WB 商品发布写回、后续价格/库存/订单/广告/财务业务，权限仍是本地单用户角色模型，不等同于远程多用户认证。
+- 最后一次正式版启动后的可见验收被用户按 Esc 中止；程序已完成构建和复制，但该最新构建未重复执行页面操作验收。

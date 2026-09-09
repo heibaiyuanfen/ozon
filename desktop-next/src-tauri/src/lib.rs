@@ -21,6 +21,9 @@ mod listing;
 mod mercadolibre;
 mod secrets;
 mod wb;
+mod wb_shop_center;
+mod product_master;
+mod product_worker;
 static INVENTORY_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static SELLER_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static PERFORMANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
@@ -9462,6 +9465,7 @@ pub fn run() {
             let data_dir = locate_data_dir(&exe, &local_app_dir, &resource_dir)
                 .map_err(std::io::Error::other)?;
             let registry = read_registry(&data_dir).map_err(std::io::Error::other)?;
+            product_worker::start(data_dir.clone());
             app.manage(AppState {
                 data_dir,
                 active_shop_id: Mutex::new(registry.active_shop_id),
@@ -9571,6 +9575,8 @@ pub fn run() {
             wb::sync_wb,
             wb::test_wb_feishu,
             wb::send_wb_weekly,
+            wb_shop_center::wb_shop_center,
+            product_master::product_master,
             listing::listing_settings,
             listing::save_listing_settings,
             listing::listing_rows,

@@ -94,6 +94,8 @@ import { MercadoLibrePage } from "./MercadoLibrePage";
 import { DailyTaskCenter } from "./DailyTaskCenter";
 import { AdAttributionPage } from "./AdAttributionPage";
 import { PurchaseContractPage } from "./PurchaseContractPage";
+import { ProductMasterPage } from "./ProductMasterPage";
+import { WbShopApiCenter } from "./WbShopApiCenter";
 
 type Workspace = "ozon" | "wb" | "mercadolibre";
 
@@ -208,8 +210,8 @@ function Sidebar({
   changeShop: (id: string) => void;
   workspace: Workspace;
   setWorkspace: (value: Workspace) => void;
-  wbPage: "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings";
-  setWbPage: (value: "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings") => void;
+  wbPage: "product_master" | "shop_api" | "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings";
+  setWbPage: (value: "product_master" | "shop_api" | "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings") => void;
   collapsed: boolean;
   setCollapsed: (value: boolean) => void;
 }) {
@@ -283,6 +285,8 @@ function Sidebar({
           <nav>
             {(
               [
+                ["shop_api", "店铺与 API 中心", Store],
+                ["product_master", "商品资料中心", Box],
                 ["daily", "经营总览", LayoutDashboard],
                 ["reports", "报告中心", BarChart3],
                 ["orders", "订单中心", ShoppingBag],
@@ -293,7 +297,7 @@ function Sidebar({
                 ["cross_profit", "跨境利润", BarChart3],
                 ["settings", "WB API 与汇率", Settings2],
               ] as Array<
-                ["daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings", string, typeof LayoutDashboard]
+                ["product_master" | "shop_api" | "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings", string, typeof LayoutDashboard]
               >
             ).map(([key, label, Icon]) => (
               <button
@@ -1286,7 +1290,7 @@ export function App() {
   const [page, setPage] = useState<PageKey>("dashboard"),
     [workspace, setWorkspace] = useState<Workspace>("ozon"),
     [sidebarCollapsed, setSidebarCollapsed] = useState(false),
-    [wbPage, setWbPage] = useState<"daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings">("daily"),
+    [wbPage, setWbPage] = useState<"product_master" | "shop_api" | "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings">("shop_api"),
     [shops, setShops] = useState<Shop[]>([]),
     [days, setDays] = useState(7),
     [dashboardMonthOffset, setDashboardMonthOffset] = useState<number | null>(null),
@@ -1374,7 +1378,7 @@ export function App() {
         setCollapsed={setSidebarCollapsed}
       />
       <main>
-        {workspace === "wb" && <WbPage range={range} section={wbPage} days={days} setDays={setDays} />}
+        {workspace === "wb" && (wbPage === "shop_api" ? <WbShopApiCenter /> : wbPage === "product_master" ? <ProductMasterPage /> : <WbPage range={range} section={wbPage} days={days} setDays={setDays} />)}
         {workspace === "mercadolibre" && <MercadoLibrePage />}
         {workspace === "ozon" && (
           <>
