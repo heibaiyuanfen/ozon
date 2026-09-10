@@ -939,6 +939,7 @@ export function SettingsPage({ status }: { status: ConnectionStatus | null }) {
             {field("feishuTrackingTableId", "物流表 Table ID")}
             {field("feishuSeriesTableId", "系列表 Table ID")}
             {field("feishuChatId", "群 Chat ID")}
+            {field("feishuPackingFolderToken", "发货装箱单文件夹链接或 Token")}
           </div>
           <div className="credentials-save">
             <button className="dark-button" onClick={save}>

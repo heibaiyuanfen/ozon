@@ -568,9 +568,19 @@ pub fn update_product_price(
         "Ozon 已接受更新；价格缓存尚未刷新，请稍后再次读取"
     };
     c.execute("UPDATE product_price_action_logs SET status=?1,message=?2,response_json=?3,verified_price=?4,verified_at=CASE WHEN ?4 IS NULL THEN '' ELSE CURRENT_TIMESTAMP END WHERE id=?5",params![status,message,response.to_string(),verified_price,log_id]).map_err(|e|e.to_string())?;
-    if status=="verified" {
-        if let Err(error)=super::ad_experiments::capture_operation(&state,vec![form.sku.clone()],"price_change",serde_json::json!({"price":before.price}),serde_json::json!({"price":verified_price,"currency":form.currency_code}),&format!("price-operation:{log_id}")) {
-            let _=c.execute("UPDATE product_price_action_logs SET message=message||?1 WHERE id=?2",params![format!("；实验记录失败：{error}"),log_id]);
+    if status == "verified" {
+        if let Err(error) = super::ad_experiments::capture_operation(
+            &state,
+            vec![form.sku.clone()],
+            "price_change",
+            serde_json::json!({"price":before.price}),
+            serde_json::json!({"price":verified_price,"currency":form.currency_code}),
+            &format!("price-operation:{log_id}"),
+        ) {
+            let _ = c.execute(
+                "UPDATE product_price_action_logs SET message=message||?1 WHERE id=?2",
+                params![format!("；实验记录失败：{error}"), log_id],
+            );
         }
     }
     verified

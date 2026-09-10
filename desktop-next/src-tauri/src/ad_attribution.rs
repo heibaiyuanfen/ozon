@@ -1,25 +1,105 @@
+use super::{background_state, db, AppState};
+use calamine::{open_workbook_auto, Reader};
 use rusqlite::params;
-use serde_json::{json,Value};
+use serde_json::{json, Value};
+use std::{collections::HashMap, path::Path};
 use tauri::State;
-use super::{background_state,db,AppState};
-use calamine::{open_workbook_auto,Reader};
-use std::{collections::HashMap,path::Path};
 
-pub(super) fn ensure(c:&rusqlite::Connection)->Result<(),String>{c.execute_batch("CREATE TABLE IF NOT EXISTS variant_report_stats(period_from TEXT NOT NULL,period_to TEXT NOT NULL,entry_sku TEXT NOT NULL,campaign_id TEXT NOT NULL,spend REAL,impressions INTEGER,clicks INTEGER,ad_orders INTEGER,ad_revenue REAL,source_file TEXT NOT NULL,imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(period_from,period_to,entry_sku,campaign_id));CREATE TABLE IF NOT EXISTS variant_report_flows(period_from TEXT NOT NULL,period_to TEXT NOT NULL,entry_sku TEXT NOT NULL,purchased_sku TEXT NOT NULL,campaign_id TEXT NOT NULL,revenue REAL,units INTEGER,source_file TEXT NOT NULL,imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(period_from,period_to,entry_sku,purchased_sku,campaign_id));").map_err(|e|e.to_string())}
-fn text(row:&[calamine::Data],i:usize)->String{row.get(i).map(|x|x.to_string()).unwrap_or_default().trim().to_string()}
-fn num(row:&[calamine::Data],i:usize)->f64{text(row,i).replace(' ',"").replace(',',".").parse().unwrap_or(0.0)}
-fn headers(row:&[calamine::Data])->HashMap<String,usize>{row.iter().enumerate().map(|(i,x)|(x.to_string().trim().to_string(),i)).collect()}
-fn col(h:&HashMap<String,usize>,names:&[&str])->Result<usize,String>{names.iter().find_map(|n|h.get(*n).copied()).ok_or_else(||format!("缺少列：{}",names.join(" / ")))}
-fn period(v:&str)->Result<(String,String),String>{let ds=v.split(|c:char|!c.is_ascii_digit()&&c!='.').filter(|x|x.matches('.').count()==2).collect::<Vec<_>>();if ds.len()<2{return Err("无法识别报告时期".into())}let cv=|x:&str|{let p=x.split('.').collect::<Vec<_>>();format!("{}-{}-{}",p[2],p[1],p[0])};Ok((cv(ds[0]),cv(ds[1])))}
-fn sample_confidence(clicks:f64,orders:f64,complete_days:i64,quality:&str,spend:f64)->(&'static str,bool){let insufficient=clicks<50.0||orders<1.0||spend<100.0||quality=="missing";let confidence=if clicks>=300.0&&orders>=10.0&&complete_days>=3&&quality=="complete"{"HIGH"}else if clicks>=100.0&&orders>=3.0&&complete_days>=2&&quality=="complete"{"MEDIUM"}else{"LOW"};(confidence,insufficient)}
-fn next_action(score:f64,confidence:&str,insufficient:bool,role:&str)->&'static str{if insufficient{"INSUFFICIENT_DATA"}else if role=="cannibalizing_variant"||score<35.0{"REDUCE_15"}else if score>=80.0&&confidence!="LOW"{"INCREASE_10"}else if score>=65.0{"INCREASE_5"}else if role=="profit_variant"{"PRICE_UP_3"}else{"HOLD_3_DAYS"}}
+pub(super) fn ensure(c: &rusqlite::Connection) -> Result<(), String> {
+    c.execute_batch("CREATE TABLE IF NOT EXISTS variant_report_stats(period_from TEXT NOT NULL,period_to TEXT NOT NULL,entry_sku TEXT NOT NULL,campaign_id TEXT NOT NULL,spend REAL,impressions INTEGER,clicks INTEGER,ad_orders INTEGER,ad_revenue REAL,source_file TEXT NOT NULL,imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(period_from,period_to,entry_sku,campaign_id));CREATE TABLE IF NOT EXISTS variant_report_flows(period_from TEXT NOT NULL,period_to TEXT NOT NULL,entry_sku TEXT NOT NULL,purchased_sku TEXT NOT NULL,campaign_id TEXT NOT NULL,revenue REAL,units INTEGER,source_file TEXT NOT NULL,imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(period_from,period_to,entry_sku,purchased_sku,campaign_id));").map_err(|e|e.to_string())
+}
+fn text(row: &[calamine::Data], i: usize) -> String {
+    row.get(i)
+        .map(|x| x.to_string())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+fn num(row: &[calamine::Data], i: usize) -> f64 {
+    text(row, i)
+        .replace(' ', "")
+        .replace(',', ".")
+        .parse()
+        .unwrap_or(0.0)
+}
+fn headers(row: &[calamine::Data]) -> HashMap<String, usize> {
+    row.iter()
+        .enumerate()
+        .map(|(i, x)| (x.to_string().trim().to_string(), i))
+        .collect()
+}
+fn col(h: &HashMap<String, usize>, names: &[&str]) -> Result<usize, String> {
+    names
+        .iter()
+        .find_map(|n| h.get(*n).copied())
+        .ok_or_else(|| format!("缺少列：{}", names.join(" / ")))
+}
+fn period(v: &str) -> Result<(String, String), String> {
+    let ds = v
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .filter(|x| x.matches('.').count() == 2)
+        .collect::<Vec<_>>();
+    if ds.len() < 2 {
+        return Err("无法识别报告时期".into());
+    }
+    let cv = |x: &str| {
+        let p = x.split('.').collect::<Vec<_>>();
+        format!("{}-{}-{}", p[2], p[1], p[0])
+    };
+    Ok((cv(ds[0]), cv(ds[1])))
+}
+fn sample_confidence(
+    clicks: f64,
+    orders: f64,
+    complete_days: i64,
+    quality: &str,
+    spend: f64,
+) -> (&'static str, bool) {
+    let insufficient = clicks < 50.0 || orders < 1.0 || spend < 100.0 || quality == "missing";
+    let confidence =
+        if clicks >= 300.0 && orders >= 10.0 && complete_days >= 3 && quality == "complete" {
+            "HIGH"
+        } else if clicks >= 100.0 && orders >= 3.0 && complete_days >= 2 && quality == "complete" {
+            "MEDIUM"
+        } else {
+            "LOW"
+        };
+    (confidence, insufficient)
+}
+fn next_action(score: f64, confidence: &str, insufficient: bool, role: &str) -> &'static str {
+    if insufficient {
+        "INSUFFICIENT_DATA"
+    } else if role == "cannibalizing_variant" || score < 35.0 {
+        "REDUCE_15"
+    } else if score >= 80.0 && confidence != "LOW" {
+        "INCREASE_10"
+    } else if score >= 65.0 {
+        "INCREASE_5"
+    } else if role == "profit_variant" {
+        "PRICE_UP_3"
+    } else {
+        "HOLD_3_DAYS"
+    }
+}
 
 #[tauri::command]
-pub async fn import_variant_report(state:State<'_,AppState>,path:String)->Result<Value,String>{let state=background_state(&state)?;tauri::async_runtime::spawn_blocking(move||{if !Path::new(path.trim()).is_file(){return Err("找不到 Excel 文件".into())}let mut book=open_workbook_auto(path.trim()).map_err(|e|format!("无法读取 Excel：{e}"))?;let stats=book.worksheet_range("Statistics").map_err(|e|format!("缺少 Statistics 工作表：{e}"))?;let union=book.worksheet_range("Union").map_err(|e|format!("缺少 Union 工作表：{e}"))?;let (from,to)=period(&text(stats.rows().next().ok_or("Statistics 为空")?,0))?;let sh=headers(stats.rows().nth(1).ok_or("Statistics 缺少表头")?);let uh=headers(union.rows().nth(1).ok_or("Union 缺少表头")?);let ss=col(&sh,&["SKU"])?;let sc=col(&sh,&["广告活动 ID"])?;let spend=col(&sh,&["费用，₽"])?;let imp=col(&sh,&["展现量"])?;let clicks=col(&sh,&["点击次数"])?;let orders=col(&sh,&["已售商品数量，件"])?;let revenue=col(&sh,&["促销销售，{货币}"])?;let ue=col(&uh,&["促销中的 SKU"])?;let up=col(&uh,&["合并卡中的 SKU"])?;let uc=col(&uh,&["广告活动 ID"])?;let ur=col(&uh,&["促销销售，{货币}"])?;let uu=col(&uh,&["已售商品数量，件"])?;let mut c=db(&state)?;ensure(&c)?;let tx=c.transaction().map_err(|e|e.to_string())?;let mut ns=0;for r in stats.rows().skip(2){let sku=text(r,ss);if sku.is_empty()||sku=="0"{continue}tx.execute("INSERT INTO variant_report_stats VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,CURRENT_TIMESTAMP)ON CONFLICT(period_from,period_to,entry_sku,campaign_id)DO UPDATE SET spend=excluded.spend,impressions=excluded.impressions,clicks=excluded.clicks,ad_orders=excluded.ad_orders,ad_revenue=excluded.ad_revenue,source_file=excluded.source_file,imported_at=CURRENT_TIMESTAMP",params![from,to,sku,text(r,sc),num(r,spend),num(r,imp)as i64,num(r,clicks)as i64,num(r,orders)as i64,num(r,revenue),path]).map_err(|e|e.to_string())?;ns+=1}let mut nf=0;for r in union.rows().skip(2){let entry=text(r,ue);let purchased=text(r,up);if entry.is_empty()||purchased.is_empty(){continue}tx.execute("INSERT INTO variant_report_flows VALUES(?1,?2,?3,?4,?5,?6,?7,?8,CURRENT_TIMESTAMP)ON CONFLICT(period_from,period_to,entry_sku,purchased_sku,campaign_id)DO UPDATE SET revenue=excluded.revenue,units=excluded.units,source_file=excluded.source_file,imported_at=CURRENT_TIMESTAMP",params![from,to,entry,purchased,text(r,uc),num(r,ur),num(r,uu)as i64,path]).map_err(|e|e.to_string())?;nf+=1}tx.commit().map_err(|e|e.to_string())?;Ok(json!({"periodFrom":from,"periodTo":to,"statisticsRows":ns,"flowRows":nf,"mode":"direct"}))}).await.map_err(|e|e.to_string())?}
+pub async fn import_variant_report(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Value, String> {
+    let state = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move||{if !Path::new(path.trim()).is_file(){return Err("找不到 Excel 文件".into())}let mut book=open_workbook_auto(path.trim()).map_err(|e|format!("无法读取 Excel：{e}"))?;let stats=book.worksheet_range("Statistics").map_err(|e|format!("缺少 Statistics 工作表：{e}"))?;let union=book.worksheet_range("Union").map_err(|e|format!("缺少 Union 工作表：{e}"))?;let (from,to)=period(&text(stats.rows().next().ok_or("Statistics 为空")?,0))?;let sh=headers(stats.rows().nth(1).ok_or("Statistics 缺少表头")?);let uh=headers(union.rows().nth(1).ok_or("Union 缺少表头")?);let ss=col(&sh,&["SKU"])?;let sc=col(&sh,&["广告活动 ID"])?;let spend=col(&sh,&["费用，₽"])?;let imp=col(&sh,&["展现量"])?;let clicks=col(&sh,&["点击次数"])?;let orders=col(&sh,&["已售商品数量，件"])?;let revenue=col(&sh,&["促销销售，{货币}"])?;let ue=col(&uh,&["促销中的 SKU"])?;let up=col(&uh,&["合并卡中的 SKU"])?;let uc=col(&uh,&["广告活动 ID"])?;let ur=col(&uh,&["促销销售，{货币}"])?;let uu=col(&uh,&["已售商品数量，件"])?;let mut c=db(&state)?;ensure(&c)?;let tx=c.transaction().map_err(|e|e.to_string())?;let mut ns=0;for r in stats.rows().skip(2){let sku=text(r,ss);if sku.is_empty()||sku=="0"{continue}tx.execute("INSERT INTO variant_report_stats VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,CURRENT_TIMESTAMP)ON CONFLICT(period_from,period_to,entry_sku,campaign_id)DO UPDATE SET spend=excluded.spend,impressions=excluded.impressions,clicks=excluded.clicks,ad_orders=excluded.ad_orders,ad_revenue=excluded.ad_revenue,source_file=excluded.source_file,imported_at=CURRENT_TIMESTAMP",params![from,to,sku,text(r,sc),num(r,spend),num(r,imp)as i64,num(r,clicks)as i64,num(r,orders)as i64,num(r,revenue),path]).map_err(|e|e.to_string())?;ns+=1}let mut nf=0;for r in union.rows().skip(2){let entry=text(r,ue);let purchased=text(r,up);if entry.is_empty()||purchased.is_empty(){continue}tx.execute("INSERT INTO variant_report_flows VALUES(?1,?2,?3,?4,?5,?6,?7,?8,CURRENT_TIMESTAMP)ON CONFLICT(period_from,period_to,entry_sku,purchased_sku,campaign_id)DO UPDATE SET revenue=excluded.revenue,units=excluded.units,source_file=excluded.source_file,imported_at=CURRENT_TIMESTAMP",params![from,to,entry,purchased,text(r,uc),num(r,ur),num(r,uu)as i64,path]).map_err(|e|e.to_string())?;nf+=1}tx.commit().map_err(|e|e.to_string())?;Ok(json!({"periodFrom":from,"periodTo":to,"statisticsRows":ns,"flowRows":nf,"mode":"direct"}))}).await.map_err(|e|e.to_string())?
+}
 
 #[tauri::command]
-pub async fn ad_attribution_command(state:State<'_,AppState>,from:String,to:String,series_id:Option<i64>)->Result<Value,String>{
- let state=background_state(&state)?;tauri::async_runtime::spawn_blocking(move||{
+pub async fn ad_attribution_command(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+    series_id: Option<i64>,
+) -> Result<Value, String> {
+    let state = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move||{
   let c=db(&state)?;ensure(&c)?;let series:Vec<Value>=c.prepare("SELECT id,name FROM product_series ORDER BY name").and_then(|mut s|s.query_map([],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"name":r.get::<_,String>(1)?})))?.collect()).map_err(|e|e.to_string())?;
   let Some(sid)=series_id else{return Ok(json!({"series":series,"rows":[],"summary":null,"coverage":{"own":"available","assisted":"unsupported","halo":"unsupported","marginal":"estimated"}}))};
   let start=chrono::NaiveDate::parse_from_str(&from,"%Y-%m-%d").map_err(|_|"开始日期无效")?;let end=chrono::NaiveDate::parse_from_str(&to,"%Y-%m-%d").map_err(|_|"结束日期无效")?;if end<start{return Err("结束日期不能早于开始日期".into())}let days=(end-start).num_days()+1;let prev_to=start-chrono::Duration::days(1);let prev_from=prev_to-chrono::Duration::days(days-1);
@@ -34,12 +114,64 @@ pub async fn ad_attribution_command(state:State<'_,AppState>,from:String,to:Stri
 }
 
 #[cfg(test)]
-mod tests{
- use super::*;
- #[test]fn confidence_rejects_tiny_spend_and_extreme_roas(){assert_eq!(sample_confidence(60.0,2.0,3,"complete",13.0),("LOW",true));assert_eq!(next_action(100.0,"LOW",true,"traffic_driver"),"INSUFFICIENT_DATA")}
- #[test]fn confidence_respects_complete_and_partial_days(){assert_eq!(sample_confidence(320.0,12.0,3,"complete",5000.0),("HIGH",false));assert_eq!(sample_confidence(320.0,12.0,3,"partial",5000.0),("LOW",false));assert_eq!(sample_confidence(0.0,0.0,0,"missing",0.0),("LOW",true))}
- #[test]fn low_confidence_never_priority_scales(){assert_ne!(next_action(95.0,"LOW",false,"traffic_driver"),"INCREASE_10");assert_eq!(next_action(70.0,"LOW",false,"traffic_driver"),"INCREASE_5")}
- #[test]fn cannibalization_has_priority_over_high_score(){assert_eq!(next_action(92.0,"HIGH",false,"cannibalizing_variant"),"REDUCE_15")}
- #[test]fn price_action_is_single_next_step(){assert_eq!(next_action(55.0,"HIGH",false,"profit_variant"),"PRICE_UP_3")}
- #[test]fn parses_ozon_report_period(){assert_eq!(period("推广分析 02.09.2026 — 08.09.2026").unwrap(),("2026-09-02".into(),"2026-09-08".into()))}
+mod tests {
+    use super::*;
+    #[test]
+    fn confidence_rejects_tiny_spend_and_extreme_roas() {
+        assert_eq!(
+            sample_confidence(60.0, 2.0, 3, "complete", 13.0),
+            ("LOW", true)
+        );
+        assert_eq!(
+            next_action(100.0, "LOW", true, "traffic_driver"),
+            "INSUFFICIENT_DATA"
+        )
+    }
+    #[test]
+    fn confidence_respects_complete_and_partial_days() {
+        assert_eq!(
+            sample_confidence(320.0, 12.0, 3, "complete", 5000.0),
+            ("HIGH", false)
+        );
+        assert_eq!(
+            sample_confidence(320.0, 12.0, 3, "partial", 5000.0),
+            ("LOW", false)
+        );
+        assert_eq!(
+            sample_confidence(0.0, 0.0, 0, "missing", 0.0),
+            ("LOW", true)
+        )
+    }
+    #[test]
+    fn low_confidence_never_priority_scales() {
+        assert_ne!(
+            next_action(95.0, "LOW", false, "traffic_driver"),
+            "INCREASE_10"
+        );
+        assert_eq!(
+            next_action(70.0, "LOW", false, "traffic_driver"),
+            "INCREASE_5"
+        )
+    }
+    #[test]
+    fn cannibalization_has_priority_over_high_score() {
+        assert_eq!(
+            next_action(92.0, "HIGH", false, "cannibalizing_variant"),
+            "REDUCE_15"
+        )
+    }
+    #[test]
+    fn price_action_is_single_next_step() {
+        assert_eq!(
+            next_action(55.0, "HIGH", false, "profit_variant"),
+            "PRICE_UP_3"
+        )
+    }
+    #[test]
+    fn parses_ozon_report_period() {
+        assert_eq!(
+            period("推广分析 02.09.2026 — 08.09.2026").unwrap(),
+            ("2026-09-02".into(), "2026-09-08".into())
+        )
+    }
 }

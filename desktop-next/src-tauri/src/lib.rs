@@ -10,20 +10,23 @@ use std::{
     },
 };
 use tauri::{Manager, State};
-mod insights;
-mod ad_series;
-mod ad_history;
-mod ad_experiments;
 mod ad_attribution;
-mod daily_tasks;
+mod ad_experiments;
+mod ad_history;
+mod ad_series;
 mod contracts;
+mod daily_tasks;
+mod insights;
 mod listing;
 mod mercadolibre;
+mod packing;
+mod price_center;
+mod product_master;
+mod product_worker;
+mod purchase_orders;
 mod secrets;
 mod wb;
 mod wb_shop_center;
-mod product_master;
-mod product_worker;
 static INVENTORY_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static SELLER_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static PERFORMANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
@@ -419,6 +422,8 @@ struct CredentialsForm {
     feishu_tracking_table_id: String,
     feishu_series_table_id: String,
     feishu_chat_id: String,
+    #[serde(default)]
+    feishu_packing_folder_token: String,
     local_tax_rate: String,
     local_payout_fee_rate: String,
     local_rub_per_cny: String,
@@ -2130,27 +2135,47 @@ fn advertising_series(
 }
 
 #[tauri::command]
-fn advertising_series_dataset(range: DateRange, skus: Vec<String>, name: String, shop_id: String, state: State<AppState>) -> Result<serde_json::Value,String> {
-    let snapshot = AppState { data_dir: state.data_dir.clone(), active_shop_id: Mutex::new(shop_id.clone()) };
-    if *state.active_shop_id.lock().map_err(|e|e.to_string())? != shop_id { return Err("店铺已切换，请重新计算".into()); }
-    let (id,shop_name)=active_shop_identity(&snapshot)?;
-    let c=db(&snapshot)?;
-    let cross=active_shop_kind(&snapshot)? == "cross_border";
-    let rate=rub_per_cny_for(&snapshot,&c)?;
-    c.execute_batch("BEGIN DEFERRED TRANSACTION").map_err(|e|e.to_string())?;
-    let mut result=ad_series::build(&c,&range.from,&range.to,skus,&name,display_amount(1.0,cross,rate))?;
-    result["shop"]=serde_json::json!({"id":id,"name":shop_name});
-    result["currency"]=serde_json::json!(if cross {"CNY"}else{"RUB"});
-    result["currencyConversion"]=serde_json::json!({"sourceCurrency":"RUB","rubPerCny":if cross {Some(rate)}else{None},"basis":"current_configured_rate"});
+fn advertising_series_dataset(
+    range: DateRange,
+    skus: Vec<String>,
+    name: String,
+    shop_id: String,
+    state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let snapshot = AppState {
+        data_dir: state.data_dir.clone(),
+        active_shop_id: Mutex::new(shop_id.clone()),
+    };
+    if *state.active_shop_id.lock().map_err(|e| e.to_string())? != shop_id {
+        return Err("店铺已切换，请重新计算".into());
+    }
+    let (id, shop_name) = active_shop_identity(&snapshot)?;
+    let c = db(&snapshot)?;
+    let cross = active_shop_kind(&snapshot)? == "cross_border";
+    let rate = rub_per_cny_for(&snapshot, &c)?;
+    c.execute_batch("BEGIN DEFERRED TRANSACTION")
+        .map_err(|e| e.to_string())?;
+    let mut result = ad_series::build(
+        &c,
+        &range.from,
+        &range.to,
+        skus,
+        &name,
+        display_amount(1.0, cross, rate),
+    )?;
+    result["shop"] = serde_json::json!({"id":id,"name":shop_name});
+    result["currency"] = serde_json::json!(if cross { "CNY" } else { "RUB" });
+    result["currencyConversion"] = serde_json::json!({"sourceCurrency":"RUB","rubPerCny":if cross {Some(rate)}else{None},"basis":"current_configured_rate"});
     Ok(result)
 }
 
 #[tauri::command]
-fn advertising_series_candidates(state: State<AppState>) -> Result<Vec<serde_json::Value>,String> {
-    let c=db(&state)?;
+fn advertising_series_candidates(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let c = db(&state)?;
     let mut stmt=c.prepare("WITH known AS (SELECT sku FROM products UNION SELECT sku FROM sales_daily UNION SELECT sku FROM ad_daily WHERE sku<>'' UNION SELECT sku FROM ad_partial_daily) SELECT k.sku,COALESCE(p.offer_id,''),COALESCE(NULLIF(p.name,''),(SELECT MAX(product_name) FROM sales_daily WHERE sku=k.sku),'') FROM known k LEFT JOIN products p ON p.sku=k.sku WHERE k.sku<>'' ORDER BY k.sku").map_err(|e|e.to_string())?;
     let rows=stmt.query_map([],|r|Ok(serde_json::json!({"sku":r.get::<_,String>(0)?,"offerId":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?}))).map_err(|e|e.to_string())?;
-    rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 fn campaign_metrics(
@@ -2382,8 +2407,23 @@ fn campaign_control_blocking(
         Ok((after_state, after_budget, message)) => {
             c.execute("UPDATE campaigns SET state=?1,budget=?2,budget_known=1,budget_updated_at=CURRENT_TIMESTAMP,budget_scale_version=1,updated_at=CURRENT_TIMESTAMP WHERE campaign_id=?3",params![after_state,after_budget,input.campaign_id]).map_err(|e|e.to_string())?;
             c.execute("UPDATE campaign_action_logs SET after_state=?1,after_budget=?2,status='success',message=?3 WHERE id=?4",params![after_state,after_budget,message,log_id]).map_err(|e|e.to_string())?;
-            let skus=c.prepare("SELECT DISTINCT sku FROM ad_daily WHERE campaign_id=?1 AND sku<>''").and_then(|mut q|q.query_map([&input.campaign_id],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()).unwrap_or_default();
-            if let Err(error)=ad_experiments::capture_operation(state,skus,"campaign_change",serde_json::json!({"campaignId":input.campaign_id,"budget":before_budget,"state":before_state}),serde_json::json!({"campaignId":input.campaign_id,"budget":after_budget,"state":after_state,"action":input.action}),&format!("campaign-operation:{log_id}")){return Ok(format!("{message}；实验记录失败：{error}"));}
+            let skus = c
+                .prepare("SELECT DISTINCT sku FROM ad_daily WHERE campaign_id=?1 AND sku<>''")
+                .and_then(|mut q| {
+                    q.query_map([&input.campaign_id], |r| r.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap_or_default();
+            if let Err(error) = ad_experiments::capture_operation(
+                state,
+                skus,
+                "campaign_change",
+                serde_json::json!({"campaignId":input.campaign_id,"budget":before_budget,"state":before_state}),
+                serde_json::json!({"campaignId":input.campaign_id,"budget":after_budget,"state":after_state,"action":input.action}),
+                &format!("campaign-operation:{log_id}"),
+            ) {
+                return Ok(format!("{message}；实验记录失败：{error}"));
+            }
             Ok(message)
         }
         Err(error) => {
@@ -7419,9 +7459,13 @@ fn sync_performance_ads_blocking(
     c.execute("INSERT INTO sync_logs(started_at,source,status) VALUES(CURRENT_TIMESTAMP,'Performance Ads','running')",[]).map_err(|e|e.to_string())?;
     let log_id = c.last_insert_rowid();
     let result = (|| -> Result<i64, String> {
-        let first=chrono::NaiveDate::parse_from_str(&range.from,"%Y-%m-%d").map_err(|_|"开始日期无效")?;
-        let last=chrono::NaiveDate::parse_from_str(&range.to,"%Y-%m-%d").map_err(|_|"结束日期无效")?;
-        if last<first || (last-first).num_days()>365 {return Err("请选择 1 至 366 天的广告同步范围".into());}
+        let first = chrono::NaiveDate::parse_from_str(&range.from, "%Y-%m-%d")
+            .map_err(|_| "开始日期无效")?;
+        let last =
+            chrono::NaiveDate::parse_from_str(&range.to, "%Y-%m-%d").map_err(|_| "结束日期无效")?;
+        if last < first || (last - first).num_days() > 365 {
+            return Err("请选择 1 至 366 天的广告同步范围".into());
+        }
         // Store totals do not prove historical SKU detail coverage.
         let token = performance_token(&c)?;
         let campaigns_payload = performance_get("/api/client/campaign", &token)?;
@@ -7546,8 +7590,19 @@ fn sync_performance_ads_blocking(
                 detail_tx.commit().map_err(|e| e.to_string())?;
             }
         }
-        let history_to=chrono::NaiveDate::parse_from_str(&range.to,"%Y-%m-%d").map_err(|_|"结束日期无效")?.min(today-chrono::Duration::days(2)).to_string();
-        count += ad_history::sync_with_refresh(&mut c,&token,&range.from,&history_to,&names,log_id,force)?;
+        let history_to = chrono::NaiveDate::parse_from_str(&range.to, "%Y-%m-%d")
+            .map_err(|_| "结束日期无效")?
+            .min(today - chrono::Duration::days(2))
+            .to_string();
+        count += ad_history::sync_with_refresh(
+            &mut c,
+            &token,
+            &range.from,
+            &history_to,
+            &names,
+            log_id,
+            force,
+        )?;
         Ok(count)
     })();
     match result {
@@ -7807,7 +7862,7 @@ async fn sync_all_data(
     let performance = tauri::async_runtime::spawn_blocking(move || {
         let count = sync_performance_ads_blocking(performance_range, force, &performance_state)?;
         ad_experiments::after_sync(&performance_state);
-        Ok::<i64,String>(count)
+        Ok::<i64, String>(count)
     });
     let finance = tauri::async_runtime::spawn_blocking(move || {
         sync_finance_blocking(range, force, &finance_state)
@@ -9001,6 +9056,7 @@ fn load_credentials_form(state: State<AppState>) -> Result<CredentialsForm, Stri
         feishu_tracking_table_id: setting(&c, "feishu_tracking_table_id"),
         feishu_series_table_id: setting(&c, "feishu_series_table_id"),
         feishu_chat_id: setting(&c, "feishu_chat_id"),
+        feishu_packing_folder_token: setting(&c, "feishu_packing_folder_token"),
         local_tax_rate: {
             let value = setting(&c, "local_tax_rate");
             if value.is_empty() {
@@ -9086,6 +9142,10 @@ fn save_credentials_form(form: CredentialsForm, state: State<AppState>) -> Resul
         ("feishu_tracking_table_id", form.feishu_tracking_table_id),
         ("feishu_series_table_id", form.feishu_series_table_id),
         ("feishu_chat_id", form.feishu_chat_id),
+        (
+            "feishu_packing_folder_token",
+            form.feishu_packing_folder_token,
+        ),
         ("local_tax_rate", form.local_tax_rate.trim().to_string()),
         (
             "local_payout_fee_rate",
@@ -9121,7 +9181,7 @@ fn save_credentials_form(form: CredentialsForm, state: State<AppState>) -> Resul
 #[tauri::command]
 fn export_api_bundle(state: State<AppState>) -> Result<String, String> {
     let c = db(&state)?;
-    let credentials = serde_json::json!({"seller_client_id":setting(&c,"seller_client_id"),"seller_api_key":secret_setting(&c,"seller_api_key")?,"performance_client_id":setting(&c,"performance_client_id"),"performance_client_secret":secret_setting(&c,"performance_client_secret")?,"ai_base_url":setting(&c,"ai_base_url"),"ai_api_key":secret_setting(&c,"ai_api_key")?,"ai_model":setting(&c,"ai_model"),"feishu_base_url":setting(&c,"feishu_base_url"),"feishu_app_id":setting(&c,"feishu_app_id"),"feishu_app_secret":secret_setting(&c,"feishu_app_secret")?,"feishu_app_token":setting(&c,"feishu_app_token"),"feishu_product_table_id":setting(&c,"feishu_product_table_id"),"feishu_weekly_table_id":setting(&c,"feishu_weekly_table_id"),"feishu_tracking_table_id":setting(&c,"feishu_tracking_table_id"),"feishu_series_table_id":setting(&c,"feishu_series_table_id"),"feishu_chat_id":setting(&c,"feishu_chat_id")});
+    let credentials = serde_json::json!({"seller_client_id":setting(&c,"seller_client_id"),"seller_api_key":secret_setting(&c,"seller_api_key")?,"performance_client_id":setting(&c,"performance_client_id"),"performance_client_secret":secret_setting(&c,"performance_client_secret")?,"ai_base_url":setting(&c,"ai_base_url"),"ai_api_key":secret_setting(&c,"ai_api_key")?,"ai_model":setting(&c,"ai_model"),"feishu_base_url":setting(&c,"feishu_base_url"),"feishu_app_id":setting(&c,"feishu_app_id"),"feishu_app_secret":secret_setting(&c,"feishu_app_secret")?,"feishu_app_token":setting(&c,"feishu_app_token"),"feishu_product_table_id":setting(&c,"feishu_product_table_id"),"feishu_weekly_table_id":setting(&c,"feishu_weekly_table_id"),"feishu_tracking_table_id":setting(&c,"feishu_tracking_table_id"),"feishu_series_table_id":setting(&c,"feishu_series_table_id"),"feishu_chat_id":setting(&c,"feishu_chat_id"),"feishu_packing_folder_token":setting(&c,"feishu_packing_folder_token")});
     let shop_id = state
         .active_shop_id
         .lock()
@@ -9187,6 +9247,7 @@ fn import_api_bundle(path: String, state: State<AppState>) -> Result<i64, String
         "feishu_tracking_table_id",
         "feishu_series_table_id",
         "feishu_chat_id",
+        "feishu_packing_folder_token",
     ] {
         if let Some(value) = values.get(key).and_then(|v| v.as_str()) {
             save_setting(&tx, key, value)?
@@ -9506,6 +9567,11 @@ pub fn run() {
             export_product_costs,
             export_product_analysis_json,
             export_dataset,
+            packing::export_packing_documents,
+            packing::packing_drafts,
+            packing::save_packing_draft,
+            packing::delete_packing_draft,
+            packing::upload_packing_documents_to_feishu,
             import_product_costs_csv,
             warehouse_mappings,
             save_warehouse_mapping,
@@ -9577,6 +9643,8 @@ pub fn run() {
             wb::send_wb_weekly,
             wb_shop_center::wb_shop_center,
             product_master::product_master,
+            price_center::price_center,
+            purchase_orders::purchase_order_command,
             listing::listing_settings,
             listing::save_listing_settings,
             listing::listing_rows,

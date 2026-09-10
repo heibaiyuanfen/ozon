@@ -20,9 +20,15 @@ struct TaskInput {
     repeat_mode: String,
 }
 
-fn normal() -> String { "normal".into() }
-fn daily() -> String { "daily".into() }
-fn default_due() -> String { "18:00".into() }
+fn normal() -> String {
+    "normal".into()
+}
+fn daily() -> String {
+    "daily".into()
+}
+fn default_due() -> String {
+    "18:00".into()
+}
 
 pub(super) fn ensure(c: &rusqlite::Connection) -> Result<(), String> {
     c.execute_batch(
@@ -48,27 +54,41 @@ pub(super) fn ensure(c: &rusqlite::Connection) -> Result<(), String> {
             PRIMARY KEY(task_id,day),
             FOREIGN KEY(task_id) REFERENCES daily_tasks(id) ON DELETE CASCADE
         );
-        CREATE INDEX IF NOT EXISTS idx_daily_task_logs_day ON daily_task_logs(day,status);"
-    ).map_err(|e| e.to_string())
+        CREATE INDEX IF NOT EXISTS idx_daily_task_logs_day ON daily_task_logs(day,status);",
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn valid_day(value: &str) -> Result<(), String> {
-    NaiveDate::parse_from_str(value, "%Y-%m-%d").map(|_|()).map_err(|_|"日期格式必须为 YYYY-MM-DD".into())
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map(|_| ())
+        .map_err(|_| "日期格式必须为 YYYY-MM-DD".into())
 }
 
 fn validate(input: &TaskInput) -> Result<(), String> {
-    if input.title.trim().is_empty() { return Err("任务名称不能为空".into()); }
-    if input.title.chars().count() > 100 { return Err("任务名称不能超过 100 个字符".into()); }
-    if !matches!(input.priority.as_str(), "low"|"normal"|"high"|"urgent") { return Err("优先级无效".into()); }
-    if !matches!(input.repeat_mode.as_str(), "none"|"daily"|"weekdays") { return Err("重复方式无效".into()); }
-    NaiveTime::parse_from_str(&input.due_time, "%H:%M").map_err(|_|"截止时间无效".to_string())?;
+    if input.title.trim().is_empty() {
+        return Err("任务名称不能为空".into());
+    }
+    if input.title.chars().count() > 100 {
+        return Err("任务名称不能超过 100 个字符".into());
+    }
+    if !matches!(
+        input.priority.as_str(),
+        "low" | "normal" | "high" | "urgent"
+    ) {
+        return Err("优先级无效".into());
+    }
+    if !matches!(input.repeat_mode.as_str(), "none" | "daily" | "weekdays") {
+        return Err("重复方式无效".into());
+    }
+    NaiveTime::parse_from_str(&input.due_time, "%H:%M").map_err(|_| "截止时间无效".to_string())?;
     Ok(())
 }
 
-fn list(c: &rusqlite::Connection, day: &str) -> Result<Value,String> {
+fn list(c: &rusqlite::Connection, day: &str) -> Result<Value, String> {
     valid_day(day)?;
-    let date=NaiveDate::parse_from_str(day,"%Y-%m-%d").unwrap();
-    let weekday=date.format("%u").to_string().parse::<u8>().unwrap_or(7);
+    let date = NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap();
+    let weekday = date.format("%u").to_string().parse::<u8>().unwrap_or(7);
     let mut stmt=c.prepare(
         "SELECT t.id,t.title,t.description,t.priority,t.due_time,t.repeat_mode,t.active,t.created_at,
                 COALESCE(l.progress,0),COALESCE(l.status,'pending'),COALESCE(l.note,''),l.updated_at,l.completed_at
@@ -84,29 +104,55 @@ fn list(c: &rusqlite::Connection, day: &str) -> Result<Value,String> {
         "status":r.get::<_,String>(9)?,"note":r.get::<_,String>(10)?,"updatedAt":r.get::<_,Option<String>>(11)?,
         "completedAt":r.get::<_,Option<String>>(12)?
     }))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    let now=Local::now();
-    let today=now.date_naive().to_string();
-    let current_time=now.format("%H:%M").to_string();
-    let enriched:Vec<_>=rows.into_iter().map(|mut row|{
-        let status=row["status"].as_str().unwrap_or("pending");
-        let due=row["dueTime"].as_str().unwrap_or("18:00");
-        let overdue=status!="completed" && (day<today.as_str() || (day==today && due<current_time.as_str()));
-        let due_soon=status!="completed" && day==today && !overdue && {
-            let due_time=NaiveTime::parse_from_str(due,"%H:%M").ok();
-            due_time.is_some_and(|t| (t-now.time()).num_minutes()<=60)
-        };
-        row["overdue"]=json!(overdue); row["dueSoon"]=json!(due_soon); row
-    }).collect();
-    let completed=enriched.iter().filter(|x|x["status"]=="completed").count();
-    let overdue=enriched.iter().filter(|x|x["overdue"]==true).count();
-    let progress=if enriched.is_empty(){0}else{enriched.iter().map(|x|x["progress"].as_i64().unwrap_or(0)).sum::<i64>()/enriched.len() as i64};
-    Ok(json!({"day":day,"tasks":enriched,"summary":{"total":enriched.len(),"completed":completed,"overdue":overdue,"progress":progress}}))
+    let now = Local::now();
+    let today = now.date_naive().to_string();
+    let current_time = now.format("%H:%M").to_string();
+    let enriched: Vec<_> = rows
+        .into_iter()
+        .map(|mut row| {
+            let status = row["status"].as_str().unwrap_or("pending");
+            let due = row["dueTime"].as_str().unwrap_or("18:00");
+            let overdue = status != "completed"
+                && (day < today.as_str() || (day == today && due < current_time.as_str()));
+            let due_soon = status != "completed" && day == today && !overdue && {
+                let due_time = NaiveTime::parse_from_str(due, "%H:%M").ok();
+                due_time.is_some_and(|t| (t - now.time()).num_minutes() <= 60)
+            };
+            row["overdue"] = json!(overdue);
+            row["dueSoon"] = json!(due_soon);
+            row
+        })
+        .collect();
+    let completed = enriched
+        .iter()
+        .filter(|x| x["status"] == "completed")
+        .count();
+    let overdue = enriched.iter().filter(|x| x["overdue"] == true).count();
+    let progress = if enriched.is_empty() {
+        0
+    } else {
+        enriched
+            .iter()
+            .map(|x| x["progress"].as_i64().unwrap_or(0))
+            .sum::<i64>()
+            / enriched.len() as i64
+    };
+    Ok(
+        json!({"day":day,"tasks":enriched,"summary":{"total":enriched.len(),"completed":completed,"overdue":overdue,"progress":progress}}),
+    )
 }
 
 #[tauri::command]
-pub async fn daily_task_command(state: State<'_,AppState>, command:String, day:Option<String>, id:Option<i64>, payload:Option<Value>) -> Result<Value,String> {
-    let command=command.clone(); let day=day.unwrap_or_else(||Local::now().date_naive().to_string());
-    let state=background_state(&state)?;
+pub async fn daily_task_command(
+    state: State<'_, AppState>,
+    command: String,
+    day: Option<String>,
+    id: Option<i64>,
+    payload: Option<Value>,
+) -> Result<Value, String> {
+    let command = command.clone();
+    let day = day.unwrap_or_else(|| Local::now().date_naive().to_string());
+    let state = background_state(&state)?;
     tauri::async_runtime::spawn_blocking(move||{
         let c=db(&state)?; ensure(&c)?;
         match command.as_str() {
@@ -136,7 +182,38 @@ pub async fn daily_task_command(state: State<'_,AppState>, command:String, day:O
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn validates_task_fields(){assert!(validate(&TaskInput{title:"复盘广告".into(),description:"".into(),priority:"high".into(),due_time:"18:30".into(),repeat_mode:"daily".into()}).is_ok());}
-    #[test] fn rejects_bad_due_time(){assert!(validate(&TaskInput{title:"x".into(),description:"".into(),priority:"normal".into(),due_time:"25:00".into(),repeat_mode:"daily".into()}).is_err());}
-    #[test] fn progress_summary_is_preserved(){let c=rusqlite::Connection::open_in_memory().unwrap();ensure(&c).unwrap();c.execute("INSERT INTO daily_tasks(title)VALUES('A')",[]).unwrap();c.execute("UPDATE daily_tasks SET created_at='2026-09-08'",[]).unwrap();c.execute("INSERT INTO daily_task_logs(task_id,day,progress,status)VALUES(1,'2026-09-08',60,'in_progress')",[]).unwrap();let v=list(&c,"2026-09-08").unwrap();assert_eq!(v["summary"]["progress"],60);}
+    #[test]
+    fn validates_task_fields() {
+        assert!(validate(&TaskInput {
+            title: "复盘广告".into(),
+            description: "".into(),
+            priority: "high".into(),
+            due_time: "18:30".into(),
+            repeat_mode: "daily".into()
+        })
+        .is_ok());
+    }
+    #[test]
+    fn rejects_bad_due_time() {
+        assert!(validate(&TaskInput {
+            title: "x".into(),
+            description: "".into(),
+            priority: "normal".into(),
+            due_time: "25:00".into(),
+            repeat_mode: "daily".into()
+        })
+        .is_err());
+    }
+    #[test]
+    fn progress_summary_is_preserved() {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        ensure(&c).unwrap();
+        c.execute("INSERT INTO daily_tasks(title)VALUES('A')", [])
+            .unwrap();
+        c.execute("UPDATE daily_tasks SET created_at='2026-09-08'", [])
+            .unwrap();
+        c.execute("INSERT INTO daily_task_logs(task_id,day,progress,status)VALUES(1,'2026-09-08',60,'in_progress')",[]).unwrap();
+        let v = list(&c, "2026-09-08").unwrap();
+        assert_eq!(v["summary"]["progress"], 60);
+    }
 }

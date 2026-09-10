@@ -656,7 +656,8 @@ fn evaluate(c: &mut Connection, id: i64) -> Result<Value> {
     let bq = quality(baseline["seriesDaily"].as_array().unwrap());
     let event_count:i64=c.query_row("SELECT COUNT(*) FROM ad_experiment_events WHERE experiment_id=?1 AND event_type IN ('manual_change','price_change')",[id],|r|r.get(0)).map_err(err)?;
     let executed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM ad_experiment_events WHERE experiment_id=?1 AND event_type IN ('execution_confirmed','campaign_change','price_change','manual_change'))",[id],|r|r.get(0)).map_err(err)?;
-    let multi = !executed || input.experiment_type == "mixed"
+    let multi = !executed
+        || input.experiment_type == "mixed"
         || input.notes.starts_with("由成功的平台操作自动创建")
         || event_count > 0
         || input
@@ -699,9 +700,12 @@ fn evaluate(c: &mut Connection, id: i64) -> Result<Value> {
     result["daily"] = json!(daily);
     result["baselineDaily"] = baseline["seriesDaily"].clone();
     result["currency"] = json!("RUB");
-    result["executionRecorded"]=json!(executed);
-    result["stageQualified"] = json!(result["stageQualified"].as_bool().unwrap_or(false) && executed);
-    if !executed {result["nextAction"]=json!("实验已建立，但尚无执行记录；请在现有平台控制执行，或确认已在平台完成计划修改后继续观察");}
+    result["executionRecorded"] = json!(executed);
+    result["stageQualified"] =
+        json!(result["stageQualified"].as_bool().unwrap_or(false) && executed);
+    if !executed {
+        result["nextAction"]=json!("实验已建立，但尚无执行记录；请在现有平台控制执行，或确认已在平台完成计划修改后继续观察");
+    }
     result["goals"] = json!({"stageGap":num(&now,"dailyUnits").map(|v|(target.daily_units-v).max(0.0)),"finalGap":num(&now,"dailyUnits").map(|v|(input.targets.final_target.daily_units-v).max(0.0)),"finalProgress":num(&now,"dailyUnits").map(|v|v/input.targets.final_target.daily_units*100.0)});
     let mut sku_scores = Vec::new();
     for sku in &skus {
@@ -853,11 +857,23 @@ fn action(c: &mut Connection, shop: &str, id: i64, action: &str, payload: Value)
         })
         .map_err(err)?;
     match action {
-        "confirm_execution"=>{
-            if status!="running" && status!="observing" {return Err("只有观察中的实验可确认执行".into());}
-            event(c,id,"","execution_confirmed",Value::Null,json!({"changes":input.changes}),&input.operator,"运营人员确认已在平台执行计划；系统未代为提交",Some(&format!("confirmed:{id}")))?;
-            evaluate(c,id)?;
-        },
+        "confirm_execution" => {
+            if status != "running" && status != "observing" {
+                return Err("只有观察中的实验可确认执行".into());
+            }
+            event(
+                c,
+                id,
+                "",
+                "execution_confirmed",
+                Value::Null,
+                json!({"changes":input.changes}),
+                &input.operator,
+                "运营人员确认已在平台执行计划；系统未代为提交",
+                Some(&format!("confirmed:{id}")),
+            )?;
+            evaluate(c, id)?;
+        }
         "start" => {
             if status != "draft" {
                 return Err("只有草稿可以启动；基准启动后不可重锁".into());
@@ -1086,15 +1102,91 @@ fn action(c: &mut Connection, shop: &str, id: i64, action: &str, payload: Value)
     detail(c, id)
 }
 
-fn demo_fixture()->Value {
-    let target=Target{daily_units:32.0,tacos_max:8.0,cvr:Some(1.4),cpa:Some(550.0),cpc:Some(8.5),acos:None};
-    let baseline=json!({"dailyUnits":28.43,"dailyRevenue":100000,"dailySpend":6200,"tacos":6.20,"cvr":1.23,"cpa":606.09,"cpc":7.45,"dailyAdOrders":10.23,"dailyAdRevenue":28000,"clicks":2500,"adOrders":31});
-    let current=json!({"dailyUnits":35,"dailyRevenue":110000,"dailySpend":7000,"tacos":6.36,"cvr":1.50,"cpa":470,"cpc":7.0,"dailyAdOrders":14.9,"dailyAdRevenue":35000,"clicks":3000,"adOrders":45});
+fn demo_fixture() -> Value {
+    let target = Target {
+        daily_units: 32.0,
+        tacos_max: 8.0,
+        cvr: Some(1.4),
+        cpa: Some(550.0),
+        cpc: Some(8.5),
+        acos: None,
+    };
+    let baseline = json!({"dailyUnits":28.43,"dailyRevenue":100000,"dailySpend":6200,"tacos":6.20,"cvr":1.23,"cpa":606.09,"cpc":7.45,"dailyAdOrders":10.23,"dailyAdRevenue":28000,"clicks":2500,"adOrders":31});
+    let current = json!({"dailyUnits":35,"dailyRevenue":110000,"dailySpend":7000,"tacos":6.36,"cvr":1.50,"cpa":470,"cpc":7.0,"dailyAdOrders":14.9,"dailyAdRevenue":35000,"clicks":3000,"adOrders":45});
     let daily:Vec<Value>=(8..=10).map(|d|json!({"date":format!("2026-09-{d:02}"),"totalUnits":35,"spend":7000,"tacos":6.36,"conversionRate":1.5,"cpa":470,"salesStatus":"complete","advertisingStatus":"complete"})).collect();
-    let mut evaluation=evaluate_metrics(&baseline,&current,&daily,&target,10.0,3,false,Some(30.0),&json!({"status":"complete","missingDays":0}));
-    let changes:Vec<_>=[("RED","increase_budget",12000.0,Some(20000.0)),("BLUE","increase_budget",4500.0,Some(6500.0)),("GREEN","reduce_budget",4900.0,Some(4000.0)),("YELLOW","pause",16000.0,None)].iter().map(|(sku,a,b,n)|Change{sku:sku.to_string(),action:a.to_string(),campaign_id:None,before_budget:Some(*b),after_budget:*n,before_price:None,after_price:None,before_status:Some("Active".into()),after_status:Some(if *a=="pause"{"Paused"}else{"Active"}.into()),reason:"用户给定的开发测试案例，非真实操作".into()}).collect();
-    let input=Create{name:"[开发示例] GJYB001 预算重新分配 V1".into(),experiment_type:"budget_reallocation".into(),series_id:None,baseline_start:"2026-09-04".into(),baseline_end:"2026-09-06".into(),observation_days:3,operator:"Fixture".into(),notes:"基准来自任务描述；观察值为演示假设，不代表真实业绩".into(),changes:changes.clone(),targets:Targets{stages:vec![target.clone(),Target{daily_units:42.0,..target.clone()},Target{daily_units:45.0,tacos_max:9.0,..target.clone()},Target{daily_units:50.0,tacos_max:10.0,..target.clone()}],final_target:Target{daily_units:50.0,tacos_max:10.0,..target},preferred_tacos_min:6.0,preferred_tacos_max:8.0,tacos_hard_limit:10.0}};
-    evaluation["skuScores"]=json!([]);evaluation["daily"]=json!(daily);evaluation["baselineDaily"]=json!((4..=6).map(|d|json!({"date":format!("2026-09-{d:02}"),"totalUnits":28.43,"spend":6200,"tacos":6.2,"conversionRate":1.23,"cpa":606.09})).collect::<Vec<_>>());evaluation["goals"]=json!({"stageGap":0,"finalGap":15,"finalProgress":70});
+    let mut evaluation = evaluate_metrics(
+        &baseline,
+        &current,
+        &daily,
+        &target,
+        10.0,
+        3,
+        false,
+        Some(30.0),
+        &json!({"status":"complete","missingDays":0}),
+    );
+    let changes: Vec<_> = [
+        ("RED", "increase_budget", 12000.0, Some(20000.0)),
+        ("BLUE", "increase_budget", 4500.0, Some(6500.0)),
+        ("GREEN", "reduce_budget", 4900.0, Some(4000.0)),
+        ("YELLOW", "pause", 16000.0, None),
+    ]
+    .iter()
+    .map(|(sku, a, b, n)| Change {
+        sku: sku.to_string(),
+        action: a.to_string(),
+        campaign_id: None,
+        before_budget: Some(*b),
+        after_budget: *n,
+        before_price: None,
+        after_price: None,
+        before_status: Some("Active".into()),
+        after_status: Some(if *a == "pause" { "Paused" } else { "Active" }.into()),
+        reason: "用户给定的开发测试案例，非真实操作".into(),
+    })
+    .collect();
+    let input = Create {
+        name: "[开发示例] GJYB001 预算重新分配 V1".into(),
+        experiment_type: "budget_reallocation".into(),
+        series_id: None,
+        baseline_start: "2026-09-04".into(),
+        baseline_end: "2026-09-06".into(),
+        observation_days: 3,
+        operator: "Fixture".into(),
+        notes: "基准来自任务描述；观察值为演示假设，不代表真实业绩".into(),
+        changes: changes.clone(),
+        targets: Targets {
+            stages: vec![
+                target.clone(),
+                Target {
+                    daily_units: 42.0,
+                    ..target.clone()
+                },
+                Target {
+                    daily_units: 45.0,
+                    tacos_max: 9.0,
+                    ..target.clone()
+                },
+                Target {
+                    daily_units: 50.0,
+                    tacos_max: 10.0,
+                    ..target.clone()
+                },
+            ],
+            final_target: Target {
+                daily_units: 50.0,
+                tacos_max: 10.0,
+                ..target
+            },
+            preferred_tacos_min: 6.0,
+            preferred_tacos_max: 8.0,
+            tacos_hard_limit: 10.0,
+        },
+    };
+    evaluation["skuScores"] = json!([]);
+    evaluation["daily"] = json!(daily);
+    evaluation["baselineDaily"]=json!((4..=6).map(|d|json!({"date":format!("2026-09-{d:02}"),"totalUnits":28.43,"spend":6200,"tacos":6.2,"conversionRate":1.23,"cpa":606.09})).collect::<Vec<_>>());
+    evaluation["goals"] = json!({"stageGap":0,"finalGap":15,"finalProgress":70});
     json!({"id":-1,"isFixture":true,"input":input,"status":"success","stageIndex":0,"createdAt":"2026-09-07","observationStart":"2026-09-08","evaluation":evaluation,"events":changes.iter().enumerate().map(|(i,c)|json!({"id":i,"time":"2026-09-07 10:00","sku":c.sku,"type":c.action,"before":c.before_budget.map(|x|x.to_string()),"after":c.after_budget.map(|x|x.to_string()).unwrap_or("Paused".into()),"operator":"Fixture","reason":c.reason})).collect::<Vec<_>>(),"stableVersions":[],"ai":null})
 }
 

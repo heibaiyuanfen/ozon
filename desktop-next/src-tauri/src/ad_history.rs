@@ -372,25 +372,43 @@ mod tests {
     #[test]
     #[ignore = "Live CSV evidence download for explicitly selected database"]
     fn download_csv_evidence() {
-        let c=Connection::open(std::env::var("OZON_HISTORY_TEST_DB").unwrap()).unwrap();
-        let token=super::super::performance_token(&c).unwrap();
+        let c = Connection::open(std::env::var("OZON_HISTORY_TEST_DB").unwrap()).unwrap();
+        let token = super::super::performance_token(&c).unwrap();
         let response=super::super::performance_post("/api/client/statistics",&token,&json!({"campaigns":["37641191"],"dateFrom":"2026-08-31","dateTo":"2026-09-06","groupBy":"DATE"})).unwrap();
-        let uuid=response.get("UUID").or_else(||response.get("uuid")).and_then(Value::as_str).unwrap();
-        assert!(uuid.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'));
-        let start=std::time::Instant::now();
+        let uuid = response
+            .get("UUID")
+            .or_else(|| response.get("uuid"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(uuid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        let start = std::time::Instant::now();
         loop {
-            let status=super::super::performance_get(&format!("/api/client/statistics/{uuid}"),&token).unwrap();
-            let state=status.get("state").or_else(||status.get("status")).and_then(Value::as_str).unwrap_or("");
-            if state=="OK" || state=="SUCCESS" {
-                let response=ureq::get(&format!("https://api-performance.ozon.ru/api/client/statistics/report?UUID={uuid}")).set("Authorization",&format!("Bearer {token}")).call().unwrap();
-                let mut bytes=Vec::new();
-                std::io::Read::read_to_end(&mut response.into_reader(),&mut bytes).unwrap();
-                std::fs::write(std::env::var("OZON_CSV_EVIDENCE_OUTPUT").unwrap(),&bytes).unwrap();
-                println!("Downloaded {} bytes of official CSV report",bytes.len());
+            let status =
+                super::super::performance_get(&format!("/api/client/statistics/{uuid}"), &token)
+                    .unwrap();
+            let state = status
+                .get("state")
+                .or_else(|| status.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if state == "OK" || state == "SUCCESS" {
+                let response = ureq::get(&format!(
+                    "https://api-performance.ozon.ru/api/client/statistics/report?UUID={uuid}"
+                ))
+                .set("Authorization", &format!("Bearer {token}"))
+                .call()
+                .unwrap();
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes).unwrap();
+                std::fs::write(std::env::var("OZON_CSV_EVIDENCE_OUTPUT").unwrap(), &bytes).unwrap();
+                println!("Downloaded {} bytes of official CSV report", bytes.len());
                 break;
             }
-            assert!(!["ERROR","FAILED","CANCELLED"].contains(&state),"report failed");
-            assert!(start.elapsed().as_secs()<180,"report timed out");
+            assert!(
+                !["ERROR", "FAILED", "CANCELLED"].contains(&state),
+                "report failed"
+            );
+            assert!(start.elapsed().as_secs() < 180, "report timed out");
             std::thread::sleep(std::time::Duration::from_secs(3));
         }
     }

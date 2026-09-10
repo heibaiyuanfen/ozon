@@ -604,6 +604,25 @@ export async function exportDataset(
 ): Promise<string> {
   return invoke("export_dataset", { kind, range });
 }
+
+export interface PackingItemInput {
+  sku: string; productName: string; barcodeLabel: string; battery: string;
+  cartons: number; quantityPerCarton: number; weightKg: number;
+  lengthCm: number; widthCm: number; heightCm: number; remark: string;
+}
+export interface PackingExportInput {
+  batchCode: string; title: string; platform: string; shopName: string;
+  shippingDate: string; notice: string; items: PackingItemInput[];
+}
+export interface PackingExportResult { xlsxPath: string; pdfPath: string; cartonCount: number; totalQuantity: number; }
+export interface PackingDraft { id: number; name: string; payload: PackingExportInput; updatedAt: string; }
+export async function exportPackingDocuments(input: PackingExportInput): Promise<PackingExportResult> {
+  return invoke("export_packing_documents", { input });
+}
+export async function packingDrafts(): Promise<PackingDraft[]> { return invoke("packing_drafts"); }
+export async function savePackingDraft(id: number | null, name: string, payload: PackingExportInput): Promise<number> { return invoke("save_packing_draft", { id, name, payload }); }
+export async function deletePackingDraft(id: number): Promise<void> { return invoke("delete_packing_draft", { id }); }
+export async function uploadPackingDocumentsToFeishu(xlsxPath: string, pdfPath: string): Promise<{xlsxFileToken:string;pdfFileToken:string}> { return invoke("upload_packing_documents_to_feishu", { xlsxPath, pdfPath }); }
 export async function importProductCostsCsv(path: string): Promise<number> {
   return invoke("import_product_costs_csv", { path });
 }

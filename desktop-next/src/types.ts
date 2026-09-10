@@ -7,6 +7,7 @@ export type PageKey =
   | "ad_attribution"
   | "daily_tasks"
   | "contracts"
+  | "purchase_orders"
   | "reports"
   | "monthly_profit"
   | "weekly_report"
@@ -17,6 +18,7 @@ export type PageKey =
   | "inventory"
   | "fbs"
   | "supply"
+  | "packing"
   | "sync"
   | "feishu"
   | "wb"
@@ -305,6 +307,7 @@ export interface CredentialsForm {
   feishuTrackingTableId: string;
   feishuSeriesTableId: string;
   feishuChatId: string;
+  feishuPackingFolderToken: string;
   localTaxRate: string;
   localPayoutFeeRate: string;
   localRubPerCny: string;
