@@ -1218,3 +1218,6 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 增加 XLSX ZIP/XML 完整性和关键公式测试；最终测试、构建及 EXE 哈希见后续交付记录。
 - 验证结果：`cargo check --locked` 与 `pnpm build` 通过；全量 Rust 测试 133 passed / 4 ignored；采购单 3 项专项测试通过。
 - 正式 Release 已通过规定脚本构建并覆盖根目录 EXE；产物与根目录 SHA-256 均为 `FF9C7195166A7CABA827EB5EFECA23F2C54482EFCD150A34EF966F1117292268`，大小 `30,456,320` bytes；启动后进程正常响应。
+- Excel 空白/修复问题：根据 Excel 恢复日志确认 `/xl/worksheets/sheet1.xml` 被整体替换；根因是生成器把 `mergeCells` 写在 `autoFilter` 前，违反 SpreadsheetML 工作表子元素顺序。现已调整为 `sheetData → autoFilter → mergeCells → pageMargins → pageSetup`，并增加顺序回归断言。
+- 修复验证：`cargo check --locked`、`pnpm build` 通过；Rust 全量测试 133 passed / 4 ignored。正式脚本重新构建并覆盖根目录 EXE，Release/root SHA-256 均为 `9F52DD639DEDE4C0C419C6DBC22958DA70DEE75861A407BEBB4C59F0FDAF166E`，大小 `30,456,320` bytes；根目录进程已重新启动。当前非交互登录会话无法创建 Excel COM 实例，因此真实 Excel 打开验收需由用户重新导出后完成。
+- 打印/PDF 空白修复：采购合同样式中的全局 `body * { visibility: hidden }` 会误伤采购单打印，现已限定为合同页面内部；采购单增加独立的打印根布局重置、隐藏非打印控件、A4 横向页面、表格固定布局及分页保护。`pnpm build`、`cargo check --locked`、Rust 全量测试（133 passed / 4 ignored）通过；正式脚本构建并覆盖根目录 EXE，Release/root SHA-256 均为 `8407E00FA0329AF56D1EFAA738E8852ED5776CC8F9C018502782828ECCAA9745`，大小 `30,456,320` bytes，根目录程序已启动且响应正常。

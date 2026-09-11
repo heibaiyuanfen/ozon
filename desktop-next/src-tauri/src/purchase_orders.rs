@@ -301,7 +301,7 @@ fn sheet_xml(v: &PurchaseOrderInput) -> String {
         r#"<row r="{total}" ht="26" customHeight="1">{c}</row>"#
     ));
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="18"/><cols><col min="1" max="1" width="16" customWidth="1"/><col min="2" max="2" width="12" customWidth="1"/><col min="3" max="3" width="22" customWidth="1"/><col min="4" max="23" width="13" customWidth="1"/></cols><sheetData>{rows}</sheetData><mergeCells count="3"><mergeCell ref="A1:W1"/><mergeCell ref="A2:W2"/><mergeCell ref="A{total}:M{total}"/></mergeCells><autoFilter ref="A3:W{}"/><pageMargins left="0.2" right="0.2" top="0.35" bottom="0.35" header="0.15" footer="0.15"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="18"/><cols><col min="1" max="1" width="16" customWidth="1"/><col min="2" max="2" width="12" customWidth="1"/><col min="3" max="3" width="22" customWidth="1"/><col min="4" max="23" width="13" customWidth="1"/></cols><sheetData>{rows}</sheetData><autoFilter ref="A3:W{}"/><mergeCells count="3"><mergeCell ref="A1:W1"/><mergeCell ref="A2:W2"/><mergeCell ref="A{total}:M{total}"/></mergeCells><pageMargins left="0.2" right="0.2" top="0.35" bottom="0.35" header="0.15" footer="0.15"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>"#,
         total - 1
     )
 }
@@ -438,6 +438,10 @@ mod tests {
             .unwrap();
         assert!(s.contains("D4*O4"));
         assert!(s.contains("SUM(Q4:Q4)"));
+        assert!(
+            s.find("<autoFilter").unwrap() < s.find("<mergeCells").unwrap(),
+            "worksheet child elements must follow the OOXML schema order"
+        );
         drop(z);
         let _ = fs::remove_file(p);
     }
