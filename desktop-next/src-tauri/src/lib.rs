@@ -1211,21 +1211,115 @@ pub(crate) fn seller_post(
     let mut response = None;
     let max_attempts = if path == "/v1/analytics/data" { 2 } else { 4 };
     for attempt in 0..max_attempts {
-        match ureq::post(&url).set("Client-Id",&client_id).set("Api-Key",&api_key).set("Content-Type","application/json").set("Accept","application/json").set("User-Agent","OzonERPDesktop/0.1").send_string(&body_text){
-            Ok(value)=>{response=Some(value);break},
-            Err(ureq::Error::Status(status,value)) if status==429||matches!(status,500|502|503|504)=>{
-                if attempt+1==max_attempts{return Err(if status==429{format!("Ozon Seller API 接口 {path} 自动等待并重试后仍被限频（HTTP 429）。请不要连续点击同步，稍后再试；已有本地缓存不会被清除。") }else{format!("Ozon Seller API 接口 {path} 暂时不可用（HTTP {status}），自动重试后仍未恢复。")})}
-                let retry_after=value.header("Retry-After").and_then(|v|v.trim().parse::<u64>().ok());
-                let delay=if status==429{retry_after.unwrap_or(65).clamp(1,180)}else{2u64.pow(attempt+1).min(15)};
+        match ureq::post(&url)
+            .set("Client-Id", &client_id)
+            .set("Api-Key", &api_key)
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json")
+            .set("User-Agent", "OzonERPDesktop/0.1")
+            .send_string(&body_text)
+        {
+            Ok(value) => {
+                response = Some(value);
+                break;
+            }
+            Err(ureq::Error::Status(status, value))
+                if status == 429 || matches!(status, 500 | 502 | 503 | 504) =>
+            {
+                if attempt + 1 == max_attempts {
+                    let detail =
+                        seller_error_detail(value.into_string().unwrap_or_default().as_str());
+                    return Err(if status == 429 {
+                        format!("Ozon Seller API 接口 {path} 自动等待并重试后仍被限频（HTTP 429）。请不要连续点击同步，稍后再试；已有本地缓存不会被清除。{detail}")
+                    } else {
+                        format!("Ozon Seller API 接口 {path} 暂时不可用（HTTP {status}），自动重试后仍未恢复。{detail}")
+                    });
+                }
+                let retry_after = value
+                    .header("Retry-After")
+                    .and_then(|v| v.trim().parse::<u64>().ok());
+                let delay = if status == 429 {
+                    retry_after.unwrap_or(65).clamp(1, 180)
+                } else {
+                    2u64.pow(attempt + 1).min(15)
+                };
                 std::thread::sleep(std::time::Duration::from_secs(delay));
-            },
-            Err(ureq::Error::Status(status,_)) if matches!(status,401|403)=>return Err(format!("Ozon Seller API 认证失败（HTTP {status}，接口 {path}），请检查当前店铺 API 凭证与权限。")),
-            Err(error)=>return Err(format!("Ozon Seller API 请求失败（{path}）：{error}")),
+            }
+            Err(ureq::Error::Status(status, value)) if matches!(status, 401 | 403) => {
+                let detail = seller_error_detail(value.into_string().unwrap_or_default().as_str());
+                return Err(format!("Ozon Seller API 认证失败（HTTP {status}，接口 {path}），请检查当前店铺 API 凭证与权限。{detail}"));
+            }
+            Err(ureq::Error::Status(status, value)) => {
+                let detail = seller_error_detail(value.into_string().unwrap_or_default().as_str());
+                return Err(format!(
+                    "Ozon Seller API 请求被拒绝（HTTP {status}，接口 {path}）。{detail}"
+                ));
+            }
+            Err(error) => return Err(format!("Ozon Seller API 请求失败（{path}）：{error}")),
         }
     }
     let response = response.ok_or_else(|| format!("Ozon Seller API 接口 {path} 未返回响应"))?;
     let raw = response.into_string().map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| format!("Ozon Seller API 返回无法解析的 JSON：{e}"))
+}
+
+fn seller_error_detail(raw: &str) -> String {
+    let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return " Ozon 未返回错误详情。".into();
+    }
+    let clipped = compact.chars().take(800).collect::<String>();
+    format!(" Ozon 返回：{clipped}")
+}
+
+#[cfg(test)]
+mod seller_api_error_tests {
+    use super::{finance_timestamp, normalize_finance_accrual, seller_error_detail};
+    use std::collections::HashMap;
+
+    #[test]
+    fn preserves_json_error_detail_and_normalizes_whitespace() {
+        let detail = seller_error_detail("{\n  \"code\": 3, \"message\": \"invalid date\"\n}");
+        assert_eq!(
+            detail,
+            " Ozon 返回：{ \"code\": 3, \"message\": \"invalid date\" }"
+        );
+    }
+
+    #[test]
+    fn explains_missing_error_body() {
+        assert_eq!(seller_error_detail("  \n "), " Ozon 未返回错误详情。");
+    }
+
+    #[test]
+    fn finance_timestamp_uses_ozon_millisecond_utc_format() {
+        assert_eq!(
+            finance_timestamp("2026-09-05", false),
+            "2026-09-05T00:00:00.000Z"
+        );
+        assert_eq!(
+            finance_timestamp("2026-09-12", true),
+            "2026-09-12T23:59:59.999Z"
+        );
+    }
+
+    #[test]
+    fn normalizes_new_finance_accrual_for_existing_reports() {
+        let accrual = serde_json::json!({
+            "date":"2026-09-10","type_id":32,"unit_number":"123-1",
+            "total_amount":{"amount":"82.50"},
+            "posting":{"delivery_schema":"FBS","products":[{"sku":"7001","commission":{"seller_price":{"amount":"100"},"sale_commission":{"amount":"-12.5"}},"delivery":{"total_accrued":{"amount":"-5"},"services":[]}}]},
+            "item_fees":{"fees":[]}
+        });
+        let names = HashMap::from([(32, "Logistic".to_string())]);
+        let normalized = normalize_finance_accrual("2026-09-10", 0, &accrual, &names);
+        assert_eq!(normalized["amount"], 82.5);
+        assert_eq!(normalized["accruals_for_sale"], 100.0);
+        assert_eq!(normalized["sale_commission"], -12.5);
+        assert_eq!(normalized["delivery_charge"], -5.0);
+        assert_eq!(normalized["items"][0]["sku"], "7001");
+        assert_eq!(normalized["posting"]["posting_number"], "123-1");
+    }
 }
 
 fn performance_token(c: &Connection) -> Result<String, String> {
@@ -5586,12 +5680,12 @@ fn finance_service_category(name: &str) -> (&'static str, &'static str) {
     if [
         "promotion",
         "costperclick",
+        "payperclick",
         "externalpromotion",
         "review",
         "premium",
         "subscription",
         "cashback",
-        "starsmembership",
         "advert",
         "реклам",
         "продвиж",
@@ -5856,7 +5950,7 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
     let c = db(&state)?;
     let rate = rub_per_cny_for(&state, &c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS business_report_cache(range_key TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
-    let fingerprint:String=c.query_row("SELECT 'finance-v6-finance-delivered-first|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let fingerprint:String=c.query_row("SELECT 'finance-v7-ozon-advertising-types|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     let cache_key = format!("{}|{}", range.from, range.to);
     if let Ok(payload) = c.query_row(
         "SELECT payload FROM business_report_cache WHERE range_key=?1 AND fingerprint=?2",
@@ -7664,6 +7758,107 @@ fn finance_period(
     )
 }
 
+fn finance_timestamp(day: &str, end_of_day: bool) -> String {
+    format!(
+        "{day}T{}",
+        if end_of_day {
+            "23:59:59.999Z"
+        } else {
+            "00:00:00.000Z"
+        }
+    )
+}
+
+fn normalize_finance_accrual(
+    day: &str,
+    index: usize,
+    accrual: &serde_json::Value,
+    type_names: &std::collections::HashMap<i64, String>,
+) -> serde_json::Value {
+    let type_id = accrual.get("type_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let unit_number = json_text(accrual.get("unit_number"));
+    let operation_type = type_names
+        .get(&type_id)
+        .cloned()
+        .unwrap_or_else(|| format!("AccrualType{type_id}"));
+    let products = accrual
+        .pointer("/posting/products")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let items = products
+        .iter()
+        .map(|product| serde_json::json!({"sku": json_text(product.get("sku"))}))
+        .collect::<Vec<_>>();
+    let accruals_for_sale = products
+        .iter()
+        .map(|product| json_f64(product.pointer("/commission/seller_price")).unwrap_or(0.0))
+        .sum::<f64>();
+    let sale_commission = products
+        .iter()
+        .map(|product| json_f64(product.pointer("/commission/sale_commission")).unwrap_or(0.0))
+        .sum::<f64>();
+    let delivery_charge = products
+        .iter()
+        .map(|product| json_f64(product.pointer("/delivery/total_accrued")).unwrap_or(0.0))
+        .sum::<f64>();
+    let mut services = Vec::new();
+    let mut push_service = |fee: &serde_json::Value| {
+        let fee_type = fee.get("type_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        services.push(serde_json::json!({
+            "name": type_names.get(&fee_type).cloned().unwrap_or_else(|| format!("AccrualType{fee_type}")),
+            "price": json_f64(fee.get("accrued")).unwrap_or(0.0)
+        }));
+    };
+    for product in &products {
+        for fee in product
+            .pointer("/delivery/services")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            push_service(fee);
+        }
+    }
+    for group in accrual
+        .pointer("/item_fees/fees")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        for fee in group
+            .get("fees")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            push_service(fee);
+        }
+    }
+    if let Some(fee) = accrual.get("non_item_fee").filter(|v| !v.is_null()) {
+        push_service(fee);
+    }
+    serde_json::json!({
+        "operation_id": format!("accrual-{day}-{unit_number}-{type_id}-{index}"),
+        "operation_date": json_text(accrual.get("date")),
+        "operation_type": operation_type,
+        "operation_type_name": operation_type,
+        "posting": {
+            "posting_number": unit_number,
+            "order_date": day,
+            "delivery_schema": json_text(accrual.pointer("/posting/delivery_schema"))
+        },
+        "items": items,
+        "amount": json_f64(accrual.get("total_amount")).unwrap_or(0.0),
+        "delivery_charge": delivery_charge,
+        "return_delivery_charge": 0.0,
+        "accruals_for_sale": accruals_for_sale,
+        "sale_commission": sale_commission,
+        "services": services,
+        "accrual_raw": accrual
+    })
+}
+
 fn sync_finance_blocking(range: DateRange, force: bool, state: &AppState) -> Result<i64, String> {
     let _sync_guard = FINANCE_SYNC_LOCK
         .try_lock()
@@ -7684,47 +7879,66 @@ fn sync_finance_blocking(range: DateRange, force: bool, state: &AppState) -> Res
             return Ok(0);
         };
         let mut operations = Vec::new();
-        let ranges = {
-            let mut stmt=c.prepare("WITH RECURSIVE m(v) AS(SELECT date(?1,'start of month') UNION ALL SELECT date(v,'+1 month') FROM m WHERE v<date(?2,'start of month'))SELECT max(v,?1),min(date(v,'+1 month','-1 day'),?2)FROM m").map_err(|e|e.to_string())?;
-            let values = stmt
-                .query_map(params![range.from, range.to], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })
-                .map_err(|e| e.to_string())?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-            values
-        };
-        for (from, to) in &ranges {
-            let mut page = 1;
+        let types = seller_post(&c, "/v1/finance/accrual/types", &serde_json::json!({}))?;
+        let type_names = types
+            .get("accrual_types")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                Some((
+                    row.get("id")?.as_i64()?,
+                    json_text(row.get("name")).trim().to_string(),
+                ))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let from_date = chrono::NaiveDate::parse_from_str(&range.from, "%Y-%m-%d")
+            .map_err(|_| "Finance 同步开始日期格式无效".to_string())?;
+        let to_date = chrono::NaiveDate::parse_from_str(&range.to, "%Y-%m-%d")
+            .map_err(|_| "Finance 同步结束日期格式无效".to_string())?;
+        let mut date = from_date;
+        while date <= to_date {
+            let day = date.format("%Y-%m-%d").to_string();
+            let mut last_id = String::new();
+            let mut page = 1usize;
             loop {
                 let payload = seller_post(
                     &c,
-                    "/v3/finance/transaction/list",
-                    &serde_json::json!({"filter":{"date":{"from":format!("{from}T00:00:00Z"),"to":format!("{to}T23:59:59Z")},"operation_type":[],"posting_number":"","transaction_type":"all"},"page":page,"page_size":1000}),
-                )?;
-                let result = payload.get("result").unwrap_or(&payload);
-                let batch = result
-                    .get("operations")
+                    "/v1/finance/accrual/by-day",
+                    &serde_json::json!({"date":day,"last_id":last_id}),
+                )
+                .map_err(|error| {
+                    format!("Finance 应计明细同步失败（日期 {day}，第 {page} 页）：{error}；已有本地财务缓存未清除。")
+                })?;
+                let batch = payload
+                    .get("accruals")
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
-                let page_count = result
-                    .get("page_count")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(1);
-                operations.extend(batch.iter().cloned());
-                if batch.is_empty() || page >= page_count {
+                let base = operations.len();
+                operations.extend(batch.iter().enumerate().map(|(index, row)| {
+                    normalize_finance_accrual(&day, base + index, row, &type_names)
+                }));
+                let next_id = json_text(payload.get("last_id"));
+                if batch.is_empty() || next_id.is_empty() || next_id == last_id {
                     break;
                 }
+                last_id = next_id;
                 page += 1;
             }
+            date += chrono::Duration::days(1);
         }
         let statement = seller_post(
             &c,
             "/v1/finance/cash-flow-statement/list",
-            &serde_json::json!({"date":{"from":format!("{}T00:00:00Z",range.from),"to":format!("{}T23:59:59Z",range.to)},"with_details":true,"page":1,"page_size":100}),
-        )?;
+            &serde_json::json!({"date":{"from":finance_timestamp(&range.from, false),"to":finance_timestamp(&range.to, true)},"with_details":true,"page":1,"page_size":100}),
+        )
+        .map_err(|error| {
+            format!(
+                "Finance 现金流同步失败（日期 {} 至 {}，第 1 页）：{error}；已有本地财务缓存未清除。",
+                range.from, range.to
+            )
+        })?;
         let result = statement.get("result").unwrap_or(&statement);
         let flows = result
             .get("cash_flows")
@@ -9324,7 +9538,8 @@ mod finance_category_tests {
             finance_service_category("OperationMarketplaceServiceCostPerClick").0,
             "advertising"
         );
-        assert_eq!(finance_service_category("StarsMembership").0, "advertising");
+        assert_eq!(finance_service_category("PayPerClick").0, "advertising");
+        assert_eq!(finance_service_category("StarsMembership").0, "other");
     }
 }
 
