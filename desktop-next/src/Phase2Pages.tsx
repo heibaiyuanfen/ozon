@@ -26,6 +26,8 @@ import {
   matchProductCosts,
   saveCredentialsForm,
   saveProductCost,
+  sendFeishuInventory,
+  seriesInsights,
   syncInventory,
   updateShop,
 } from "./bridge";
@@ -33,6 +35,7 @@ import type {
   ConnectionStatus,
   CredentialsForm,
   InventoryRow,
+  InsightRow,
   ProductCostInput,
   ProductRow,
   Shop,
@@ -376,8 +379,12 @@ export function InventoryPage({
   reload: () => Promise<void>;
 }) {
   const [syncing, setSyncing] = useState(false),
+    [sending, setSending] = useState(false),
     [message, setMessage] = useState(""),
     [riskFilter, setRiskFilter] = useState("all"),
+    [selectedSkus, setSelectedSkus] = useState<Set<string>>(new Set()),
+    [series, setSeries] = useState<InsightRow[]>([]),
+    [selectedSeriesId, setSelectedSeriesId] = useState(""),
     [page, setPage] = useState(0);
   const filteredRows = riskFilter === "all" ? rows : rows.filter((row) =>
     riskFilter === "replenishment" ? row.suggestedQty > 0 :
@@ -388,6 +395,36 @@ export function InventoryPage({
     pages = Math.max(1, Math.ceil(filteredRows.length / 50)),
     visible = filteredRows.slice(page * 50, page * 50 + 50);
   useEffect(() => setPage(0), [rows, riskFilter]);
+  useEffect(() => {
+    seriesInsights(new Date().toISOString().slice(0, 10))
+      .then(setSeries)
+      .catch(() => setSeries([]));
+  }, []);
+  useEffect(() => {
+    const availableSkus = new Set(rows.map((row) => row.sku));
+    setSelectedSkus((current) => {
+      const next = new Set([...current].filter((sku) => availableSkus.has(sku)));
+      return next.size === current.size ? current : next;
+    });
+  }, [rows]);
+  const setSkuSelected = (sku: string, checked: boolean) => {
+    setSelectedSkus((current) => {
+      const next = new Set(current);
+      if (checked) next.add(sku);
+      else next.delete(sku);
+      return next;
+    });
+  };
+  const selectSeries = () => {
+    const item = series.find((entry) => entry.id === selectedSeriesId);
+    if (!item) return;
+    const availableSkus = new Set(rows.map((row) => row.sku));
+    const matched = item.skus.filter((sku) => availableSkus.has(sku));
+    setSelectedSkus((current) => new Set([...current, ...matched]));
+    setMessage(matched.length
+      ? `已从系列“${item.name}”加入 ${matched.length} 个库存商品。`
+      : `系列“${item.name}”没有匹配当前库存中的 SKU。`);
+  };
   const sync = async () => {
     setSyncing(true);
     setMessage("");
@@ -428,10 +465,29 @@ export function InventoryPage({
         <span>
           {message || "库存同步在后台执行，期间可以继续浏览其他页面。"}
         </span>
-        <button className="dark-button" disabled={syncing} onClick={sync}>
-          <RefreshCw size={15} className={syncing ? "spin" : ""} />
-          {syncing ? "正在同步库存" : "同步全部库存"}
-        </button>
+        <div className="inventory-sync-actions">
+          <button
+            className="outline-button"
+            disabled={syncing || sending || !selectedSkus.size}
+            onClick={async () => {
+              setSending(true);
+              setMessage("");
+              try {
+                setMessage(await sendFeishuInventory(targetDays, leadTimeDays, safetyDays, [...selectedSkus]));
+              } catch (e) {
+                setMessage(`发送失败：${String(e)}`);
+              } finally {
+                setSending(false);
+              }
+            }}
+          >
+            {sending ? "正在发送…" : `发送已选 ${selectedSkus.size} 项到飞书群`}
+          </button>
+          <button className="dark-button" disabled={syncing || sending} onClick={sync}>
+            <RefreshCw size={15} className={syncing ? "spin" : ""} />
+            {syncing ? "正在同步库存" : "同步全部库存"}
+          </button>
+        </div>
       </div>
       <div className="mini-stats">
         <div>
@@ -503,6 +559,16 @@ export function InventoryPage({
           </small>
         </div>
         <div className="toolbar-actions">
+          <label className="inventory-series-select">
+            产品系列
+            <select value={selectedSeriesId} onChange={(e) => setSelectedSeriesId(e.target.value)}>
+              <option value="">选择已有系列</option>
+              {series.map((item) => <option key={item.id} value={item.id}>{item.name}（{item.skus.length}）</option>)}
+            </select>
+          </label>
+          <button className="outline-button" disabled={!selectedSeriesId} onClick={selectSeries}>加入系列商品</button>
+          <button className="outline-button" disabled={!filteredRows.length} onClick={() => setSelectedSkus((current) => new Set([...current, ...filteredRows.map((row) => row.sku)]))}>选择当前筛选</button>
+          <button className="outline-button" disabled={!selectedSkus.size} onClick={() => setSelectedSkus(new Set())}>清空选择</button>
           <label className="days-input">
             目标库存{" "}
             <input
@@ -528,6 +594,21 @@ export function InventoryPage({
         <table>
           <thead>
             <tr>
+              <th className="inventory-select-cell">
+                <input
+                  type="checkbox"
+                  aria-label="选择当前页商品"
+                  checked={visible.length > 0 && visible.every((row) => selectedSkus.has(row.sku))}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setSelectedSkus((current) => {
+                      const next = new Set(current);
+                      visible.forEach((row) => checked ? next.add(row.sku) : next.delete(row.sku));
+                      return next;
+                    });
+                  }}
+                />
+              </th>
               <th>货号 / SKU</th>
               <th>后台总库存</th>
               <th>可售</th>
@@ -547,6 +628,7 @@ export function InventoryPage({
           <tbody>
             {visible.map((row) => (
               <tr key={row.sku}>
+                <td className="inventory-select-cell"><input type="checkbox" aria-label={`选择 ${row.offerId || row.sku}`} checked={selectedSkus.has(row.sku)} onChange={(e) => setSkuSelected(row.sku, e.target.checked)} /></td>
                 <td>
                   <b>{row.offerId || "—"}</b>
                   <small>{row.sku}</small>

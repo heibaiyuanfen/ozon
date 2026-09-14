@@ -83,6 +83,7 @@ import {
   saveWbCost,
   saveWbSettings,
   sendFeishuWeekly,
+  sendFeishuCrossBorderWeekly,
   sendWbWeekly,
   shipmentTracking,
   shipmentSkuOptions,
@@ -2711,6 +2712,23 @@ export function ReportsPage({
               {choice.label}
             </button>
           ))}
+          <button
+            className="dark-button"
+            disabled={!!busy || !crossData}
+            onClick={async () => {
+              setBusy("cross-feishu");
+              setMessage("");
+              try {
+                setMessage(await sendFeishuCrossBorderWeekly(effectiveRange));
+              } catch (e) {
+                setMessage(`发送失败：${String(e)}`);
+              } finally {
+                setBusy("");
+              }
+            }}
+          >
+            {busy === "cross-feishu" ? "发送中…" : "发送周报到飞书群"}
+          </button>
         </div>
       )}
       {message && <div className="sync-message">{message}</div>}

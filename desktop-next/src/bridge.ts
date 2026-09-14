@@ -532,6 +532,17 @@ export async function syncFeishuProducts(
 export async function sendFeishuWeekly(range: DateRange): Promise<string> {
   return invoke("send_feishu_weekly", { range });
 }
+export async function sendFeishuCrossBorderWeekly(range: DateRange): Promise<string> {
+  return invoke("send_feishu_cross_border_weekly", { range });
+}
+export async function sendFeishuInventory(
+  targetDays: number,
+  leadTimeDays: number,
+  safetyDays: number,
+  skus: string[],
+): Promise<string> {
+  return invoke("send_feishu_inventory", { targetDays, leadTimeDays, safetyDays, skus });
+}
 export async function shipmentTracking(): Promise<ShipmentTracking[]> {
   return invoke("shipment_tracking");
 }

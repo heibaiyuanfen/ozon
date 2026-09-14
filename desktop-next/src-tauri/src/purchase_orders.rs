@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::{fs, io::Write, path::Path};
 use tauri::State;
 
-use super::{background_state, db, AppState};
+use super::{background_state, db, feishu_base, feishu_raw, feishu_token, setting, AppState};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,6 +145,109 @@ fn validate(v: &PurchaseOrderInput) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn display_number(value: &str) -> String {
+    let number = value.trim().parse::<f64>().unwrap_or_default();
+    if (number.fract()).abs() < f64::EPSILON {
+        format!("{number:.0}")
+    } else {
+        format!("{number:.2}")
+    }
+}
+
+fn purchase_order_feishu_cards(v: &PurchaseOrderInput) -> Vec<Value> {
+    let total_quantity = v
+        .items
+        .iter()
+        .map(|item| item.quantity.trim().parse::<f64>().unwrap_or_default())
+        .sum::<f64>();
+    let total_cartons = v
+        .items
+        .iter()
+        .map(|item| item.carton_count.trim().parse::<f64>().unwrap_or_default())
+        .sum::<f64>();
+    let total_amount = v
+        .items
+        .iter()
+        .map(|item| {
+            item.unit_price.trim().parse::<f64>().unwrap_or_default()
+                * item.quantity.trim().parse::<f64>().unwrap_or_default()
+        })
+        .sum::<f64>();
+    let chunks = v.items.chunks(15).collect::<Vec<_>>();
+    let total_parts = chunks.len().max(1);
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let summary = if index == 0 {
+                format!(
+                    "**采购单号：** {}\n**采购日期：** {}　**预计出货：** {}\n**经办人：** {}　**审批人：** {}\n**工厂地址：** {}\n\n**共 {} 项｜数量 {}｜箱数 {}｜总金额 ¥{:.2}**\n\n",
+                    v.order_no.trim(),
+                    v.order_date,
+                    if v.expected_ship_at.trim().is_empty() { "—" } else { v.expected_ship_at.trim() },
+                    if v.operator.trim().is_empty() { "—" } else { v.operator.trim() },
+                    if v.approver.trim().is_empty() { "待领导审核" } else { v.approver.trim() },
+                    if v.factory_address.trim().is_empty() { "—" } else { v.factory_address.trim() },
+                    v.items.len(), display_number(&total_quantity.to_string()),
+                    display_number(&total_cartons.to_string()), total_amount,
+                )
+            } else {
+                String::new()
+            };
+            let details = chunk.iter().enumerate().map(|(offset, item)| {
+                let amount = item.unit_price.trim().parse::<f64>().unwrap_or_default()
+                    * item.quantity.trim().parse::<f64>().unwrap_or_default();
+                format!(
+                    "**{}. {}**　`{}`\n单价 ¥{}｜数量 {} {}｜箱数 {}｜装箱率 {}｜小计 ¥{:.2}{}",
+                    index * 15 + offset + 1,
+                    item.product_name.trim(), item.sku.trim(), display_number(&item.unit_price),
+                    display_number(&item.quantity), item.unit.trim(), display_number(&item.carton_count),
+                    display_number(&item.units_per_carton), amount,
+                    if item.note.trim().is_empty() { String::new() } else { format!("｜备注 {}", item.note.trim()) },
+                )
+            }).collect::<Vec<_>>().join("\n\n");
+            let note = if index + 1 == total_parts && !v.note.trim().is_empty() {
+                format!("\n\n**采购单备注：** {}", v.note.trim())
+            } else {
+                String::new()
+            };
+            json!({
+                "config": {"wide_screen_mode": true, "enable_forward": true},
+                "header": {
+                    "template": "orange",
+                    "title": {"tag":"plain_text", "content":format!("待审核 · {}", if v.title.trim().is_empty() { "采购清单" } else { v.title.trim() })},
+                    "subtitle": {"tag":"plain_text", "content":format!("第 {} / {} 页", index + 1, total_parts)}
+                },
+                "elements": [
+                    {"tag":"div", "text":{"tag":"lark_md", "content":format!("{}{}{}", summary, details, note)}},
+                    {"tag":"note", "elements":[{"tag":"plain_text", "content":"该采购单由 Ozon ERP 提交，请领导审核过目；如需调整，请联系经办人后在软件中修改并重新提交。"}]}
+                ]
+            })
+        })
+        .collect()
+}
+
+fn send_purchase_order_to_feishu(
+    c: &rusqlite::Connection,
+    v: &PurchaseOrderInput,
+) -> Result<usize, String> {
+    let token = feishu_token(c)?;
+    let chat = setting(c, "feishu_chat_id");
+    if chat.is_empty() {
+        return Err("请先在当前店铺的飞书协作设置中配置群 Chat ID".into());
+    }
+    let cards = purchase_order_feishu_cards(v);
+    for card in &cards {
+        feishu_raw(
+            "POST",
+            &format!("{}/im/v1/messages?receive_id_type=chat_id", feishu_base(c)),
+            Some(&token),
+            Some(&json!({"receive_id":chat,"msg_type":"interactive","content":card.to_string()})),
+        )?;
+    }
+    Ok(cards.len())
 }
 fn xml(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -373,7 +476,8 @@ pub async fn purchase_order_command(
   let mut c=db(&state)?;ensure(&c)?;match command.as_str(){
    "list"=>{let mut q=c.prepare("SELECT json_object('id',id,'orderNo',order_no,'title',title,'operator',operator,'orderDate',order_date,'expectedShipAt',expected_ship_at,'factoryAddress',factory_address,'status',status,'updatedAt',updated_at,'itemCount',(SELECT COUNT(*) FROM purchase_order_items i WHERE i.order_id=p.id)) FROM purchase_orders p WHERE status!='archived' ORDER BY order_date DESC,id DESC").map_err(|e|e.to_string())?;let rows=q.query_map([],|r|{let s:String=r.get(0)?;Ok(serde_json::from_str(&s).unwrap_or(Value::Null))}).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;Ok(json!({"orders":rows}))},
    "detail"=>detail(&c,id.ok_or("缺少采购单 ID")?),
-   "save"=>{let input:PurchaseOrderInput=serde_json::from_value(payload.unwrap_or(json!({}))).map_err(|e|e.to_string())?;validate(&input)?;let tx=c.transaction().map_err(|e|e.to_string())?;let oid=if let Some(id)=id{tx.execute("UPDATE purchase_orders SET order_no=?1,title=?2,operator=?3,order_date=?4,expected_ship_at=?5,factory_address=?6,approver=?7,note=?8,updated_at=CURRENT_TIMESTAMP WHERE id=?9",params![input.order_no.trim(),input.title.trim(),input.operator.trim(),input.order_date,input.expected_ship_at,input.factory_address.trim(),input.approver.trim(),input.note.trim(),id]).map_err(|e|e.to_string())?;tx.execute("DELETE FROM purchase_order_items WHERE order_id=?1",[id]).map_err(|e|e.to_string())?;id}else{tx.execute("INSERT INTO purchase_orders(order_no,title,operator,order_date,expected_ship_at,factory_address,approver,note)VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![input.order_no.trim(),input.title.trim(),input.operator.trim(),input.order_date,input.expected_ship_at,input.factory_address.trim(),input.approver.trim(),input.note.trim()]).map_err(|e|e.to_string())?;tx.last_insert_rowid()};for(i,x)in input.items.iter().enumerate(){tx.execute("INSERT INTO purchase_order_items(order_id,product_name,sku,image_url,unit_price,package_length_cm,package_width_cm,package_height_cm,unit_weight_kg,units_per_carton,carton_weight_kg,carton_length_cm,carton_width_cm,carton_height_cm,carton_count,quantity,unit,note,sort_order)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",params![oid,x.product_name.trim(),x.sku.trim(),x.image_url.trim(),x.unit_price.trim(),x.package_length_cm.trim(),x.package_width_cm.trim(),x.package_height_cm.trim(),x.unit_weight_kg.trim(),x.units_per_carton.trim(),x.carton_weight_kg.trim(),x.carton_length_cm.trim(),x.carton_width_cm.trim(),x.carton_height_cm.trim(),x.carton_count.trim(),x.quantity.trim(),if x.unit.trim().is_empty(){"个"}else{x.unit.trim()},x.note.trim(),i as i64]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(json!({"id":oid}))},
+   "save"=>{let input:PurchaseOrderInput=serde_json::from_value(payload.unwrap_or(json!({}))).map_err(|e|e.to_string())?;validate(&input)?;let tx=c.transaction().map_err(|e|e.to_string())?;let oid=if let Some(id)=id{tx.execute("UPDATE purchase_orders SET order_no=?1,title=?2,operator=?3,order_date=?4,expected_ship_at=?5,factory_address=?6,approver=?7,note=?8,status='draft',updated_at=CURRENT_TIMESTAMP WHERE id=?9",params![input.order_no.trim(),input.title.trim(),input.operator.trim(),input.order_date,input.expected_ship_at,input.factory_address.trim(),input.approver.trim(),input.note.trim(),id]).map_err(|e|e.to_string())?;tx.execute("DELETE FROM purchase_order_items WHERE order_id=?1",[id]).map_err(|e|e.to_string())?;id}else{tx.execute("INSERT INTO purchase_orders(order_no,title,operator,order_date,expected_ship_at,factory_address,approver,note)VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![input.order_no.trim(),input.title.trim(),input.operator.trim(),input.order_date,input.expected_ship_at,input.factory_address.trim(),input.approver.trim(),input.note.trim()]).map_err(|e|e.to_string())?;tx.last_insert_rowid()};for(i,x)in input.items.iter().enumerate(){tx.execute("INSERT INTO purchase_order_items(order_id,product_name,sku,image_url,unit_price,package_length_cm,package_width_cm,package_height_cm,unit_weight_kg,units_per_carton,carton_weight_kg,carton_length_cm,carton_width_cm,carton_height_cm,carton_count,quantity,unit,note,sort_order)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",params![oid,x.product_name.trim(),x.sku.trim(),x.image_url.trim(),x.unit_price.trim(),x.package_length_cm.trim(),x.package_width_cm.trim(),x.package_height_cm.trim(),x.unit_weight_kg.trim(),x.units_per_carton.trim(),x.carton_weight_kg.trim(),x.carton_length_cm.trim(),x.carton_width_cm.trim(),x.carton_height_cm.trim(),x.carton_count.trim(),x.quantity.trim(),if x.unit.trim().is_empty(){"个"}else{x.unit.trim()},x.note.trim(),i as i64]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(json!({"id":oid}))},
+   "submit_feishu"=>{let oid=id.ok_or("请先保存采购单")?;let input:PurchaseOrderInput=serde_json::from_value(detail(&c,oid)?).map_err(|e|e.to_string())?;validate(&input)?;let cards=send_purchase_order_to_feishu(&c,&input)?;c.execute("UPDATE purchase_orders SET status='submitted',updated_at=CURRENT_TIMESTAMP WHERE id=?1",[oid]).map_err(|e|e.to_string())?;Ok(json!({"ok":true,"cards":cards,"message":format!("采购单已提交并发送到飞书群，共 {} 张卡片",cards)}))},
    "archive"=>{let id=id.ok_or("缺少采购单 ID")?;c.execute("UPDATE purchase_orders SET status='archived',updated_at=CURRENT_TIMESTAMP WHERE id=?1",[id]).map_err(|e|e.to_string())?;Ok(json!({"ok":true}))},
    "export_excel"=>{let input:PurchaseOrderInput=serde_json::from_value(payload.unwrap_or(json!({}))).map_err(|e|e.to_string())?;Ok(json!({"path":export_excel(&input,&state)?}))},
    _=>Err("不支持的采购单命令".into())}
@@ -444,5 +548,20 @@ mod tests {
         );
         drop(z);
         let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn feishu_card_contains_review_totals_and_product_details() {
+        let cards = purchase_order_feishu_cards(&sample());
+        assert_eq!(cards.len(), 1);
+        let content = cards[0]
+            .pointer("/elements/0/text/content")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(content.contains("采购单号：** CG-1"));
+        assert!(content.contains("共 1 项｜数量 300｜箱数 12｜总金额 ¥3645.00"));
+        assert!(content.contains("沙漠数码"));
+        assert!(content.contains("`1.5*6`"));
+        assert!(content.contains("小计 ¥3645.00"));
     }
 }

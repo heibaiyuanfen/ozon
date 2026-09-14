@@ -8368,6 +8368,190 @@ fn send_feishu_weekly(range: DateRange, state: State<AppState>) -> Result<String
     })
 }
 
+fn cross_border_weekly_card(
+    shop_name: &str,
+    range: &DateRange,
+    report: &CrossBorderReport,
+) -> serde_json::Value {
+    let profit = report
+        .profit_cny
+        .map(|value| format!("¥{value:.2}"))
+        .unwrap_or_else(|| format!("成本未完整（缺 {} 个 SKU）", report.missing_cost_skus));
+    let finance = if report.finance_available {
+        format!("¥{:.2}", report.settled_finance_net_cny)
+    } else {
+        "本期暂无 Finance 明细".into()
+    };
+    let content = format!(
+        "**店铺：** {shop_name}\n**统计期间：** {} 至 {}\n\n**销售额：** ¥{:.2}　**销量：** {} 件\n**预估利润：** {}\n**广告费：** ¥{:.2}（Performance ¥{:.2}；Stars ¥{:.2}）\n**预估平台费用：** ¥{:.2}\n**采购及头程：** ¥{:.2}\n**Finance 已结算净额：** {}\n\n**履约订单：** FBP {}　RFBS {}　WHD {}\n**汇率：** 1 CNY = {:.4} RUB",
+        range.from, range.to, report.revenue_cny, report.units, profit,
+        report.ad_spend_cny, report.performance_ad_spend_cny,
+        report.stars_membership_cny, report.estimated_platform_fees_cny.abs(),
+        report.purchase_and_freight_cny, finance, report.fbp_orders,
+        report.rfbs_orders, report.whd_orders, report.rub_per_cny,
+    );
+    serde_json::json!({
+        "config": {"wide_screen_mode": true, "enable_forward": true},
+        "header": {
+            "template": if report.profit_cny.unwrap_or_default() >= 0.0 { "green" } else { "red" },
+            "title": {"tag": "plain_text", "content": format!("{} · 跨境店铺利润周报", shop_name)},
+            "subtitle": {"tag": "plain_text", "content": format!("{} 至 {}", range.from, range.to)}
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": content}},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": "预估利润按销售、平台费、广告费、采购成本及头程核算；数据来自当前跨境店铺本地缓存，由用户手动发送。"}]}
+        ]
+    })
+}
+
+#[tauri::command]
+fn send_feishu_cross_border_weekly(
+    range: DateRange,
+    state: State<AppState>,
+) -> Result<String, String> {
+    if active_shop_kind(&state)? != "cross_border" {
+        return Err("请先切换到跨境店铺后再发送跨境利润周报".into());
+    }
+    let report = cross_border_report_blocking(range.clone(), &state)?;
+    let (_, shop_name) = active_shop_identity(&state)?;
+    let c = db(&state)?;
+    let token = feishu_token(&c)?;
+    let chat = setting(&c, "feishu_chat_id");
+    if chat.is_empty() {
+        return Err("请先在当前跨境店铺的飞书协作设置中配置群 Chat ID".into());
+    }
+    let card = cross_border_weekly_card(&shop_name, &range, &report);
+    let payload = feishu_raw(
+        "POST",
+        &format!("{}/im/v1/messages?receive_id_type=chat_id", feishu_base(&c)),
+        Some(&token),
+        Some(
+            &serde_json::json!({"receive_id":chat,"msg_type":"interactive","content":card.to_string()}),
+        ),
+    )?;
+    let id = json_text(payload.pointer("/data/message_id"));
+    Ok(if id.is_empty() {
+        "跨境店铺利润周报已发送到飞书群".into()
+    } else {
+        format!("跨境店铺利润周报已发送，消息 ID：{id}")
+    })
+}
+
+fn inventory_feishu_cards(shop_name: &str, rows: &[InventoryRow]) -> Vec<serde_json::Value> {
+    let available: i64 = rows.iter().map(|row| row.available_stock).sum();
+    let transit: i64 = rows.iter().map(|row| row.transit_stock).sum();
+    let requested: i64 = rows.iter().map(|row| row.requested_stock).sum();
+    let production: i64 = rows.iter().map(|row| row.domestic_production_stock).sum();
+    let domestic: i64 = rows.iter().map(|row| row.domestic_warehouse_stock).sum();
+    let overseas_transit: i64 = rows.iter().map(|row| row.overseas_transit_stock).sum();
+    let overseas_arrived: i64 = rows.iter().map(|row| row.overseas_arrived_stock).sum();
+    let suggested: i64 = rows.iter().map(|row| row.suggested_qty).sum();
+    let risk = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.health_status.as_str(),
+                "stockout" | "critical" | "warning"
+            )
+        })
+        .count();
+    let chunks = rows.chunks(20).collect::<Vec<_>>();
+    let total_parts = chunks.len().max(1);
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let details = chunk
+                .iter()
+                .map(|row| {
+                    let offer = if row.offer_id.is_empty() { &row.sku } else { &row.offer_id };
+                    let coverage = row.estimated_days.map(|v| format!("{v:.1}天")).unwrap_or_else(|| "—".into());
+                    format!(
+                        "**{}**　`{}`\n可售 {}｜预留 {}｜Ozon在途 {}｜已申请 {}｜生产 {}｜国内仓 {}｜海外在途 {}｜海外到仓 {}｜日均 {:.1}｜覆盖 {}｜建议/计划 {}/{}｜{}",
+                        offer, row.sku, row.available_stock, row.reserved_stock.unwrap_or_default(),
+                        row.transit_stock, row.requested_stock, row.domestic_production_stock,
+                        row.domestic_warehouse_stock, row.overseas_transit_stock,
+                        row.overseas_arrived_stock, row.daily_sales.max(row.daily_sales_7d),
+                        coverage, row.suggested_qty, row.planned_qty, row.health_text,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let summary = if index == 0 {
+                format!(
+                    "**库存总览**\nSKU {}｜可售 {}｜Ozon在途 {}｜已申请 {}｜生产 {}｜国内仓 {}｜海外在途 {}｜海外到仓 {}｜建议补货 {}｜风险 SKU {}\n\n",
+                    rows.len(), available, transit, requested, production, domestic,
+                    overseas_transit, overseas_arrived, suggested, risk,
+                )
+            } else {
+                String::new()
+            };
+            serde_json::json!({
+                "config": {"wide_screen_mode": true, "enable_forward": true},
+                "header": {
+                    "template": "blue",
+                    "title": {"tag":"plain_text","content":format!("{} · 库存与补货明细", shop_name)},
+                    "subtitle": {"tag":"plain_text","content":format!("第 {} / {} 页", index + 1, total_parts)}
+                },
+                "elements": [
+                    {"tag":"div","text":{"tag":"lark_md","content":format!("{}{}", summary, details)}},
+                    {"tag":"note","elements":[{"tag":"plain_text","content":"数据来自库存管理页面的本地最新快照；补货建议已扣除可售、在途、已申请、供应链库存及已有计划。"}]}
+                ]
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn send_feishu_inventory(
+    target_days: i64,
+    lead_time_days: i64,
+    safety_days: i64,
+    skus: Vec<String>,
+    state: State<AppState>,
+) -> Result<String, String> {
+    if skus.is_empty() {
+        return Err("请先在库存管理页面选择要发送的商品或系列".into());
+    }
+    let selected = skus.into_iter().collect::<std::collections::HashSet<_>>();
+    let rows = inventory_blocking(
+        String::new(),
+        target_days,
+        lead_time_days,
+        safety_days,
+        &state,
+    )?
+    .into_iter()
+    .filter(|row| selected.contains(&row.sku))
+    .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return Err("所选商品没有可发送的库存数据，请重新同步库存或调整选择".into());
+    }
+    let (_, shop_name) = active_shop_identity(&state)?;
+    let c = db(&state)?;
+    let token = feishu_token(&c)?;
+    let chat = setting(&c, "feishu_chat_id");
+    if chat.is_empty() {
+        return Err("请先在当前店铺的飞书协作设置中配置群 Chat ID".into());
+    }
+    let cards = inventory_feishu_cards(&shop_name, &rows);
+    for card in &cards {
+        feishu_raw(
+            "POST",
+            &format!("{}/im/v1/messages?receive_id_type=chat_id", feishu_base(&c)),
+            Some(&token),
+            Some(
+                &serde_json::json!({"receive_id":chat,"msg_type":"interactive","content":card.to_string()}),
+            ),
+        )?;
+    }
+    Ok(format!(
+        "库存与补货信息已发送：{} 个 SKU，共 {} 张卡片",
+        rows.len(),
+        cards.len()
+    ))
+}
+
 fn first_feishu_field(fields: Option<&serde_json::Value>, names: &[&str]) -> String {
     for name in names {
         let value = feishu_field_text(fields.and_then(|v| v.get(*name)));
@@ -9485,7 +9669,10 @@ fn import_api_bundle(path: String, state: State<AppState>) -> Result<i64, String
 
 #[cfg(test)]
 mod cross_border_tests {
-    use super::cross_border_shipping;
+    use super::{
+        cross_border_shipping, cross_border_weekly_card, inventory_feishu_cards, CrossBorderReport,
+        DateRange,
+    };
 
     #[test]
     fn freight_formula_matches_current_boundaries() {
@@ -9498,6 +9685,86 @@ mod cross_border_tests {
         assert_eq!(cross_border_shipping(10.0, 0.01), Some(6.18));
         assert_eq!(cross_border_shipping(635.0, 30.0), None);
         assert_eq!(cross_border_shipping(30000.0, 1.0), None);
+    }
+
+    #[test]
+    fn feishu_weekly_card_uses_cross_border_report_totals() {
+        let range = DateRange {
+            from: "2026-09-07".into(),
+            to: "2026-09-13".into(),
+        };
+        let report = CrossBorderReport {
+            date_from: range.from.clone(),
+            date_to: range.to.clone(),
+            rub_per_cny: 12.5,
+            revenue_cny: 1234.5,
+            units: 42,
+            ad_spend_cny: 88.0,
+            performance_ad_spend_cny: 80.0,
+            stars_membership_cny: 8.0,
+            estimated_platform_fees_cny: -210.0,
+            purchase_and_freight_cny: 400.0,
+            profit_cny: Some(536.5),
+            settled_finance_net_cny: 910.0,
+            finance_available: true,
+            commission_rate: Some(0.15),
+            acquiring_rate: Some(0.02),
+            missing_cost_skus: 0,
+            fbp_orders: 10,
+            rfbs_orders: 20,
+            whd_orders: 3,
+            daily: vec![],
+            rows: vec![],
+        };
+        let card = cross_border_weekly_card("跨境测试店", &range, &report);
+        let text = card
+            .pointer("/elements/0/text/content")
+            .and_then(|x| x.as_str())
+            .unwrap();
+        assert!(text.contains("跨境测试店"));
+        assert!(text.contains("销售额：** ¥1234.50"));
+        assert!(text.contains("预估利润：** ¥536.50"));
+        assert!(text.contains("FBP 10　RFBS 20　WHD 3"));
+    }
+
+    #[test]
+    fn inventory_cards_include_stock_and_replenishment_columns() {
+        let inventory = vec![super::InventoryRow {
+            sku: "SKU-LOW".into(),
+            offer_id: "LOW-1".into(),
+            product_name: "低库存商品".into(),
+            available_stock: 2,
+            portal_stock: Some(2),
+            reserved_stock: Some(0),
+            transit_stock: 3,
+            requested_stock: 4,
+            domestic_production_stock: 5,
+            domestic_warehouse_stock: 6,
+            overseas_transit_stock: 7,
+            overseas_arrived_stock: 8,
+            warehouse_count: 1,
+            daily_sales: 1.0,
+            daily_sales_7d: 2.0,
+            demand_trend_percent: Some(100.0),
+            estimated_days: Some(1.0),
+            health_status: "critical".into(),
+            health_text: "7 天内断货".into(),
+            suggested_qty: 50,
+            planned_qty: 0,
+            return_units_30d: 0,
+            return_rate_30d: None,
+            return_logistics_cost_30d: 0.0,
+            updated_at: "2026-09-14".into(),
+        }];
+        let cards = inventory_feishu_cards("跨境测试店", &inventory);
+        let text = cards[0]
+            .pointer("/elements/0/text/content")
+            .and_then(|x| x.as_str())
+            .unwrap();
+        assert!(text.contains("SKU 1｜可售 2"));
+        assert!(text.contains("LOW-1"));
+        assert!(text.contains("建议/计划 50/0"));
+        assert!(text.contains("生产 5｜国内仓 6｜海外在途 7｜海外到仓 8"));
     }
 }
 
@@ -9835,6 +10102,8 @@ pub fn run() {
             test_feishu,
             sync_feishu_products,
             send_feishu_weekly,
+            send_feishu_cross_border_weekly,
+            send_feishu_inventory,
             shipment_tracking,
             shipment_sku_options,
             save_shipment_sku_allocations,

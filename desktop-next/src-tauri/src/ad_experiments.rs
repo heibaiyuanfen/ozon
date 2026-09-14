@@ -157,7 +157,27 @@ pub(super) fn ensure(c: &Connection) -> Result<()> {
     CREATE TABLE IF NOT EXISTS ad_experiment_decisions(id INTEGER PRIMARY KEY AUTOINCREMENT,experiment_id INTEGER NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS ad_stable_baselines(id INTEGER PRIMARY KEY AUTOINCREMENT,experiment_id INTEGER NOT NULL,name TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE INDEX IF NOT EXISTS idx_ad_experiments_status ON ad_experiments(status);
-    CREATE INDEX IF NOT EXISTS idx_ad_experiment_events ON ad_experiment_events(experiment_id,id);") .map_err(err)
+    CREATE INDEX IF NOT EXISTS idx_ad_experiment_events ON ad_experiment_events(experiment_id,id);") .map_err(err)?;
+    // Repair records created by the former non-idempotent stage transition:
+    // retain the newest child as the active stage, archive older duplicates,
+    // and close every parent that already has a child stage.
+    c.execute_batch(
+        "UPDATE ad_experiments SET status='completed',updated_at=CURRENT_TIMESTAMP
+        WHERE status<>'completed' AND id IN (
+          SELECT older.id FROM ad_experiments older
+          WHERE older.parent_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM ad_experiments newer
+            WHERE newer.parent_id=older.parent_id
+              AND newer.stage_index=older.stage_index
+              AND newer.id>older.id));
+        UPDATE ad_experiments SET status='completed',updated_at=CURRENT_TIMESTAMP
+        WHERE status<>'completed' AND EXISTS (
+          SELECT 1 FROM ad_experiments child WHERE child.parent_id=ad_experiments.id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ad_experiments_one_active_child_stage
+          ON ad_experiments(parent_id,stage_index)
+          WHERE parent_id IS NOT NULL AND status<>'completed';",
+    )
+    .map_err(err)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -612,13 +632,26 @@ fn evaluate_metrics(
     } else {
         None
     };
-    let qualified = stock_days.is_some_and(|d| d >= 21.0)
-        && daily.len() >= 3
-        && daily[daily.len() - 3..].iter().all(|d| {
-            num(d, "totalUnits").is_some_and(|x| x >= target.daily_units)
-                && num(d, "tacos").is_some_and(|x| x <= target.tacos_max)
-        });
-    json!({"baseline":base,"current":current,"score":score,"scoreComponents":{"sales":sales_score,"tacos":tacos_score,"cvr":cvr_score,"cpa":cpa_score,"cpc":cpc_score,"stability":stable},"decision":decision,"confidence":confidence,"quality":q,"baselineQuality":base_quality,"vetoes":veto,"stockDays":stock_days,"completedDays":daily.len(),"observationDays":observation_days,"stageQualified":qualified && decision=="SUCCESS" && confidence=="High","target":target,"changes":{"salesGrowth":sg,"spendGrowth":spend_growth,"revenueGrowth":revenue_growth,"cvrChange":cvr,"cpaChange":cpa,"cpcChange":cpc,"tacosChange":tacos.zip(num(base,"tacos")).map(|(a,b)|a-b),"scaleElasticity":sg.zip(spend_growth).and_then(|(a,b)|if b!=0.0{Some(a/b)}else{None})},"marginal":{"cpa":marginal_cpa,"roas":divide(delta_revenue,delta_spend),"unitsPer1000Rub":divide(delta_units,delta_spend).map(|n|n*1000.0),"basis":"difference_of_daily_averages_not_causal_effect"},"facts":[format!("已观察 {} / {} 个完整源日期日",daily.len(),observation_days),format!("数据质量：{}；置信度：{}",q["status"],confidence)],"inference":["前后变化属于相关性，不能单独证明操作导致增长；未投放与无数据不能互相替代"],"nextAction":match decision {"SUCCESS"=>"达到评分门槛；核验连续达标、库存和完整性后进入下一阶段","ROLLBACK"=>"查看稳定版本的恢复配置清单，核对后在广告控制中执行","STOP_SCALE"=>"停止继续加预算，核查库存或转化下降原因","INSUFFICIENT_DATA"=>"保持观察并补齐数据、样本；不得据此自动放量或回退","WEAK_SUCCESS"=>"延长观察或创建单变量重测实验",_=>"保持配置并延长观察"}})
+    // Stage advancement is an operator-defined business gate. It intentionally
+    // depends only on the completed observation period and the current stage's
+    // aggregate TACOS / average daily-unit targets. Confidence, score, stock,
+    // and diagnostic vetoes remain visible risk signals but do not lock the
+    // next-stage action.
+    let qualified = full_period
+        && num(current, "dailyUnits").is_some_and(|x| x >= target.daily_units)
+        && tacos.is_some_and(|x| x <= target.tacos_max);
+    let next_action = if qualified {
+        "观察天数、TACOS 和日均销量均已达到当前阶段标准，可进入下一阶段"
+    } else {
+        match decision {
+            "ROLLBACK" => "当前阶段标准未全部达到；可继续观察或查看恢复配置清单",
+            "STOP_SCALE" => "当前阶段标准未全部达到；停止继续加预算并核查风险",
+            "INSUFFICIENT_DATA" => "继续观察，直至观察天数、TACOS 和日均销量达到当前阶段标准",
+            "WEAK_SUCCESS" => "继续观察或创建单变量重测实验",
+            _ => "保持配置并继续观察当前阶段标准",
+        }
+    };
+    json!({"baseline":base,"current":current,"score":score,"scoreComponents":{"sales":sales_score,"tacos":tacos_score,"cvr":cvr_score,"cpa":cpa_score,"cpc":cpc_score,"stability":stable},"decision":decision,"confidence":confidence,"quality":q,"baselineQuality":base_quality,"vetoes":veto,"stockDays":stock_days,"completedDays":daily.len(),"observationDays":observation_days,"stageQualified":qualified,"target":target,"changes":{"salesGrowth":sg,"spendGrowth":spend_growth,"revenueGrowth":revenue_growth,"cvrChange":cvr,"cpaChange":cpa,"cpcChange":cpc,"tacosChange":tacos.zip(num(base,"tacos")).map(|(a,b)|a-b),"scaleElasticity":sg.zip(spend_growth).and_then(|(a,b)|if b!=0.0{Some(a/b)}else{None})},"marginal":{"cpa":marginal_cpa,"roas":divide(delta_revenue,delta_spend),"unitsPer1000Rub":divide(delta_units,delta_spend).map(|n|n*1000.0),"basis":"difference_of_daily_averages_not_causal_effect"},"facts":[format!("已观察 {} / {} 个完整源日期日",daily.len(),observation_days),format!("数据质量：{}；置信度：{}",q["status"],confidence)],"inference":["前后变化属于相关性，不能单独证明操作导致增长；未投放与无数据不能互相替代"],"nextAction":next_action})
 }
 
 fn evaluate(c: &mut Connection, id: i64) -> Result<Value> {
@@ -701,10 +734,8 @@ fn evaluate(c: &mut Connection, id: i64) -> Result<Value> {
     result["baselineDaily"] = baseline["seriesDaily"].clone();
     result["currency"] = json!("RUB");
     result["executionRecorded"] = json!(executed);
-    result["stageQualified"] =
-        json!(result["stageQualified"].as_bool().unwrap_or(false) && executed);
     if !executed {
-        result["nextAction"]=json!("实验已建立，但尚无执行记录；请在现有平台控制执行，或确认已在平台完成计划修改后继续观察");
+        result["executionNotice"]=json!("尚无平台执行确认记录；该信息仅作风险提示，不影响按观察天数、TACOS 和日均销量进入下一阶段");
     }
     result["goals"] = json!({"stageGap":num(&now,"dailyUnits").map(|v|(target.daily_units-v).max(0.0)),"finalGap":num(&now,"dailyUnits").map(|v|(input.targets.final_target.daily_units-v).max(0.0)),"finalProgress":num(&now,"dailyUnits").map(|v|v/input.targets.final_target.daily_units*100.0)});
     let mut sku_scores = Vec::new();
@@ -1049,7 +1080,6 @@ fn action(c: &mut Connection, shop: &str, id: i64, action: &str, payload: Value)
             return Ok(json!({"restorePlan":p,"executed":false}));
         }
         "next_stage" | "retest" => {
-            let e = evaluate(c, id)?;
             let stage: usize = c
                 .query_row(
                     "SELECT stage_index FROM ad_experiments WHERE id=?1",
@@ -1057,15 +1087,34 @@ fn action(c: &mut Connection, shop: &str, id: i64, action: &str, payload: Value)
                     |r| r.get(0),
                 )
                 .map_err(err)?;
-            if action == "next_stage" && e["stageQualified"] != true {
-                return Err(
-                    "需完整高置信度、连续 3 天达标且评分 ≥80 才能进入下一阶段；可先创建重测草稿"
-                        .into(),
-                );
-            }
             let next = stage + usize::from(action == "next_stage");
             if next >= input.targets.stages.len() {
                 return Err("已到最后阶段".into());
+            }
+            if action == "next_stage" {
+                let existing = c
+                    .query_row(
+                        "SELECT id FROM ad_experiments WHERE parent_id=?1 AND stage_index=?2 AND status<>'completed' ORDER BY id DESC LIMIT 1",
+                        params![id, next],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(err)?;
+                if let Some(existing_id) = existing {
+                    c.execute(
+                        "UPDATE ad_experiments SET status='completed',updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                        [id],
+                    )
+                    .map_err(err)?;
+                    return detail(c, existing_id);
+                }
+            }
+            let e = evaluate(c, id)?;
+            if action == "next_stage" && e["stageQualified"] != true {
+                return Err(
+                    "需观察天数已满，且观察期整体 TACOS 不高于当前阶段目标、日均销量不低于当前阶段目标，才能进入下一阶段"
+                        .into(),
+                );
             }
             let mut draft = input.clone();
             draft.name = format!("{} / Stage {} 新实验", input.name, next + 1);
@@ -1084,6 +1133,13 @@ fn action(c: &mut Connection, shop: &str, id: i64, action: &str, payload: Value)
                 params![id, next, new_id],
             )
             .map_err(err)?;
+            if action == "next_stage" {
+                c.execute(
+                    "UPDATE ad_experiments SET status='completed',updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                    [id],
+                )
+                .map_err(err)?;
+            }
             event(
                 c,
                 id,
@@ -1274,7 +1330,9 @@ mod tests {
         let mut v = current();
         v["tacos"] = json!(11);
         v["dailyUnits"] = json!(29);
-        assert_eq!(score(v)["decision"], "ROLLBACK");
+        let r = score(v);
+        assert_eq!(r["decision"], "ROLLBACK");
+        assert_eq!(r["stageQualified"], false);
     }
     #[test]
     fn flat_sales_low_score() {
@@ -1282,7 +1340,9 @@ mod tests {
         v["dailyUnits"] = json!(28.43);
         v["cvr"] = json!(1.23);
         v["cpa"] = json!(606.09);
-        assert_ne!(score(v)["decision"], "SUCCESS");
+        let r = score(v);
+        assert_ne!(r["decision"], "SUCCESS");
+        assert_eq!(r["stageQualified"], false);
     }
     #[test]
     fn declining_days_veto() {
@@ -1331,7 +1391,7 @@ mod tests {
             &json!({"status":"complete"}),
         );
         assert_eq!(r["confidence"], "Medium");
-        assert_eq!(r["stageQualified"], false);
+        assert_eq!(r["stageQualified"], true);
     }
     #[test]
     fn missing_day_has_no_strong_decision() {
@@ -1357,6 +1417,7 @@ mod tests {
         let r = score(v);
         assert!(r["score"].is_null());
         assert_eq!(r["decision"], "INSUFFICIENT_DATA");
+        assert_eq!(r["stageQualified"], true);
     }
     #[test]
     fn zero_orders_no_strong_decision() {
@@ -1411,7 +1472,7 @@ mod tests {
             &json!({"status":"complete"}),
         );
         assert_eq!(r["decision"], "STOP_SCALE");
-        assert_eq!(r["stageQualified"], false);
+        assert_eq!(r["stageQualified"], true);
     }
     #[test]
     fn multi_variable_reduces_confidence() {
@@ -1427,6 +1488,7 @@ mod tests {
             &json!({"status":"complete"}),
         );
         assert_eq!(r["decision"], "INSUFFICIENT_DATA");
+        assert_eq!(r["stageQualified"], true);
     }
     fn setup() -> Connection {
         let c = Connection::open_in_memory().unwrap();
@@ -1550,6 +1612,32 @@ mod tests {
         let id = create(&mut c, "test", input()).unwrap();
         action(&mut c, "test", id, "start", json!({})).unwrap();
         assert!(action(&mut c, "test", id, "next_stage", json!({})).is_err());
+    }
+    #[test]
+    fn next_stage_completes_parent_and_is_idempotent() {
+        let mut c = setup();
+        let id = create(&mut c, "test", input()).unwrap();
+        action(&mut c, "test", id, "start", json!({})).unwrap();
+        c.execute(
+            "UPDATE ad_experiments SET observation_start=?1 WHERE id=?2",
+            params![(today() - Duration::days(3)).to_string(), id],
+        )
+        .unwrap();
+
+        let first = action(&mut c, "test", id, "next_stage", json!({})).unwrap();
+        let second = action(&mut c, "test", id, "next_stage", json!({})).unwrap();
+        assert_eq!(first["id"], second["id"]);
+        assert_eq!(first["parentId"], id);
+        assert_eq!(first["stageIndex"], 1);
+        assert_eq!(detail(&c, id).unwrap()["status"], "completed");
+        let children: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM ad_experiments WHERE parent_id=?1 AND stage_index=1 AND status<>'completed'",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(children, 1);
     }
     #[test]
     fn rollback_returns_configuration_without_claiming_execution() {

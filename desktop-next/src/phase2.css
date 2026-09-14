@@ -1108,6 +1108,12 @@
 .sync-range-toolbar button {
   white-space: nowrap;
 }
+.month-toolbar button.dark-button {
+  color: #fff;
+  background: #101c35;
+  border-color: #101c35;
+  box-shadow: 0 8px 20px rgba(16, 28, 53, 0.16);
+}
 .sync-header-actions {
   display: flex;
   align-items: center;
@@ -1594,6 +1600,45 @@
 }
 .inventory-sync-bar .dark-button {
   flex: none;
+}
+.inventory-sync-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+.inventory-series-select {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #718097;
+  white-space: nowrap;
+}
+.inventory-series-select select {
+  max-width: 210px;
+  border: 1px solid #dfe6ef;
+  border-radius: 8px;
+  padding: 8px 30px 8px 10px;
+  background: #fff;
+  color: #26344d;
+  outline: 0;
+}
+.inventory-select-cell {
+  width: 34px;
+  min-width: 34px;
+  padding-left: 10px !important;
+  padding-right: 4px !important;
+  text-align: center;
+}
+.inventory-select-cell input {
+  width: 16px;
+  height: 16px;
+  accent-color: #3478f6;
+  cursor: pointer;
+}
+.list-toolbar .toolbar-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .inventory-health-dashboard {
   display: grid;

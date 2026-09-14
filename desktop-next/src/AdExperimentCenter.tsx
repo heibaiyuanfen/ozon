@@ -483,7 +483,9 @@ export function AdExperimentCenter({
   const e = selected?.evaluation;
   const filtered = list.filter(
     (x) =>
-      (!filter || x.status === filter || x.evaluation?.decision === filter) &&
+      (filter
+        ? x.status === filter || x.evaluation?.decision === filter
+        : x.status !== "completed") &&
       (!kindFilter || x.input.experimentType === kindFilter) &&
       (!fromFilter || x.createdAt.slice(0, 10) >= fromFilter) &&
       `${x.input.name} ${x.input.changes.map((c) => c.sku).join(" ")}`
