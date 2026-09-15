@@ -8,11 +8,39 @@
 .missing-reasons { display: flex; flex-wrap: wrap; gap: 6px; }
 .missing-reasons span { padding: 4px 8px; border-radius: 999px; background: #fff1e7; color: #b45309; font-size: 12px; white-space: nowrap; }
 .wb-report-overview { margin-bottom: 18px; }
+.wb-sync-diagnostic { display:flex; gap:12px; align-items:flex-start; margin:0 0 16px; padding:13px 16px; border:1px solid #dfe7f2; border-radius:13px; color:#36516f; background:#f7faff; }
+.wb-sync-diagnostic .wb-sync-dot { width:9px; height:9px; flex:0 0 auto; margin-top:5px; border-radius:50%; background:#94a3b8; box-shadow:0 0 0 4px rgba(148,163,184,.14); }
+.wb-sync-diagnostic b { color:#19324f; }
+.wb-sync-diagnostic p { margin:4px 0; font-size:12px; line-height:1.55; overflow-wrap:anywhere; }
+.wb-sync-diagnostic small { color:#8190a4; }
+.wb-sync-diagnostic.success { border-color:#ccebd9; color:#28704b; background:#f0fbf5; }
+.wb-sync-diagnostic.success .wb-sync-dot { background:#20a464; box-shadow:0 0 0 4px rgba(32,164,100,.14); }
+.wb-sync-diagnostic.partial { border-color:#f4d9aa; color:#8a5a12; background:#fff9ec; }
+.wb-sync-diagnostic.partial .wb-sync-dot { background:#e39a25; box-shadow:0 0 0 4px rgba(227,154,37,.14); }
+.wb-sync-diagnostic.failed { border-color:#f2c8ca; color:#a63c43; background:#fff3f3; }
+.wb-sync-diagnostic.failed .wb-sync-dot { background:#dc4c55; box-shadow:0 0 0 4px rgba(220,76,85,.14); }
+.wb-sync-diagnostic.running .wb-sync-dot { background:#3478f6; box-shadow:0 0 0 4px rgba(52,120,246,.14); animation:pulse 1s infinite alternate; }
 .wb-report-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 18px; }
 .wb-report-card { position: relative; min-height: 190px; padding: 22px; display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
 .wb-report-card h3 { margin: 0 0 6px; font-size: 17px; }
 .wb-report-card p { margin: 0; color: #74839b; line-height: 1.65; }
 .wb-report-card .badge { margin-top: auto; }
 .wb-report-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; color: #3478f6; background: #edf4ff; }
+.wb-finance-breakdown { margin-top: 14px; padding: 22px; }
+.wb-finance-totals { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:18px 0; }
+.wb-finance-totals>div { padding:16px 18px; border:1px solid #e3e9f2; border-radius:14px; background:linear-gradient(145deg,#fff,#f7faff); }
+.wb-finance-totals span,.wb-finance-totals small { display:block; color:#8491a4; font-size:11px; }
+.wb-finance-totals strong { display:block; margin:7px 0 5px; color:#172a49; font-size:22px; }
+.wb-fee-table { overflow:hidden; border:1px solid #e3e9f2; border-radius:14px; }
+.wb-fee-head,.wb-fee-row { display:grid; grid-template-columns:1.25fr 1fr .8fr 1.3fr; align-items:center; min-height:44px; padding:0 16px; column-gap:12px; }
+.wb-fee-head { color:#74839a; font-size:11px; background:#f4f7fb; }
+.wb-fee-row { border-top:1px solid #edf1f6; color:#34445d; font-size:12px; }
+.wb-fee-row strong { color:#e16a2d; }
+.wb-fee-row small { color:#8c98a9; }
+.wb-logistics-rule { display:flex; gap:13px; margin-top:16px; padding:15px 17px; border-radius:14px; color:#355075; background:#eef5ff; }
+.wb-logistics-rule svg { flex:0 0 auto; color:#3478f6; }
+.wb-logistics-rule b { color:#183961; }
+.wb-logistics-rule p { margin:5px 0 0; font-size:11px; line-height:1.7; }
+@media(max-width:1100px){.wb-finance-totals{grid-template-columns:1fr}.wb-fee-head,.wb-fee-row{grid-template-columns:1fr 1fr}.wb-fee-head span:nth-child(n+3),.wb-fee-row>*:nth-child(n+3){display:none}}
 @media (max-width: 1180px) { .wb-report-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .wb-report-grid { grid-template-columns: 1fr; } }

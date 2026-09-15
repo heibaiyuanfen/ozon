@@ -102,8 +102,8 @@ import { WbShopApiCenter } from "./WbShopApiCenter";
 import { PackingDocumentsPage } from "./PackingDocumentsPage";
 import { PricePromotionCenter } from "./PricePromotionCenter";
 
-type Workspace = "ozon" | "wb" | "mercadolibre";
-type WbPageKey = "product_master" | "shop_api" | "price_center" | "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings";
+type Workspace = "ozon" | "product_library" | "wb" | "mercadolibre";
+type WbPageKey = "shop_api" | "price_center" | "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings";
 
 const emptyDashboard: DashboardData = {
   revenue: 0,
@@ -246,13 +246,23 @@ function Sidebar({
           <Database size={18} />
         </div>
         <div>
-          <b>{workspace === "ozon" ? "Ozon ERP" : workspace === "wb" ? "WB ERP" : "美客多 ERP"}</b>
+          <b>{workspace === "ozon" ? "Ozon ERP" : workspace === "product_library" ? "产品库" : workspace === "wb" ? "WB ERP" : "美客多 ERP"}</b>
           <small>
             {workspace === "ozon" ? "切换至 WB 工作区" : workspace === "wb" ? "切换至美客多工作区" : "返回 Ozon 工作区"}
           </small>
         </div>
       </button>
-      {workspace !== "mercadolibre" && <label className="shop-picker">
+      <nav className="workspace-primary-nav">
+        <button
+          className={workspace === "product_library" ? "active" : ""}
+          onClick={() => setWorkspace("product_library")}
+          title="产品库"
+        >
+          <Box size={17} />
+          <span>产品库</span>
+        </button>
+      </nav>
+      {workspace !== "mercadolibre" && workspace !== "product_library" && <label className="shop-picker">
         <Store size={16} />
         <select
           value={activeShop?.id ?? ""}
@@ -292,7 +302,6 @@ function Sidebar({
             {(
               [
                 ["shop_api", "店铺与 API 中心", Store],
-                ["product_master", "商品资料中心", Box],
                 ["price_center", "价格与活动中心", BadgeRussianRuble],
                 ["daily", "经营总览", LayoutDashboard],
                 ["reports", "报告中心", BarChart3],
@@ -300,8 +309,7 @@ function Sidebar({
                 ["ads", "广告运营", Megaphone],
                 ["inventory", "仓库与库存", PackageSearch],
                 ["costs", "商品与成本", Box],
-                ["domestic_profit", "本土利润", BarChart3],
-                ["cross_profit", "跨境利润", BarChart3],
+                ["domestic_profit", "店铺利润", BarChart3],
                 ["settings", "WB API 与汇率", Settings2],
               ] as Array<
                 [WbPageKey, string, typeof LayoutDashboard]
@@ -320,6 +328,7 @@ function Sidebar({
         </>
       )}
       {workspace === "mercadolibre" && <><div className="nav-label">美客多工作台</div><nav><button className="active"><Store size={17}/>商品与经营</button></nav></>}
+      {workspace === "product_library" && <><div className="nav-label">产品资料中心</div><nav><button className="active"><Database size={17}/><span>标准产品与多店铺铺货</span></button></nav></>}
       <div className="sidebar-foot">
         <div className="avatar">黑</div>
         <div>
@@ -1385,7 +1394,8 @@ export function App() {
         setCollapsed={setSidebarCollapsed}
       />
       <main>
-        {workspace === "wb" && (wbPage === "shop_api" ? <WbShopApiCenter /> : wbPage === "product_master" ? <ProductMasterPage /> : wbPage === "price_center" ? <PricePromotionCenter /> : <WbPage range={range} section={wbPage} days={days} setDays={setDays} />)}
+        {workspace === "product_library" && <ProductMasterPage />}
+        {workspace === "wb" && (wbPage === "shop_api" ? <WbShopApiCenter /> : wbPage === "price_center" ? <PricePromotionCenter /> : <WbPage range={range} section={wbPage} days={days} setDays={setDays} />)}
         {workspace === "mercadolibre" && <MercadoLibrePage />}
         {workspace === "ozon" && (
           <>

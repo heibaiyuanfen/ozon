@@ -271,125 +271,79 @@ export function AdvertisingSeriesPanel({
     : null;
   return (
     <section className="card ad-series-v2">
-      <div className="section-heading">
+      <div className="section-heading ad-series-heading">
         <div>
           <h2>产品系列 · 每日广告与销量</h2>
           <p>选择产品组成系列，导出每个产品与整个系列的逐日数据和周期合计。</p>
         </div>
-        <span>JSON v2.2</span>
-        <button disabled={!selection.size} onClick={() => openExperiment({skus:[...selection],name:"所选广告系列"})}>创建广告实验</button>
+        <div className="ad-series-heading-actions">
+          <span className="schema-badge">JSON v2.2</span>
+          <button className="experiment-button" disabled={!selection.size} onClick={() => openExperiment({skus:[...selection],name:"所选广告系列"})}>创建广告实验</button>
+        </div>
       </div>
       <fieldset disabled={busy}>
-        <div className="series-controls">
-          <label>
-            系列名称
-            <input
-              aria-label="系列名称"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="例如：ABC 产品系列"
-            />
-          </label>
-          <button
-            disabled={!name.trim() || !selection.size}
-            onClick={() => void save()}
-          >
-            保存为系列
-          </button>
-        </div>
-        <div className="series-chips">
-          {saved.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => {
-                setSelection(new Set(s.skus));
-                setName(s.name);
-              }}
-            >
-              {s.name} · {s.skus.length} 个产品
-            </button>
-          ))}
-        </div>
-        <div className="series-controls">
-          <label>
-            统计期限
-            <select
-              aria-label="统计期限"
-              value={mode}
-              onChange={(e) => chooseMode(e.target.value)}
-            >
-              <option value="last_7_days">最近 7 天（截止昨日）</option>
-              <option value="last_30_days">最近 30 天（截止昨日）</option>
-              <option value="calendar_month">自然月</option>
-              <option value="custom">自选起止日期</option>
-            </select>
-          </label>
-          {mode === "calendar_month" && (
-            <label>
-              月份
+        <div className="series-block series-identity-block">
+          <div className="series-block-heading"><div><b>01</b><span><strong>建立产品系列</strong><small>命名当前选择，之后可以一键复用</small></span></div><em>{saved.length} 个已保存系列</em></div>
+          <div className="series-controls">
+            <label className="series-name-field">
+              系列名称
               <input
-                aria-label="统计月份"
-                type="month"
-                value={month}
-                onChange={(e) => chooseMonth(e.target.value)}
+                aria-label="系列名称"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="例如：ABC 产品系列"
               />
             </label>
-          )}
-          <label>
-            开始日期
-            <input
-              aria-label="开始日期"
-              type="date"
-              value={range.from}
-              onChange={(e) => {
-                setMode("custom");
-                setRange({ ...range, from: e.target.value });
-              }}
-            />
-          </label>
-          <label>
-            结束日期
-            <input
-              aria-label="结束日期"
-              type="date"
-              value={range.to}
-              onChange={(e) => {
-                setMode("custom");
-                setRange({ ...range, to: e.target.value });
-              }}
-            />
-          </label>
+            <button className="soft-primary" disabled={!name.trim() || !selection.size} onClick={() => void save()}>
+              保存为系列
+            </button>
+          </div>
+          <div className="series-chips saved-series-chips">
+            {saved.map((s) => (
+              <button
+                className={name === s.name ? "active" : ""}
+                key={s.id}
+                onClick={() => {
+                  setSelection(new Set(s.skus));
+                  setName(s.name);
+                }}
+              >
+                <span>{s.name}</span><small>{s.skus.length} 个产品</small>
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="series-controls">
-          <input
-            aria-label="搜索系列产品"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索全部产品：名称 / SKU / 货号"
-          />
-          <span>
-            已选 {selection.size} 个产品 · 匹配 {visible.length} 个
-          </span>
-          <button
-            onClick={() =>
-              setSelection(
-                new Set([...selection, ...visible.map((p) => p.sku)]),
-              )
-            }
-            disabled={
-              new Set([...selection, ...visible.map((p) => p.sku)]).size > 500
-            }
-          >
-            全选搜索结果
-          </button>
-          <button onClick={() => setSelection(new Set())}>清空选择</button>
+        <div className="series-block series-period-block">
+          <div className="series-block-heading"><div><b>02</b><span><strong>选择统计周期</strong><small>广告和销量将按同一自然日口径汇总</small></span></div><em>{range.from} 至 {range.to}</em></div>
+          <div className="series-controls period-controls">
+            <label>
+              统计期限
+              <select aria-label="统计期限" value={mode} onChange={(e) => chooseMode(e.target.value)}>
+                <option value="last_7_days">最近 7 天（截止昨日）</option>
+                <option value="last_30_days">最近 30 天（截止昨日）</option>
+                <option value="calendar_month">自然月</option>
+                <option value="custom">自选起止日期</option>
+              </select>
+            </label>
+            {mode === "calendar_month" && <label>月份<input aria-label="统计月份" type="month" value={month} onChange={(e) => chooseMonth(e.target.value)} /></label>}
+            <label>开始日期<input aria-label="开始日期" type="date" value={range.from} onChange={(e) => { setMode("custom"); setRange({ ...range, from: e.target.value }); }} /></label>
+            <span className="date-arrow">→</span>
+            <label>结束日期<input aria-label="结束日期" type="date" value={range.to} onChange={(e) => { setMode("custom"); setRange({ ...range, to: e.target.value }); }} /></label>
+          </div>
         </div>
-        <div className="series-product-list">
+        <div className="series-block series-products-block">
+          <div className="series-block-heading"><div><b>03</b><span><strong>选择系列产品</strong><small>支持按名称、SKU 或货号快速筛选</small></span></div><div className="selection-counter"><strong>{selection.size}</strong><span>已选</span><i>/</i><strong>{visible.length}</strong><span>匹配</span></div></div>
+          <div className="series-controls product-search-row">
+            <div className="product-search"><span>⌕</span><input aria-label="搜索系列产品" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索全部产品：名称 / SKU / 货号" /></div>
+            <button className="soft-primary" onClick={() => setSelection(new Set([...selection, ...visible.map((p) => p.sku)]))} disabled={new Set([...selection, ...visible.map((p) => p.sku)]).size > 500}>全选搜索结果</button>
+            <button className="ghost-button" onClick={() => setSelection(new Set())}>清空选择</button>
+          </div>
+          <div className="series-product-list">
           {loading ? (
             <p>正在加载产品…</p>
           ) : visible.length ? (
             visible.map((p) => (
-              <label key={p.sku}>
+              <label className={selection.has(p.sku) ? "selected" : ""} key={p.sku}>
                 <input
                   type="checkbox"
                   aria-label={`系列产品 ${p.sku}`}
@@ -405,16 +359,13 @@ export function AdvertisingSeriesPanel({
           ) : (
             <p>没有匹配产品。请先同步商品或销售数据。</p>
           )}
-        </div>
-        <div className="series-chips">
-          {[...selection].map((sku) => (
-            <button key={sku} onClick={() => toggle(sku)} title="点击移除">
-              {catalog.find((p) => p.sku === sku)?.offerId || sku} ×
-            </button>
-          ))}
+          </div>
+          {!!selection.size && <div className="series-chips selected-series-chips">
+            {[...selection].map((sku) => <button key={sku} onClick={() => toggle(sku)} title="点击移除">{catalog.find((p) => p.sku === sku)?.offerId || sku}<span>×</span></button>)}
+          </div>}
         </div>
       </fieldset>
-      <div className="series-controls">
+      <div className="series-controls series-footer-actions">
         <button
           className="primary"
           disabled={busy || !selection.size || selection.size > 500}
@@ -431,7 +382,7 @@ export function AdvertisingSeriesPanel({
         <button disabled={busy || !data} onClick={() => void exportJson()}>
           导出 JSON
         </button>
-        <span>
+        <span className="period-summary">
           {range.from} 至 {range.to}（包含起止日）
         </span>
       </div>

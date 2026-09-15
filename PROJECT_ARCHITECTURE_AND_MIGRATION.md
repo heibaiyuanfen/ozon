@@ -1267,3 +1267,45 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 当前实现用于群内查看审核；飞书中的通过/驳回结果尚未自动回写软件，该能力需要可被飞书访问的事件回调服务。
 - 验证：`cargo check --locked`、`pnpm build` 通过；Rust 全量测试 141 passed / 4 ignored，新增采购单飞书卡片合计与商品明细测试通过。正式脚本构建并覆盖根目录 EXE，Release/root SHA-256 均为 `C284C44723C95FC3AEC85DF7FFF7182859A44BD13BEB8DB20FA7F32C94FEFD17`，大小 `30,625,280` bytes。
 - 可见验收：根目录正式程序已启动，采购单页面显示“提交审核到飞书群”，历史采购单显示“已提交飞书”，页面反馈“采购单已提交并发送到飞书群，共 1 张卡片”。
+
+## 2026-09-15 — 广告数据产品系列面板视觉优化
+
+- 将“产品系列 · 每日广告与销量”从扁平表单重构为三个连续步骤：建立产品系列、选择统计周期、选择系列产品；每个步骤使用独立卡片、序号、说明和状态摘要，降低控件拥挤感。
+- 已保存系列改为带产品数量徽标的可选标签，当前系列提供高亮状态；统计周期统一日期控件尺寸并增加日期范围摘要。
+- 商品选择区改为响应式卡片网格，支持悬停与选中高亮，搜索框、匹配数量、已选数量、全选及清空形成独立工具栏；已选商品以可移除标签集中展示。
+- 生成预览、同步广告和导出 JSON 移入固定视觉层级的底部操作区；保持原有系列保存、筛选、选择、同步、导出及广告实验逻辑不变。
+- 验证：`pnpm build`、`cargo check --locked` 通过；Rust 全量测试 141 passed / 4 ignored。正式脚本构建并覆盖根目录 EXE，Release/root SHA-256 均为 `2EDE3FEC26DACB19F3C787701FAE7A0F5FC3D6E7C8B15AA9011D322B8085A390`，大小 `30,629,376` bytes。
+- 可见验收：根目录正式程序成功启动；广告运营页面实际显示三段式卡片、系列数量徽标、日期范围、商品卡片网格及蓝色选中态，数据和既有选择均正常加载。
+
+## 2026-09-15 — WB 本土财务扣费与物流占比
+
+- WB 报告中心接入当前 Finance v1 销售结算明细接口，按结算日期缓存实际销售额、商品应付、佣金、物流、仓储、付费入库、支付手续费、罚款、扣款和其他调整；旧 v5 接口已停用，不再新增依赖。
+- 报告页新增本土店明确扣费表，以结算销售额为统一分母显示每项费用金额与占比，并突出物流费用占销售额比例；Finance 无权限或请求失败时保留旧缓存，不使用订单预估覆盖结算数据。
+- 后段物流说明区记录 2026-08-11 官方口径：1 升内分档基础费、超过 1 升的首升/续升公式、正向物流的仓库系数与本地化指数，以及反向物流不乘上述系数的区别。最终核算始终以 Finance logistics 字段为准。
+- 单次返回达到 100000 行时拒绝覆盖缓存并提示缩短日期，避免分页限额造成不完整财务报表。
+- 验证：`pnpm build`、`cargo check --locked` 通过；Rust 全量测试 143 passed / 4 ignored。正式脚本构建并覆盖根目录 EXE，Release/root SHA-256 均为 `34832A501A50D2D9BC6BB8E2E3C9AAAF443B1B234C7E0F1DE0757965AA6C0441`，大小 `30,761,472` bytes。未使用用户 Token 发起真实 Finance 同步，避免在未确认接口限频时占用生产请求额度。
+
+### WB 本土/跨境口径隔离修正
+
+- WB 设置新增互斥业务类型 `domestic` / `cross_border`，工作区标题、利润说明和财务模块按当前类型呈现；侧栏合并为唯一“店铺利润”入口，不再让同一店铺同时出现本土利润与跨境利润。
+- 本土 Finance 实际扣费表仅在本土模式显示；跨境模式保留采购、头程与暂估利润口径。切换业务类型或提交新 Token 时，清除订单、广告、仓库、库存与财务等可重新同步缓存，防止上一店铺数据串入；人工维护的商品成本不会删除。
+- API 配置包同步携带业务类型。验证：`pnpm build` 通过；Rust 全量测试 143 passed / 4 ignored。正式 Release/root SHA-256 均为 `282739FCAF1B85283FDFCF6189974CF3591AA1E04C06615970F7462127B9D4BA`，根目录 EXE 大小 `30,683,648` bytes。
+
+### WB 同步失败原因持久显示
+
+- WB 经营页顶部新增常驻同步诊断条，区分尚未同步、同步中、全部成功、部分成功和失败；保存最后尝试时间与完整诊断，重启或切换页面后仍可查看。
+- HTTP 401/403/429 分别解释为 Token 无效、权限不足和接口限频，并附带截断后的 WB 平台响应正文；网络错误与解析错误保留具体原因。Finance 等非核心数据源失败标记为部分成功，不再用笼统的“同步完成”掩盖。
+- WB GET/POST 成功响应兼容 HTTP 204 与空响应体，将其解释为“当前无数据”而非继续 JSON 解析；修复库存 Analytics 接口无数据时误报 `EOF while parsing a value`、继而错误保留旧库存缓存的问题。验证：`pnpm build` 通过；Rust 全量测试 143 passed / 4 ignored。正式 Release/root SHA-256 均为 `A98E6CC1954DCBFFCDA5393D33C0DFAACE09464D53B85AE58DE8CFE94499BA6F`，大小 `30,977,024` bytes。
+- WB 订单同步改为双来源：Statistics `/api/v1/supplier/orders` 保留 FBO 与经营统计口径，Marketplace `/api/v3/orders` 按 30 天分片和 `next` 游标补充 FBS 装配订单；按 `rid` 优先去重，价格分值换算为卢布，并按莫斯科时区归日。同步诊断分别展示 Statistics 原始条数、日期内入库条数、FBS 实时条数及 Marketplace 权限错误，避免 Statistics 延迟或日期过滤后只显示无法解释的“订单 0”。验证：`pnpm build` 通过；Rust 全量测试 143 passed / 4 ignored。正式 Release/root SHA-256 均为 `B2CCA5AFC57845038984B4A77E443DB76CBFDF2FC99F2A4EC6356A89D8E562AA`，大小 `30,989,824` bytes。
+- WB Finance v1 物流字段映射修正：实际金额读取 `deliveryService` / `delivery_service`，同时兼容旧版 `deliveryRub` / `delivery_rub`；明确排除仅代表次数的 `deliveryAmount` 与 `returnAmount`。新增真实 v1 结构回归测试（`deliveryService: "85.23"`），防止有物流扣费却显示 0。验证：`pnpm build` 通过；Rust 全量测试 144 passed / 4 ignored。正式 Release/root SHA-256 均为 `960549415D2896CF0062642118D926B43F03785C2CEF53AB306D582B130D4FF7`，大小 `30,989,824` bytes。
+- WB Finance v1 其余费用字段复核：仓储改读 `paidStorage` / `paid_storage` 并兼容旧字段，入库验收改读 `paidAcceptance` / `paid_acceptance` 并兼容旧字段；“其他扣款”改为独立累加 `additionalPayment` 与 `rebillLogisticCost`，修复前者存在但为 0 时吞掉后者的问题。罚款继续按 `rrDate` 所属结算日过滤，不将范围外费用混入当前周期。验证：`pnpm build` 通过；Rust 全量测试 145 passed / 4 ignored。正式 Release/root SHA-256 均为 `5271D0A0154A2B5454C09F727856E78B3A8DEA263E8F92EEA3B0785AE42663F2`，大小 `30,990,848` bytes。
+- 验证：`pnpm build` 通过；Rust 全量测试 143 passed / 4 ignored。正式 Release/root SHA-256 均为 `9896F7B7D735957B1E30F32737341745745FFDA3B26B1E4407D7596F64EF1F71`，根目录 EXE 大小 `30,964,736` bytes。
+
+## 2026-09-15 产品库提升为独立一级模块
+
+- 将产品库从 WB 工作区的“商品资料中心”子页移出，增加左侧始终可见的一级“产品库”入口。
+- 新增 `product_library` 独立工作区，直接加载标准 SKU、图片/采购成本和多店铺铺货页面；WB 导航不再保留重复入口。
+- 前端验证：`pnpm build` 通过。
+- Rust 验证：`cargo check --locked` 通过；`cargo test --locked product_master::` 40 项全部通过。
+- 正式构建：使用 `desktop-next/scripts/build-tauri-release.cmd` 成功生成嵌入式 Release EXE。
+- 覆盖结果：根目录 `ozon-analytics-next.exe` 已替换，大小 30,761,472 字节，SHA-256 `B33BF7531BB5FEC26CF4124D1FAFDD46BBD1F78BAEF8D693FEA1038CEAC7CBAE`。

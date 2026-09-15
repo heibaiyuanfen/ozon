@@ -1138,6 +1138,92 @@ fn dispatch(c: &Connection, action: &str, p: Value, role: &str) -> Result<Value>
         return Err("Permission denied".into());
     }
     match action {
+        "upload_product_v1" => {
+            let request_id = txt(&p, "requestId");
+            if p.get("apiVersion").and_then(Value::as_str) != Some("v1") {
+                return Err("UNSUPPORTED_API_VERSION: apiVersion 必须为 v1".into());
+            }
+            if request_id.is_empty() || request_id.len() > 100 {
+                return Err("requestId 必须是 1-100 字符的幂等请求号".into());
+            }
+            if let Some(saved) = c.query_row(
+                "SELECT response_json FROM pm_api_requests WHERE request_id=?1 AND action='upload_product_v1'",
+                [&request_id], |r| r.get::<_,String>(0),
+            ).optional().map_err(err)? {
+                return serde_json::from_str(&saved).map_err(err);
+            }
+            let product = p
+                .get("product")
+                .and_then(Value::as_object)
+                .ok_or("product 必须为对象")?;
+            let code = product
+                .get("product_code")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if code.is_empty() {
+                return Err("product.product_code 不能为空".into());
+            }
+            let costs = product.get("costs").and_then(Value::as_object);
+            let package = product.get("package").and_then(Value::as_object);
+            let supplier = product.get("supplier").and_then(Value::as_object);
+            let val = |o: Option<&serde_json::Map<String, Value>>, k: &str| -> String {
+                o.and_then(|x| x.get(k))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let normalized = json!({
+                "code":code,
+                "name":product.get("name").and_then(Value::as_str).unwrap_or(""),
+                "descriptionText":product.get("description").and_then(Value::as_str).unwrap_or(""),
+                "brand":product.get("brand").and_then(Value::as_str).unwrap_or(""),
+                "category":product.get("category").and_then(Value::as_str).unwrap_or(""),
+                "supplier":val(supplier,"name"),
+                "supplierUrl":val(supplier,"purchase_url"),
+                "purchaseCost":val(costs,"purchase_cost"),
+                "purchaseCurrency":val(costs,"currency"),
+                "domesticShipping":val(costs,"domestic_shipping"),
+                "labelFee":val(costs,"label_fee"),
+                "packagingFee":val(costs,"packaging_fee"),
+                "otherCost":val(costs,"other_cost"),
+                "weightKg":val(package,"weight_kg"),
+                "lengthCm":val(package,"length_cm"),
+                "widthCm":val(package,"width_cm"),
+                "heightCm":val(package,"height_cm"),
+                "attributes":product.get("attributes").cloned().unwrap_or(json!({})),
+                "media":product.get("images").cloned().unwrap_or(json!([])),
+                "status":"active",
+                "reason":"固定 v1 接口上传"
+            });
+            let tx = c.unchecked_transaction().map_err(err)?;
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM pm_skus WHERE organization_id='local' AND code=?1",
+                    [code],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(err)?;
+            let sku_id = if let Some(id) = existing {
+                let mut update = normalized.clone();
+                update["id"] = json!(id);
+                extra::handle(&tx, "update_sku", &update, "admin")?;
+                update["id"].as_str().unwrap_or("").to_string()
+            } else {
+                create_sku(&tx, &normalized)?
+            };
+            let targets = p.get("shopTargets").cloned().unwrap_or(json!([]));
+            let target_result = if targets.as_array().is_some_and(|x| !x.is_empty()) {
+                extra::upsert_shop_products(&tx, &json!({"skuId":sku_id,"targets":targets}))?
+            } else {
+                json!({"targets":[]})
+            };
+            let response = json!({"success":true,"apiVersion":"v1","requestId":request_id,"data":{"productId":sku_id,"shopTargets":target_result["targets"]}});
+            tx.execute("INSERT INTO pm_api_requests(request_id,action,response_json)VALUES(?1,'upload_product_v1',?2)",params![request_id,response.to_string()]).map_err(err)?;
+            tx.commit().map_err(err)?;
+            Ok(response)
+        }
         "list" => extra::list(c, &p),
         "create_spu" => {
             let tx = c.unchecked_transaction().map_err(err)?;
@@ -1212,5 +1298,81 @@ fn dispatch(c: &Connection, action: &str, p: Value, role: &str) -> Result<Value>
         "resolve" => resolve(c, &txt(&p, "shopId"), &p),
         "import_preview" | "import_commit" => import::handle(c, action, &p),
         _ => extra::handle(c, action, &p, role),
+    }
+}
+
+#[cfg(test)]
+mod local_library_contract_tests {
+    use super::*;
+
+    fn fixture() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE wb_shops(id TEXT PRIMARY KEY,organization_id TEXT,status TEXT,name TEXT);INSERT INTO wb_shops VALUES('a','local','active','Shop A'),('b','local','active','Shop B');CREATE TABLE wb_sync_job_runs(resource_type TEXT,shop_id TEXT,status TEXT,records_processed INTEGER,records_succeeded INTEGER,records_failed INTEGER,started_at TEXT,finished_at TEXT,error_message TEXT);").unwrap();
+        ensure(&c).unwrap();
+        c
+    }
+
+    fn request(request_id: &str, code: &str, targets: Value) -> Value {
+        json!({
+            "apiVersion":"v1","requestId":request_id,
+            "product":{
+                "product_code":code,"name":"测试产品","supplier":{"name":"1688","purchase_url":"https://detail.1688.com/test"},
+                "costs":{"purchase_cost":"12.3400","currency":"CNY","label_fee":"0.50"},
+                "package":{"weight_kg":"0.5"},"images":[{"url":"https://img.example/a.jpg","sort_order":1}],"attributes":{"color":"black"}
+            },
+            "shopTargets":targets
+        })
+    }
+
+    #[test]
+    fn v1_upload_is_idempotent_and_same_offer_is_allowed_across_shops() {
+        let c = fixture();
+        let targets = json!([{"shopId":"a","offerId":"SAME"},{"shopId":"b","offerId":"SAME"}]);
+        let first = dispatch(
+            &c,
+            "upload_product_v1",
+            request("req-1", "SKU-1", targets),
+            "admin",
+        )
+        .unwrap();
+        let second = dispatch(
+            &c,
+            "upload_product_v1",
+            request("req-1", "IGNORED", json!([])),
+            "admin",
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM pm_shop_products", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn duplicate_offer_in_one_shop_rolls_back_the_whole_request() {
+        let c = fixture();
+        dispatch(
+            &c,
+            "upload_product_v1",
+            request("req-1", "SKU-1", json!([{"shopId":"a","offerId":"ONLY"}])),
+            "admin",
+        )
+        .unwrap();
+        let error = dispatch(
+            &c,
+            "upload_product_v1",
+            request("req-2", "SKU-2", json!([{"shopId":"a","offerId":"ONLY"}])),
+            "admin",
+        )
+        .unwrap_err();
+        assert!(error.contains("DUPLICATE_OFFER_ID"));
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM pm_skus", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 }

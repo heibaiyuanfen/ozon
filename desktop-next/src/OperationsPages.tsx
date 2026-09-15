@@ -111,6 +111,7 @@ import {
   wbAds,
   wbWarehouses,
   wbStocks,
+  wbFinanceSummary,
   wbSettings,
 } from "./bridge";
 import type {
@@ -150,6 +151,7 @@ import type {
   WbAdRow,
   WbWarehouseRow,
   WbStockRow,
+  WbFinanceSummary,
   WbSettings,
 } from "./types";
 
@@ -534,6 +536,7 @@ export function ListingPage() {
       setJobs(await listingJobs());
     } catch (e) {
       setMessage(String(e));
+      await load();
     } finally {
       setBusy(false);
     }
@@ -4735,6 +4738,7 @@ export function WbPage({
     [adRows, setAdRows] = useState<WbAdRow[]>([]),
     [warehouseRows, setWarehouseRows] = useState<WbWarehouseRow[]>([]),
     [stockRows, setStockRows] = useState<WbStockRow[]>([]),
+    [finance, setFinance] = useState<WbFinanceSummary | null>(null),
     [costs, setCosts] = useState<WbCost[]>([]),
     [editingWbCost, setEditingWbCost] = useState<WbCost | null>(null),
     [costQuery, setCostQuery] = useState(""),
@@ -4745,7 +4749,7 @@ export function WbPage({
     [message, setMessage] = useState(""),
     [wbApiPath, setWbApiPath] = useState("");
   const load = async () => {
-    const [s, d, c, o, a, w, stocks] = await Promise.all([
+    const [s, d, c, o, a, w, stocks, settled] = await Promise.all([
       wbSettings(),
       wbDaily(range),
       wbCosts(),
@@ -4753,6 +4757,7 @@ export function WbPage({
       wbAds(range),
       wbWarehouses(),
       wbStocks(),
+      wbFinanceSummary(range),
     ]);
     setSettings(s);
     setRows(d);
@@ -4761,6 +4766,7 @@ export function WbPage({
     setAdRows(a);
     setWarehouseRows(w);
     setStockRows(stocks);
+    setFinance(settled);
   };
   useEffect(() => {
     void load();
@@ -4915,6 +4921,7 @@ export function WbPage({
   };
   const sync = async () => {
     setBusy(true);
+    setSettings((current) => current ? { ...current, lastSyncStatus: "running", lastSyncMessage: "正在连接 WB，各数据源会依次同步…" } : current);
     setMessage(
       "WB API 正在后台同步，当前页面仍可继续浏览；完成后会自动刷新缓存。",
     );
@@ -4923,6 +4930,7 @@ export function WbPage({
       await load();
     } catch (e) {
       setMessage(String(e));
+      await load();
     } finally {
       setBusy(false);
     }
@@ -4932,7 +4940,7 @@ export function WbPage({
       <header className="page-header wb-header">
         <div>
           <span className="eyebrow">WILDBERRIES WORKSPACE</span>
-          <h1>WB 跨境独立工作台</h1>
+          <h1>WB {settings?.businessMode === "cross_border" ? "跨境" : "本土"}独立工作台</h1>
           <p>
             独立 Token、独立数据库、精确商品广告与暂估利润，不混入 Ozon 数据
           </p>
@@ -4942,12 +4950,30 @@ export function WbPage({
           {busy ? "同步中" : "同步 WB API"}
         </button>
       </header>
-      {message && <div className="sync-message">{message}</div>}
+      <section className={`wb-sync-diagnostic ${busy || settings?.lastSyncStatus === "running" ? "running" : settings?.lastSyncStatus || "never"}`}>
+        <div className="wb-sync-dot" />
+        <div>
+          <b>{busy ? "WB 正在同步" : settings?.lastSyncStatus === "success" ? "WB 同步成功" : settings?.lastSyncStatus === "partial" ? "WB 部分数据同步失败" : settings?.lastSyncStatus === "failed" ? "WB 同步失败" : "当前店铺尚未完成同步"}</b>
+          <p>{message || settings?.lastSyncMessage || "请点击右上角“同步 WB API”获取当前店铺数据。"}</p>
+          {!!settings?.lastSyncAt && <small>最后尝试：{settings.lastSyncAt}</small>}
+        </div>
+      </section>
       {tab === "reports" && (() => {
         const validOrders = orderRows.filter((row) => !row.cancelled);
         const cancelledOrders = orderRows.filter((row) => row.cancelled);
         const stockUnits = stockRows.reduce((sum, row) => sum + row.quantity, 0);
         const returnTransit = stockRows.reduce((sum, row) => sum + row.inWayFromClient, 0);
+        const financeSales = Math.abs(finance?.salesRub || 0);
+        const feeShare = (value: number) => financeSales > 0 ? `${(Math.abs(value) / financeSales * 100).toFixed(2)}%` : "—";
+        const financeFees = [
+          ["平台佣金", finance?.commissionRub || 0, "结算明细"],
+          ["物流费用", finance?.logisticsRub || 0, "直发及退货物流"],
+          ["仓储费用", finance?.storageRub || 0, "付费仓储"],
+          ["入库验收", finance?.acceptanceRub || 0, "付费入库"],
+          ["支付手续费", finance?.acquiringRub || 0, "收款服务"],
+          ["罚款", finance?.penaltyRub || 0, "平台罚款"],
+          ["其他扣款", (finance?.deductionRub || 0) + (finance?.otherRub || 0), "扣款与调整"],
+        ] as const;
         const reportCards = [
           { title: "每周销售趋势分析", text: `${validOrders.length} 条有效订单，销售额 ¥${revenue.toFixed(2)}`, state: "已接入", target: "daily" as const },
           { title: "销量 / 实时销售概览", text: `${units} 件 · ${activeProducts} 个活跃 nmId`, state: "已接入", target: "orders" as const },
@@ -4982,9 +5008,25 @@ export function WbPage({
               </article>
             ))}
           </section>
+          {settings?.businessMode !== "cross_border" && <section className="card wb-finance-breakdown">
+            <div className="section-heading">
+              <div><h2>本土店明确扣费与销售额占比</h2><p>来自 WB Finance 结算明细，不使用订单页预估值；占比统一按扣费绝对值 ÷ 结算销售额计算。</p></div>
+              <span className={`badge ${finance?.rows ? "green" : "orange"}`}>{finance?.rows ? `${finance.rows} 条结算明细` : "等待 Finance 同步"}</span>
+            </div>
+            <div className="wb-finance-totals">
+              <div><span>结算销售额</span><strong>₽{financeSales.toLocaleString("zh-CN",{maximumFractionDigits:2})}</strong><small>占比计算基数</small></div>
+              <div><span>商品应付金额</span><strong>₽{(finance?.forPayRub || 0).toLocaleString("zh-CN",{maximumFractionDigits:2})}</strong><small>WB forPay 字段</small></div>
+              <div><span>物流费占销售额</span><strong>{feeShare(finance?.logisticsRub || 0)}</strong><small>实际结算物流费用</small></div>
+            </div>
+            <div className="wb-fee-table">
+              <div className="wb-fee-head"><span>扣费项目</span><span>实际金额</span><span>销售额占比</span><span>数据口径</span></div>
+              {financeFees.map(([label,value,note])=><div className="wb-fee-row" key={label}><b>{label}</b><span>₽{Math.abs(value).toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2})}</span><strong>{feeShare(value)}</strong><small>{note}</small></div>)}
+            </div>
+            <div className="wb-logistics-rule"><Truck size={20}/><div><b>野莓本土后段物流计算参考（WB 规则更新于 2026-08-11）</b><p>实际核算直接采用结算报告的 logistics 字段。预算参考：体积 0–0.2 / 0.4 / 0.6 / 0.8 / 1.0 升的基础费分别为 ₽23 / 26 / 29 / 30 / 32；超过 1 升按 ₽46 + ₽14 × 超出升数。正向物流再乘仓库物流系数与本地化指数；买家拒收/退货的反向物流只按基础体积费，不乘仓库系数和本地化指数。费率会由 WB 调整，因此预算值不能替代最终结算。</p></div></div>
+          </section>}
           <section className="card migration-note">
             <AlertTriangle />
-            <div><h3>报告口径与后续同步</h3><p>销售和库存已经复用当前 WB API 缓存。隐藏商品、扣款、退货移动可由 Seller Analytics 报告接口补充；品牌价格指数与完整 IMEI 差异并不在当前缓存内，界面不会把取消订单冒充退货、也不会估算扣款。</p></div>
+            <div><h3>报告口径与同步权限</h3><p>本土扣费来自新版 WB Finance 销售结算明细接口，需要个人或服务 Token 开通“财务”权限。销售和库存继续复用现有缓存；品牌价格指数与完整 IMEI 差异不在当前缓存内，界面不会把取消订单冒充正式退货。</p></div>
           </section>
         </>;
       })()}
@@ -5416,15 +5458,15 @@ export function WbPage({
         </>
       )}
       {(tab === "domestic_profit" || tab === "cross_profit") && (() => {
-        const wanted = tab === "domestic_profit" ? "overseas" : "dongguan";
-        const scoped = rows.filter((row) => row.warehouseMode === wanted);
+        const isDomestic = settings?.businessMode !== "cross_border";
+        const scoped = rows;
         const scopedRevenue = scoped.reduce((n, row) => n + row.revenueCny, 0);
         const scopedAds = scoped.reduce((n, row) => n + row.adSpendCny, 0);
         const scopedProfit = scoped.reduce((n, row) => n + (row.profitCny || 0), 0);
         const complete = scoped.filter((row) => row.complete).length;
         return <>
           <section className="card trend-card">
-            <div className="section-heading"><div><h2>{tab === "domestic_profit" ? "WB 本土月度利润" : "WB 跨境月度利润"}</h2><p>{tab === "domestic_profit" ? "俄罗斯海外仓商品" : "中国跨境仓商品"}，利润沿用 WB 每日经营的销售－广告－平台费－采购－物流公式</p></div>
+            <div className="section-heading"><div><h2>WB {isDomestic ? "本土" : "跨境"}月度利润</h2><p>{isDomestic ? "本土店只采用当前本土 Token 的结算与经营数据" : "跨境店采用当前跨境 Token 的采购、头程与经营数据"}；两种模式互斥，不再在同一店铺并列展示。</p></div>
               <div className="tabs">{([[1,"日利润"],[7,"周利润"],[30,"月利润"],[90,"季度利润"]] as const).map(([value,label])=><button key={value} className={days===value?"selected":""} onClick={()=>setDays(value)}>{label}</button>)}</div>
             </div>
             <div className="four-cols">
@@ -5557,6 +5599,14 @@ export function WbPage({
       )}
       {tab === "settings" && settings && (
         <section className="card wb-settings">
+          <label>
+            店铺业务类型
+            <select value={settings.businessMode} onChange={(e) => setSettings({ ...settings, businessMode: e.target.value as "domestic" | "cross_border" })}>
+              <option value="domestic">WB 本土店</option>
+              <option value="cross_border">WB 跨境店</option>
+            </select>
+            <small>保存后整个 WB 工作区只使用这一种业务口径</small>
+          </label>
           <label>
             店铺名称
             <input

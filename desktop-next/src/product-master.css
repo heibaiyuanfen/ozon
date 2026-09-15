@@ -176,3 +176,35 @@
 .pm-property button {
   white-space: nowrap;
 }
+.pm-distribution-dialog select {
+  padding: 10px;
+  border: 1px solid #ccd7e6;
+  border-radius: 8px;
+  background: white;
+}
+.pm-target-list {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+  max-height: 430px;
+  overflow: auto;
+}
+.pm-target {
+  display: grid !important;
+  grid-template-columns: auto minmax(180px, 1fr) minmax(200px, 1fr);
+  align-items: center;
+  gap: 12px !important;
+  margin: 0 !important;
+  padding: 12px;
+  border: 1px solid #dce6f3;
+  border-radius: 10px;
+}
+.pm-target > input:last-child {
+  padding: 9px;
+  border: 1px solid #ccd7e6;
+  border-radius: 8px;
+}
+@media (max-width: 700px) {
+  .pm-target { grid-template-columns: auto 1fr; }
+  .pm-target > input:last-child { grid-column: 1 / -1; }
+}

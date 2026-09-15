@@ -4,8 +4,26 @@ pub(super) fn schema(c: &Connection) -> Result<()> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS pm_metadata(entity_id TEXT PRIMARY KEY, payload TEXT NOT NULL DEFAULT '{}');
     CREATE TABLE IF NOT EXISTS pm_imports(id TEXT PRIMARY KEY,kind TEXT NOT NULL,rows_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'preview',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS pm_external_references(id TEXT PRIMARY KEY,shop_id TEXT NOT NULL REFERENCES wb_shops(id),source TEXT NOT NULL,external_key TEXT NOT NULL,payload TEXT NOT NULL,result TEXT NOT NULL,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(shop_id,source,external_key));
+    CREATE TABLE IF NOT EXISTS pm_api_requests(request_id TEXT PRIMARY KEY,action TEXT NOT NULL,response_json TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS pm_shop_products(
+      id TEXT PRIMARY KEY,
+      shop_id TEXT NOT NULL REFERENCES wb_shops(id),
+      sku_id TEXT NOT NULL REFERENCES pm_skus(id),
+      offer_id TEXT NOT NULL,
+      publish_status TEXT NOT NULL DEFAULT 'ready',
+      platform_product_id TEXT,
+      listing_payload_json TEXT NOT NULL DEFAULT '{}',
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(shop_id,offer_id),
+      UNIQUE(shop_id,sku_id)
+    );
+    CREATE INDEX IF NOT EXISTS pm_shop_product_sku ON pm_shop_products(sku_id);
+    CREATE INDEX IF NOT EXISTS pm_shop_product_status ON pm_shop_products(publish_status);
     CREATE INDEX IF NOT EXISTS pm_sku_name ON pm_skus(name);
-    INSERT OR IGNORE INTO pm_migrations(version)VALUES(3);").map_err(err)?;
+    INSERT OR IGNORE INTO pm_migrations(version)VALUES(3);
+    INSERT OR IGNORE INTO pm_migrations(version)VALUES(4);").map_err(err)?;
     let columns = c
         .prepare("PRAGMA table_info(pm_listings)")
         .map_err(err)?
@@ -76,6 +94,16 @@ pub(super) fn validate(p: &Value) -> Result<()> {
     {
         return Err("采购成本格式无效".into());
     }
+    for k in ["domesticShipping", "labelFee", "packagingFee", "otherCost"] {
+        let value = txt(p, k);
+        if !value.is_empty()
+            && !regex::Regex::new(r"^\d{1,12}(\.\d{1,4})?$")
+                .unwrap()
+                .is_match(&value)
+        {
+            return Err(format!("{k} 必须为最多四位小数的非负金额"));
+        }
+    }
     if let Some(a) = p.get("attributes") {
         if !a.is_object() {
             return Err("属性必须为对象".into());
@@ -110,6 +138,7 @@ pub(super) fn allowed(role: &str, action: &str) -> bool {
         "summary",
         "duplicates",
         "suggest",
+        "list_shop_products",
     ]
     .contains(&action)
     {
@@ -117,7 +146,99 @@ pub(super) fn allowed(role: &str, action: &str) -> bool {
     }
     role == "admin"
         || role == "operator"
-            && ["bind", "update_sku", "remember_reference", "reprocess"].contains(&action)
+            && [
+                "bind",
+                "update_sku",
+                "remember_reference",
+                "reprocess",
+                "upsert_shop_products",
+                "remove_shop_product",
+            ]
+            .contains(&action)
+}
+
+fn list_shop_products(c: &Connection, p: &Value) -> Result<Value> {
+    let query = format!("%{}%", txt(p, "query"));
+    let shop_id = txt(p, "shopId");
+    let status = txt(p, "status");
+    let page = p["page"].as_i64().unwrap_or(0).clamp(0, 100000);
+    let filter = "(k.code LIKE ?1 OR k.name LIKE ?1 OR x.offer_id LIKE ?1 OR s.name LIKE ?1) AND (?2='' OR x.shop_id=?2) AND (?3='' OR x.publish_status=?3)";
+    let total: i64 = c.query_row(
+        &format!("SELECT count(*) FROM pm_shop_products x JOIN pm_skus k ON k.id=x.sku_id JOIN wb_shops s ON s.id=x.shop_id WHERE {filter}"),
+        params![&query, &shop_id, &status],
+        |r| r.get(0),
+    ).map_err(err)?;
+    let rows = records(c, &format!("SELECT json_object(
+        'id',x.id,'shopId',x.shop_id,'shop',s.name,'skuId',x.sku_id,'skuCode',k.code,
+        'name',k.name,'offerId',x.offer_id,'status',x.publish_status,
+        'platformProductId',x.platform_product_id,'lastError',x.last_error,
+        'purchaseCost',k.purchase_cost,'media',json(k.media_json),'metadata',json(COALESCE(m.payload,'{{}}')),
+        'updatedAt',x.updated_at
+      ) FROM pm_shop_products x
+      JOIN pm_skus k ON k.id=x.sku_id
+      JOIN wb_shops s ON s.id=x.shop_id
+      LEFT JOIN pm_metadata m ON m.entity_id=k.id
+      WHERE {filter} ORDER BY x.updated_at DESC,x.id LIMIT 50 OFFSET {}", page * 50), params![&query, &shop_id, &status])?;
+    Ok(json!({"rows":rows,"total":total,"page":page}))
+}
+
+pub(super) fn upsert_shop_products(c: &Connection, p: &Value) -> Result<Value> {
+    let sku_id = txt(p, "skuId");
+    let targets = p["targets"].as_array().ok_or("请选择目标店铺")?;
+    if targets.is_empty() || targets.len() > 200 {
+        return Err("每次请选择 1-200 个店铺".into());
+    }
+    let valid_sku: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pm_skus WHERE id=?1 AND organization_id='local' AND status!='archived')",
+        [&sku_id], |r| r.get(0),
+    ).map_err(err)?;
+    if !valid_sku {
+        return Err("SKU 不存在或已归档".into());
+    }
+    let mut saved = Vec::new();
+    for target in targets {
+        let shop_id = txt(target, "shopId");
+        let offer_id = txt(target, "offerId");
+        if offer_id.is_empty() || offer_id.len() > 100 {
+            return Err(format!("店铺 {shop_id} 的货号为空或超过 100 字符"));
+        }
+        shop(c, &shop_id)?;
+        let conflict: Option<Value> = c.query_row(
+            "SELECT json_object('skuId',sku_id,'offerId',offer_id) FROM pm_shop_products WHERE shop_id=?1 AND offer_id=?2 AND sku_id!=?3",
+            params![shop_id, offer_id, sku_id],
+            |r| { let s:String=r.get(0)?; Ok(serde_json::from_str(&s).unwrap_or(Value::Null)) },
+        ).optional().map_err(err)?;
+        if let Some(existing) = conflict {
+            return Err(format!(
+                "DUPLICATE_OFFER_ID: 店铺 {shop_id} 下货号 {offer_id} 已被 SKU {} 使用",
+                existing["skuId"].as_str().unwrap_or("")
+            ));
+        }
+        let id = c
+            .query_row(
+                "SELECT id FROM pm_shop_products WHERE shop_id=?1 AND sku_id=?2",
+                params![shop_id, sku_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(err)?
+            .unwrap_or(uid(c)?);
+        c.execute("INSERT INTO pm_shop_products(id,shop_id,sku_id,offer_id,publish_status,listing_payload_json)
+          VALUES(?1,?2,?3,?4,'ready',?5)
+          ON CONFLICT(shop_id,sku_id) DO UPDATE SET offer_id=excluded.offer_id,publish_status='ready',listing_payload_json=excluded.listing_payload_json,last_error=NULL,updated_at=CURRENT_TIMESTAMP",
+          params![id,shop_id,sku_id,offer_id,target.get("listingPayload").unwrap_or(&json!({})).to_string()]
+        ).map_err(|e| if e.to_string().contains("pm_shop_products.shop_id, pm_shop_products.offer_id") { format!("DUPLICATE_OFFER_ID: 店铺 {shop_id} 下货号 {offer_id} 已存在") } else { err(e) })?;
+        saved.push(json!({"id":id,"shopId":shop_id,"offerId":offer_id,"status":"ready"}));
+    }
+    event(
+        c,
+        &sku_id,
+        "UPSERT_SHOP_PRODUCTS",
+        Value::Null,
+        json!(saved),
+        "生成本地铺货计划",
+    )?;
+    Ok(json!({"success":true,"skuId":sku_id,"targets":saved}))
 }
 pub(super) fn conflicts(c: &Connection, listing: &str, sku: &str) -> Result<Vec<Value>> {
     records(c,"SELECT json_object('id',l.id,'skuId',l.sku_id,'nmId',l.nm_id,'chrtId',l.chrt_id,'vendorCode',l.vendor_code,'reason',CASE WHEN l.chrt_id=o.chrt_id THEN 'CHRTID_DUPLICATE' ELSE 'BARCODE_CONFLICT' END) FROM pm_listings o JOIN pm_listings l ON l.shop_id=o.shop_id AND l.id!=o.id WHERE o.id=?1 AND l.mapping_status!='IGNORED' AND (l.chrt_id=o.chrt_id OR EXISTS(SELECT 1 FROM pm_barcodes a JOIN pm_barcodes b ON a.barcode=b.barcode WHERE a.listing_id=o.id AND b.listing_id=l.id)) AND (l.sku_id IS NULL OR l.sku_id!=?2)",params![listing,sku])
@@ -318,6 +439,23 @@ fn update(c: &Connection, p: &Value, is_spu: bool, role: &str) -> Result<Value> 
 }
 pub(super) fn handle(c: &Connection, action: &str, p: &Value, role: &str) -> Result<Value> {
     match action {
+        "list_shop_products"=>list_shop_products(c,p),
+        "upsert_shop_products"=>{
+            let tx=c.unchecked_transaction().map_err(err)?;
+            let result=upsert_shop_products(&tx,p)?;
+            tx.commit().map_err(err)?;
+            Ok(result)
+        },
+        "remove_shop_product"=>{
+            let tx=c.unchecked_transaction().map_err(err)?;
+            let id=txt(p,"id");
+            let before=records(&tx,"SELECT json_object('id',id,'shopId',shop_id,'skuId',sku_id,'offerId',offer_id) FROM pm_shop_products WHERE id=?1",[&id])?.into_iter().next().ok_or("铺货计划不存在")?;
+            tx.execute("DELETE FROM pm_shop_products WHERE id=?1",[&id]).map_err(err)?;
+            let sku_id=before["skuId"].as_str().unwrap_or("").to_string();
+            event(&tx,&sku_id,"REMOVE_SHOP_PRODUCT",before,Value::Null,"移除本地铺货计划")?;
+            tx.commit().map_err(err)?;
+            Ok(json!({"success":true}))
+        },
         "suggest"=>{
             let listing=row(c,"pm_listings",&txt(p,"listingId"))?;
             let title=listing["title"].as_str().unwrap_or("").to_lowercase();

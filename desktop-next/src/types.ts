@@ -896,12 +896,16 @@ export interface ShipmentSettlementItem {
 }
 export interface WbSettings {
   storeName: string;
+  businessMode: "domestic" | "cross_border";
   token: string;
   rubPerCny: number;
   commissionPercent: number;
   feishuAppId: string;
   feishuAppSecret: string;
   feishuChatId: string;
+  lastSyncStatus: "never" | "running" | "success" | "partial" | "failed";
+  lastSyncMessage: string;
+  lastSyncAt: string;
 }
 export interface WbCost {
   nmId: number;
@@ -968,6 +972,20 @@ export interface WbStockRow {
   inWayToClient: number;
   inWayFromClient: number;
   updatedAt: string;
+}
+export interface WbFinanceSummary {
+  rows: number;
+  salesRub: number;
+  forPayRub: number;
+  commissionRub: number;
+  logisticsRub: number;
+  storageRub: number;
+  acceptanceRub: number;
+  acquiringRub: number;
+  penaltyRub: number;
+  deductionRub: number;
+  otherRub: number;
+  lastSync: string;
 }
 
 export interface MlSettings {

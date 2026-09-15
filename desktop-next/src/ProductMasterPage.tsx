@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { wbShopCenter } from "./bridge";
 import "./wb-shop-api-center.css";
 import "./product-master.css";
+import { ProductDistributionPanel } from "./ProductDistributionPanel";
 type Row = Record<string, any>;
 type List = { rows: Row[]; spus: Row[]; total: number };
 const call = <T,>(action: string, payload: Row = {}) =>
@@ -13,12 +14,14 @@ const labels: Record<string, string> = {
   code: "内部编码",
   name: "中文名称",
   nameRu: "俄文名称",
+  descriptionText: "产品描述",
   spuId: "所属系列",
   brand: "内部品牌",
   color: "颜色",
   size: "规格 / 尺寸",
   category: "ERP 类目",
   supplier: "供应商编码",
+  supplierUrl: "采购链接",
   purchaseCost: "采购成本",
   purchaseCurrency: "采购币种",
   widthCm: "宽 cm",
@@ -26,6 +29,10 @@ const labels: Record<string, string> = {
   heightCm: "高 cm",
   weightKg: "重量 kg",
   packSize: "包装数量",
+  domesticShipping: "国内运费",
+  labelFee: "贴标费",
+  packagingFee: "包材费",
+  otherCost: "其他费用",
   status: "状态",
   reason: "修改 / 冲突解决原因",
   attributesText: "扩展属性",
@@ -37,12 +44,14 @@ const empty: Row = {
   code: "",
   name: "",
   nameRu: "",
+  descriptionText: "",
   spuId: "",
   brand: "",
   color: "",
   size: "",
   category: "",
   supplier: "",
+  supplierUrl: "",
   purchaseCost: "",
   purchaseCurrency: "CNY",
   widthCm: "",
@@ -50,6 +59,10 @@ const empty: Row = {
   heightCm: "",
   weightKg: "",
   packSize: "",
+  domesticShipping: "",
+  labelFee: "",
+  packagingFee: "",
+  otherCost: "",
   status: "active",
   attributesText: "{}",
   mediaText: "[]",
@@ -262,7 +275,7 @@ export function ProductMasterPage() {
   }, [filters.shopId, revision]);
   useEffect(() => {
     const id = ++sequence.current;
-    if (tab === "tools") return;
+    if (["tools", "distribution"].includes(tab)) return;
     const timer = setTimeout(() => {
       setBusy(true);
       void call<List>("list_v2", {
@@ -452,9 +465,9 @@ export function ProductMasterPage() {
     <section className="wb-center pm-center">
       <header className="wb-center-head">
         <div>
-          <span>WBERP · PRODUCT MASTER</span>
-          <h1>商品资料中心</h1>
-          <p>统一 SKU 身份 · 系列变体 · 多店铺映射</p>
+          <span>LOCAL · PRODUCT LIBRARY</span>
+          <h1>产品库</h1>
+          <p>统一 SKU 身份 · 图片与采购成本 · 多店铺铺货</p>
         </div>
         <div>
           {admin && (
@@ -549,6 +562,7 @@ export function ProductMasterPage() {
         {[
           ["spus", "SPU / 系列"],
           ["skus", "内部 SKU"],
+          ["distribution", "多店铺铺货"],
           ["listings", "WB Listing"],
           ["unmapped", "未匹配商品"],
           ["conflict", "冲突商品"],
@@ -568,7 +582,7 @@ export function ProductMasterPage() {
           </button>
         ))}
       </nav>
-      <div className="sync-actions pm-filters">
+      {tab !== "distribution" && <div className="sync-actions pm-filters">
         <input
           placeholder="SKU / 名称 / 系列 / nmID / chrtID / 条码"
           value={query}
@@ -658,8 +672,10 @@ export function ProductMasterPage() {
           <option value="mapping">映射状态</option>
         </select>
         <button onClick={refresh}>刷新</button>
-      </div>
-      {tab === "tools" ? (
+      </div>}
+      {tab === "distribution" ? (
+        <ProductDistributionPanel shops={shops} admin={admin} />
+      ) : tab === "tools" ? (
         <article className="wb-panel">
           <h2>导入商品与映射</h2>
           <p>

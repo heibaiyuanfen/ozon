@@ -8,12 +8,16 @@ use tauri::State;
 #[serde(rename_all = "camelCase")]
 pub struct WbSettings {
     pub store_name: String,
+    pub business_mode: String,
     pub token: String,
     pub rub_per_cny: f64,
     pub commission_percent: f64,
     pub feishu_app_id: String,
     pub feishu_app_secret: String,
     pub feishu_chat_id: String,
+    pub last_sync_status: String,
+    pub last_sync_message: String,
+    pub last_sync_at: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,12 +97,28 @@ pub struct WbStockRow {
     pub in_way_from_client: i64,
     pub updated_at: String,
 }
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WbFinanceSummary {
+    pub rows: i64,
+    pub sales_rub: f64,
+    pub for_pay_rub: f64,
+    pub commission_rub: f64,
+    pub logistics_rub: f64,
+    pub storage_rub: f64,
+    pub acceptance_rub: f64,
+    pub acquiring_rub: f64,
+    pub penalty_rub: f64,
+    pub deduction_rub: f64,
+    pub other_rub: f64,
+    pub last_sync: String,
+}
 
 fn db(state: &AppState) -> Result<Connection, String> {
     let folder = state.data_dir.join("wb");
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let c = Connection::open(folder.join("wb_analytics.db")).map_err(|e| e.to_string())?;
-    c.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS orders(srid TEXT PRIMARY KEY,day TEXT NOT NULL,changed_at TEXT,nm_id INTEGER NOT NULL DEFAULT 0,article TEXT,warehouse_name TEXT,quantity INTEGER NOT NULL DEFAULT 1,revenue_rub REAL NOT NULL DEFAULT 0,is_cancelled INTEGER NOT NULL DEFAULT 0,raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS product_cards(nm_id INTEGER PRIMARY KEY,vendor_code TEXT NOT NULL DEFAULT '',name TEXT NOT NULL DEFAULT '',image_url TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS ad_daily(day TEXT NOT NULL,nm_id INTEGER NOT NULL,campaign_id INTEGER NOT NULL,spend_rub REAL NOT NULL DEFAULT 0,ad_orders INTEGER NOT NULL DEFAULT 0,ad_sales_rub REAL NOT NULL DEFAULT 0,views INTEGER NOT NULL DEFAULT 0,clicks INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(day,nm_id,campaign_id));CREATE TABLE IF NOT EXISTS product_costs(nm_id INTEGER PRIMARY KEY,article TEXT NOT NULL DEFAULT '',purchase_cost_cny REAL,length_cm REAL,width_cm REAL,height_cm REAL,weight_kg REAL,warehouse_mode TEXT NOT NULL DEFAULT 'auto');CREATE TABLE IF NOT EXISTS warehouses(warehouse_key TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',address TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',country TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL DEFAULT 'unknown',raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS stocks(nm_id INTEGER NOT NULL,chrt_id INTEGER NOT NULL,warehouse_id INTEGER NOT NULL,warehouse_name TEXT NOT NULL DEFAULT '',region_name TEXT NOT NULL DEFAULT '',quantity INTEGER NOT NULL DEFAULT 0,in_way_to_client INTEGER NOT NULL DEFAULT 0,in_way_from_client INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(nm_id,chrt_id,warehouse_id));").map_err(|e|e.to_string())?;
+    c.execute_batch("PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS orders(srid TEXT PRIMARY KEY,day TEXT NOT NULL,changed_at TEXT,nm_id INTEGER NOT NULL DEFAULT 0,article TEXT,warehouse_name TEXT,quantity INTEGER NOT NULL DEFAULT 1,revenue_rub REAL NOT NULL DEFAULT 0,is_cancelled INTEGER NOT NULL DEFAULT 0,raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS product_cards(nm_id INTEGER PRIMARY KEY,vendor_code TEXT NOT NULL DEFAULT '',name TEXT NOT NULL DEFAULT '',image_url TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS ad_daily(day TEXT NOT NULL,nm_id INTEGER NOT NULL,campaign_id INTEGER NOT NULL,spend_rub REAL NOT NULL DEFAULT 0,ad_orders INTEGER NOT NULL DEFAULT 0,ad_sales_rub REAL NOT NULL DEFAULT 0,views INTEGER NOT NULL DEFAULT 0,clicks INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(day,nm_id,campaign_id));CREATE TABLE IF NOT EXISTS product_costs(nm_id INTEGER PRIMARY KEY,article TEXT NOT NULL DEFAULT '',purchase_cost_cny REAL,length_cm REAL,width_cm REAL,height_cm REAL,weight_kg REAL,warehouse_mode TEXT NOT NULL DEFAULT 'auto');CREATE TABLE IF NOT EXISTS warehouses(warehouse_key TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',address TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',country TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL DEFAULT 'unknown',raw_json TEXT NOT NULL DEFAULT '{}');CREATE TABLE IF NOT EXISTS stocks(nm_id INTEGER NOT NULL,chrt_id INTEGER NOT NULL,warehouse_id INTEGER NOT NULL,warehouse_name TEXT NOT NULL DEFAULT '',region_name TEXT NOT NULL DEFAULT '',quantity INTEGER NOT NULL DEFAULT 0,in_way_to_client INTEGER NOT NULL DEFAULT 0,in_way_from_client INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(nm_id,chrt_id,warehouse_id));CREATE TABLE IF NOT EXISTS finance_details(rrd_id INTEGER PRIMARY KEY,rr_day TEXT NOT NULL DEFAULT '',sales_rub REAL NOT NULL DEFAULT 0,for_pay_rub REAL NOT NULL DEFAULT 0,commission_rub REAL NOT NULL DEFAULT 0,logistics_rub REAL NOT NULL DEFAULT 0,storage_rub REAL NOT NULL DEFAULT 0,acceptance_rub REAL NOT NULL DEFAULT 0,acquiring_rub REAL NOT NULL DEFAULT 0,penalty_rub REAL NOT NULL DEFAULT 0,deduction_rub REAL NOT NULL DEFAULT 0,other_rub REAL NOT NULL DEFAULT 0,raw_json TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_wb_finance_day ON finance_details(rr_day);").map_err(|e|e.to_string())?;
     Ok(c)
 }
 fn setting(c: &Connection, key: &str, default: &str) -> String {
@@ -112,6 +132,32 @@ fn number(v: Option<&serde_json::Value>) -> f64 {
         .or_else(|| v.and_then(|x| x.as_str()).and_then(|s| s.parse().ok()))
         .unwrap_or(0.0)
 }
+fn money_field(row: &serde_json::Value, names: &[&str]) -> f64 {
+    names.iter().find_map(|name| row.get(*name)).map(|v| number(Some(v))).unwrap_or(0.0)
+}
+fn finance_logistics(row: &serde_json::Value) -> f64 {
+    // deliveryAmount/returnAmount are operation counts. Finance v1 exposes
+    // the actual charge as deliveryService; the remaining names are legacy.
+    money_field(row,&["deliveryService","delivery_service","deliveryRub","delivery_rub"]).abs()
+}
+fn finance_storage(row: &serde_json::Value) -> f64 {
+    money_field(row,&["paidStorage","paid_storage","storageFee","storage_fee"]).abs()
+}
+fn finance_acceptance(row: &serde_json::Value) -> f64 {
+    money_field(row,&["paidAcceptance","paid_acceptance","acceptance","acceptanceFee","acceptance_fee"]).abs()
+}
+fn finance_other(row: &serde_json::Value) -> f64 {
+    // These are independent charges, not aliases. A zero additionalPayment
+    // must not hide a non-zero rebilled logistics cost on the same row.
+    money_field(row,&["additionalPayment","additional_payment"]).abs()
+        + money_field(row,&["rebillLogisticCost","rebill_logistic_cost"]).abs()
+}
+
+#[tauri::command]
+pub fn wb_finance_summary(range: DateRange, state: State<AppState>) -> Result<WbFinanceSummary, String> {
+    let c = db(&state)?;
+    c.query_row("SELECT COUNT(*),COALESCE(SUM(sales_rub),0),COALESCE(SUM(for_pay_rub),0),COALESCE(SUM(commission_rub),0),COALESCE(SUM(logistics_rub),0),COALESCE(SUM(storage_rub),0),COALESCE(SUM(acceptance_rub),0),COALESCE(SUM(acquiring_rub),0),COALESCE(SUM(penalty_rub),0),COALESCE(SUM(deduction_rub),0),COALESCE(SUM(other_rub),0),COALESCE(MAX(updated_at),'') FROM finance_details WHERE rr_day BETWEEN ?1 AND ?2", params![range.from,range.to], |r| Ok(WbFinanceSummary { rows:r.get(0)?, sales_rub:r.get(1)?, for_pay_rub:r.get(2)?, commission_rub:r.get(3)?, logistics_rub:r.get(4)?, storage_rub:r.get(5)?, acceptance_rub:r.get(6)?, acquiring_rub:r.get(7)?, penalty_rub:r.get(8)?, deduction_rub:r.get(9)?, other_rub:r.get(10)?, last_sync:r.get(11)? })).map_err(|e|e.to_string())
+}
 fn wb_get(token: &str, url: &str) -> Result<serde_json::Value, String> {
     if token.is_empty() {
         return Err("请先填写 WB API Token".into());
@@ -120,9 +166,22 @@ fn wb_get(token: &str, url: &str) -> Result<serde_json::Value, String> {
         .set("Authorization", token)
         .set("Accept", "application/json")
         .call()
-        .map_err(|e| format!("WB API 请求失败：{e}"))?;
+        .map_err(wb_http_error)?;
+    if response.status() == 204 { return Ok(serde_json::Value::Null); }
     let raw = response.into_string().map_err(|e| e.to_string())?;
+    if raw.trim().is_empty() { return Ok(serde_json::Value::Null); }
     serde_json::from_str(&raw).map_err(|e| format!("WB API 返回无法解析：{e}"))
+}
+fn wb_http_error(error: ureq::Error) -> String {
+    match error {
+        ureq::Error::Status(code, response) => {
+            let body = response.into_string().unwrap_or_default();
+            let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            let hint = match code { 401 => "Token 无效、已过期或格式错误", 403 => "Token 缺少当前接口所需权限", 429 => "请求过于频繁，请等待接口限频窗口后重试", _ => "WB 平台拒绝了本次请求" };
+            format!("WB API HTTP {code}：{hint}{}", if compact.is_empty(){String::new()}else{format!("；平台返回：{}",compact.chars().take(600).collect::<String>())})
+        }
+        other => format!("WB API 网络请求失败：{other}"),
+    }
 }
 fn mode(name: &str) -> &'static str {
     let lower = name.to_lowercase();
@@ -165,6 +224,7 @@ pub fn wb_settings(state: State<AppState>) -> Result<WbSettings, String> {
     let cipher = setting(&c, "token", "");
     Ok(WbSettings {
         store_name: setting(&c, "store_name", "WB 跨境店"),
+        business_mode: setting(&c, "business_mode", "domestic"),
         token: if cipher.is_empty() {
             String::new()
         } else {
@@ -181,6 +241,9 @@ pub fn wb_settings(state: State<AppState>) -> Result<WbSettings, String> {
             "••••••••".into()
         },
         feishu_chat_id: setting(&c, "feishu_chat_id", ""),
+        last_sync_status: setting(&c, "last_sync_status", "never"),
+        last_sync_message: setting(&c, "last_sync_message", "尚未同步当前 WB 店铺"),
+        last_sync_at: setting(&c, "last_sync_at", ""),
     })
 }
 #[tauri::command]
@@ -189,8 +252,17 @@ pub fn save_wb_settings(form: WbSettings, state: State<AppState>) -> Result<(), 
         return Err("人民币兑卢布汇率必须大于 0".into());
     }
     let c = db(&state)?;
+    let normalized_mode = if form.business_mode == "cross_border" { "cross_border" } else { "domestic" };
+    let identity_changed = setting(&c, "business_mode", "domestic") != normalized_mode
+        || (!form.token.is_empty() && form.token != "••••••••");
+    if identity_changed {
+        // These are API-recoverable account caches. Never let rows fetched for
+        // one WB account/business type appear after the operator changes it.
+        c.execute_batch("DELETE FROM orders;DELETE FROM product_cards;DELETE FROM ad_daily;DELETE FROM warehouses;DELETE FROM stocks;DELETE FROM finance_details;").map_err(|e|e.to_string())?;
+    }
     for (k, v) in [
         ("store_name", form.store_name),
+        ("business_mode", normalized_mode.into()),
         ("rub_per_cny", form.rub_per_cny.to_string()),
         ("commission_percent", form.commission_percent.to_string()),
         ("feishu_app_id", form.feishu_app_id),
@@ -221,7 +293,7 @@ pub fn export_wb_api_bundle(state: State<AppState>) -> Result<String, String> {
         "exported_at": chrono::Utc::now().to_rfc3339(),
         "warning": "此文件包含明文 WB Token，请妥善保管并在导入后删除。",
         "credentials": {
-            "store_name": setting(&c,"store_name","WB 跨境店"), "token": token,
+            "store_name": setting(&c,"store_name","WB 跨境店"), "business_mode": setting(&c,"business_mode","domestic"), "token": token,
             "rub_per_cny": setting(&c,"rub_per_cny","12"),
             "commission_percent": setting(&c,"commission_percent","15")
         }
@@ -260,7 +332,7 @@ pub fn import_wb_api_bundle(path: String, state: State<AppState>) -> Result<(), 
         .and_then(|v| v.as_object())
         .ok_or("配置包缺少 credentials")?;
     let c = db(&state)?;
-    for key in ["store_name", "rub_per_cny", "commission_percent"] {
+    for key in ["store_name", "business_mode", "rub_per_cny", "commission_percent"] {
         if let Some(value) = values.get(key).and_then(|v| v.as_str()) {
             c.execute("INSERT INTO settings(key,value)VALUES(?1,?2)ON CONFLICT(key)DO UPDATE SET value=excluded.value", params![key,value]).map_err(|e|e.to_string())?;
         }
@@ -377,8 +449,10 @@ fn wb_post(token: &str, url: &str, body: &serde_json::Value) -> Result<serde_jso
         .set("Accept", "application/json")
         .set("Content-Type", "application/json")
         .send_string(&body.to_string())
-        .map_err(|e| format!("WB API 请求失败：{e}"))?;
+        .map_err(wb_http_error)?;
+    if response.status() == 204 { return Ok(serde_json::Value::Null); }
     let raw = response.into_string().map_err(|e| e.to_string())?;
+    if raw.trim().is_empty() { return Ok(serde_json::Value::Null); }
     serde_json::from_str(&raw).map_err(|e| format!("WB API 返回无法解析：{e}"))
 }
 
@@ -586,6 +660,7 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
     let mut c = db(state)?;
     let token = secrets::unprotect(&setting(&c, "token", ""))?;
     let orders=wb_get(&token,&format!("https://statistics-api.wildberries.ru/api/v1/supplier/orders?dateFrom={}T00:00:00&flag=0",range.from))?;
+    let statistics_order_count = orders.as_array().map(|rows| rows.len()).unwrap_or(0);
     let tx = c.transaction().map_err(|e| e.to_string())?;
     let mut order_count = 0;
     for row in orders.as_array().into_iter().flatten() {
@@ -611,6 +686,103 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
         order_count += 1;
     }
     tx.commit().map_err(|e| e.to_string())?;
+    // The Statistics report is delayed and dateFrom filters lastChangeDate rather
+    // than the order creation time.  Supplement it with the Marketplace FBS
+    // assembly-order feed so a new seller-warehouse order is visible immediately.
+    // A token without Marketplace scope must not discard valid Statistics rows.
+    let marketplace_order_result = (|| -> Result<i64, String> {
+        let from = chrono::NaiveDate::parse_from_str(&range.from, "%Y-%m-%d")
+            .map_err(|_| "开始日期格式无效".to_string())?;
+        let to = chrono::NaiveDate::parse_from_str(&range.to, "%Y-%m-%d")
+            .map_err(|_| "结束日期格式无效".to_string())?;
+        if to < from { return Err("结束日期不能早于开始日期".into()); }
+        let mut chunk_from = from;
+        let mut count = 0_i64;
+        while chunk_from <= to {
+            let chunk_to = std::cmp::min(chunk_from + chrono::Duration::days(29), to);
+            let date_from = chunk_from.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+            let date_to = (chunk_to + chrono::Duration::days(1)).and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() - 1;
+            let mut next = 0_i64;
+            loop {
+                let payload = wb_get(&token, &format!("https://marketplace-api.wildberries.ru/api/v3/orders?limit=1000&next={next}&dateFrom={date_from}&dateTo={date_to}"))?;
+                let rows = payload.get("orders").and_then(|v|v.as_array()).cloned().unwrap_or_default();
+                let returned_next = integer(payload.get("next"));
+                let tx = c.transaction().map_err(|e|e.to_string())?;
+                for row in &rows {
+                    let created = row.get("createdAt").and_then(|v|v.as_str()).unwrap_or_default();
+                    let day = chrono::DateTime::parse_from_rfc3339(created)
+                        .ok()
+                        .and_then(|dt| chrono::FixedOffset::east_opt(3 * 3600).map(|tz| dt.with_timezone(&tz).format("%Y-%m-%d").to_string()))
+                        .unwrap_or_else(|| created.chars().take(10).collect());
+                    if day < range.from || day > range.to { continue; }
+                    let numeric_id = integer(row.get("id"));
+                    let id = row.get("rid").and_then(|v|v.as_str()).filter(|v|!v.is_empty()).map(str::to_string)
+                        .unwrap_or_else(|| format!("marketplace:{numeric_id}"));
+                    if numeric_id == 0 && id == "marketplace:0" { continue; }
+                    let price = number(row.get("convertedFinalPrice").or_else(||row.get("finalPrice")).or_else(||row.get("convertedPrice")).or_else(||row.get("price"))) / 100.0;
+                    let warehouse = integer(row.get("warehouseId"));
+                    tx.execute("INSERT INTO orders(srid,day,changed_at,nm_id,article,warehouse_name,quantity,revenue_rub,is_cancelled,raw_json)VALUES(?1,?2,?3,?4,?5,?6,1,?7,0,?8)ON CONFLICT(srid)DO UPDATE SET day=excluded.day,changed_at=excluded.changed_at,nm_id=excluded.nm_id,article=CASE WHEN excluded.article='' THEN orders.article ELSE excluded.article END,warehouse_name=CASE WHEN orders.warehouse_name='' THEN excluded.warehouse_name ELSE orders.warehouse_name END,revenue_rub=CASE WHEN excluded.revenue_rub=0 THEN orders.revenue_rub ELSE excluded.revenue_rub END,raw_json=excluded.raw_json", params![id,day,created,integer(row.get("nmId").or_else(||row.get("nmID"))),row.get("article").and_then(|v|v.as_str()).unwrap_or_default(),if warehouse==0 {String::new()} else {format!("仓库 #{warehouse}")},price,row.to_string()]).map_err(|e|e.to_string())?;
+                    count += 1;
+                }
+                tx.commit().map_err(|e|e.to_string())?;
+                if rows.len() < 1000 || returned_next == 0 || returned_next == next { break; }
+                next = returned_next;
+            }
+            chunk_from = chunk_to + chrono::Duration::days(1);
+        }
+        Ok(count)
+    })();
+    let stored_order_count: i64 = c.query_row("SELECT COUNT(*) FROM orders WHERE day BETWEEN ?1 AND ?2", params![range.from,range.to], |r|r.get(0)).map_err(|e|e.to_string())?;
+    let order_text = match marketplace_order_result {
+        Ok(count) => format!("订单 {stored_order_count}（统计接口原始 {statistics_order_count}、日期内 {order_count}；FBS 实时 {count}）"),
+        Err(error) => format!("订单 {stored_order_count}（统计接口原始 {statistics_order_count}、日期内 {order_count}；FBS 实时订单保留原缓存：{error}）"),
+    };
+    // WB's current Finance API is the source of truth for settled domestic
+    // charges. Keep these rows separate from operational orders: orders are
+    // preliminary, while realization details include the actual deductions.
+    let finance_result = (|| -> Result<i64, String> {
+        let payload = wb_post(
+            &token,
+            "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed",
+            &serde_json::json!({
+                "dateFrom": range.from,
+                "dateTo": range.to,
+                "limit": 100000,
+                "rrdId": 0,
+                "period": "weekly"
+            }),
+        )?;
+        let items = payload.as_array()
+            .or_else(|| payload.pointer("/data/items").and_then(|v|v.as_array()))
+            .or_else(|| payload.get("data").and_then(|v|v.as_array()))
+            .ok_or_else(|| "WB Finance 返回结构中没有明细数组".to_string())?;
+        if items.len() >= 100_000 {
+            return Err("当前周期达到 WB 单次 100000 行上限，请缩短日期后重试；原财务缓存未覆盖".into());
+        }
+        let tx = c.transaction().map_err(|e|e.to_string())?;
+        tx.execute("DELETE FROM finance_details WHERE rr_day BETWEEN ?1 AND ?2", params![range.from,range.to]).map_err(|e|e.to_string())?;
+        let mut count = 0_i64;
+        for (index, row) in items.iter().enumerate() {
+            let id = integer(row.get("rrdId").or_else(||row.get("rrd_id")));
+            let id = if id == 0 { chrono::Utc::now().timestamp_millis().saturating_mul(100_000).saturating_add(index as i64) } else { id };
+            let day = row.get("rrDt").or_else(||row.get("rr_dt")).or_else(||row.get("saleDt")).or_else(||row.get("sale_dt")).and_then(|v|v.as_str()).unwrap_or_default().chars().take(10).collect::<String>();
+            if day.is_empty() { continue; }
+            let sales = money_field(row,&["retailAmount","retail_amount"]);
+            let for_pay = money_field(row,&["forPay","ppvz_for_pay"]);
+            let commission = money_field(row,&["salesCommission","commissionAmount","ppvzSalesCommission","ppvz_sales_commission","ppvzVw","ppvz_vw"]).abs();
+            let logistics = finance_logistics(row);
+            let storage = finance_storage(row);
+            let acceptance = finance_acceptance(row);
+            let acquiring = money_field(row,&["acquiringFee","acquiring_fee"]).abs();
+            let penalty = money_field(row,&["penalty"]).abs();
+            let deduction = money_field(row,&["deduction"]).abs();
+            let other = finance_other(row);
+            tx.execute("INSERT INTO finance_details(rrd_id,rr_day,sales_rub,for_pay_rub,commission_rub,logistics_rub,storage_rub,acceptance_rub,acquiring_rub,penalty_rub,deduction_rub,other_rub,raw_json,updated_at)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,CURRENT_TIMESTAMP)ON CONFLICT(rrd_id)DO UPDATE SET rr_day=excluded.rr_day,sales_rub=excluded.sales_rub,for_pay_rub=excluded.for_pay_rub,commission_rub=excluded.commission_rub,logistics_rub=excluded.logistics_rub,storage_rub=excluded.storage_rub,acceptance_rub=excluded.acceptance_rub,acquiring_rub=excluded.acquiring_rub,penalty_rub=excluded.penalty_rub,deduction_rub=excluded.deduction_rub,other_rub=excluded.other_rub,raw_json=excluded.raw_json,updated_at=CURRENT_TIMESTAMP",params![id,day,sales,for_pay,commission,logistics,storage,acceptance,acquiring,penalty,deduction,other,row.to_string()]).map_err(|e|e.to_string())?;
+            count += 1;
+        }
+        tx.commit().map_err(|e|e.to_string())?;
+        Ok(count)
+    })();
     // Product images are not part of the Statistics orders response.  Cache
     // official card photos separately so opening the order page never makes
     // one remote request per row.  Promotion tokens are also accepted by this
@@ -815,8 +987,9 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
         Ok(count) => format!("商品图片 {count}"),
         Err(error) => format!("商品图片保留原缓存（{error}）"),
     };
+    let finance_text = match finance_result { Ok(count)=>format!("财务结算 {count}"), Err(error)=>format!("财务结算保留原缓存（{error}）") };
     Ok(format!(
-        "WB 同步完成：订单 {order_count}，{card_text}，广告活动 {campaign_count}，统计活动 {ad_payload_count}，商品广告 {ad_count}，仓库 {warehouse_count}，{stock_text}{}",
+        "WB 同步完成：{order_text}，{finance_text}，{card_text}，广告活动 {campaign_count}，统计活动 {ad_payload_count}，商品广告 {ad_count}，仓库 {warehouse_count}，{stock_text}{}",
         if campaign_count == 0 { "；未读取到广告活动，请检查 Token 的“推广”权限或 WB 后台是否存在状态为 7/9/11 的活动".to_string() }
         else if ad_payload_count == 0 { "；WB 统计接口未返回活动（只统计状态 7/9/11，请检查活动状态与所选日期）".to_string() }
         else if ad_count == 0 { format!("；统计接口返回了活动但无商品层数据，顶层字段：{}", ad_payload_keys.into_iter().collect::<Vec<_>>().join(",")) }
@@ -827,7 +1000,21 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
 #[tauri::command]
 pub async fn sync_wb(range: DateRange, state: State<'_, AppState>) -> Result<String, String> {
     let owned = crate::background_state(&state)?;
-    tauri::async_runtime::spawn_blocking(move || sync_wb_blocking(range, &owned))
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = sync_wb_blocking(range, &owned);
+        if let Ok(c) = db(&owned) {
+            let (status, message) = match &result {
+                Ok(message) if message.contains("保留原缓存") => ("partial", message.as_str()),
+                Ok(message) => ("success", message.as_str()),
+                Err(message) => ("failed", message.as_str()),
+            };
+            for (key,value) in [("last_sync_status",status),("last_sync_message",message)] {
+                let _=c.execute("INSERT INTO settings(key,value)VALUES(?1,?2)ON CONFLICT(key)DO UPDATE SET value=excluded.value",params![key,value]);
+            }
+            let _=c.execute("INSERT INTO settings(key,value)VALUES('last_sync_at',?1)ON CONFLICT(key)DO UPDATE SET value=excluded.value",[chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()]);
+        }
+        result
+    })
         .await
         .map_err(|e| e.to_string())?
 }
@@ -989,5 +1176,29 @@ mod tests {
         assert_eq!(mode("东莞 DPG"), "dongguan");
         assert_eq!(mode("Москва"), "overseas");
         assert_eq!(mode("Unspecified"), "unknown");
+    }
+    #[test]
+    fn finance_v1_logistics_uses_charge_not_operation_count() {
+        let row = serde_json::json!({
+            "deliveryAmount": 1,
+            "returnAmount": 0,
+            "deliveryService": "85.23"
+        });
+        assert!((finance_logistics(&row) - 85.23).abs() < 0.001);
+        assert!((finance_logistics(&serde_json::json!({"delivery_rub": -42.5})) - 42.5).abs() < 0.001);
+    }
+    #[test]
+    fn finance_v1_maps_storage_acceptance_and_adds_independent_other_charges() {
+        let row = serde_json::json!({
+            "paidStorage": "12.50",
+            "paidAcceptance": "15",
+            "additionalPayment": "0",
+            "rebillLogisticCost": "2.14"
+        });
+        assert!((finance_storage(&row) - 12.50).abs() < 0.001);
+        assert!((finance_acceptance(&row) - 15.0).abs() < 0.001);
+        assert!((finance_other(&row) - 2.14).abs() < 0.001);
+        let both = serde_json::json!({"additionalPayment":"3.00","rebillLogisticCost":"2.00"});
+        assert!((finance_other(&both) - 5.0).abs() < 0.001);
     }
 }

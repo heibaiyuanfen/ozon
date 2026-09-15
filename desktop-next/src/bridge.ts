@@ -49,6 +49,7 @@ import type {
   WbAdRow,
   WbWarehouseRow,
   WbStockRow,
+  WbFinanceSummary,
   WbSettings,
 } from "./types";
 
@@ -599,6 +600,9 @@ export async function wbWarehouses(): Promise<WbWarehouseRow[]> {
 }
 export async function wbStocks(): Promise<WbStockRow[]> {
   return invoke("wb_stocks");
+}
+export async function wbFinanceSummary(range: DateRange): Promise<WbFinanceSummary> {
+  return invoke("wb_finance_summary", { range });
 }
 export async function syncWb(range: DateRange): Promise<string> {
   return invoke("sync_wb", { range });

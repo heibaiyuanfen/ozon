@@ -10122,6 +10122,7 @@ pub fn run() {
             wb::wb_ads,
             wb::wb_warehouses,
             wb::wb_stocks,
+            wb::wb_finance_summary,
             wb::sync_wb,
             wb::test_wb_feishu,
             wb::send_wb_weekly,
