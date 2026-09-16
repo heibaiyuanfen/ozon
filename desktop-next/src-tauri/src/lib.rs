@@ -19,6 +19,7 @@ mod daily_tasks;
 mod insights;
 mod listing;
 mod mercadolibre;
+mod ozon_monthly;
 mod packing;
 mod price_center;
 mod product_master;
@@ -5945,10 +5946,9 @@ fn missing_cost_rows(
     Ok(rows)
 }
 
-#[tauri::command]
-fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessReport, String> {
-    let c = db(&state)?;
-    let rate = rub_per_cny_for(&state, &c)?;
+fn business_report_blocking(range: DateRange, state: &AppState) -> Result<BusinessReport, String> {
+    let c = db(state)?;
+    let rate = rub_per_cny_for(state, &c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS business_report_cache(range_key TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
     let fingerprint:String=c.query_row("SELECT 'finance-v7-ozon-advertising-types|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     let cache_key = format!("{}|{}", range.from, range.to);
@@ -6195,6 +6195,11 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
     let payload = serde_json::to_string(&report).map_err(|e| e.to_string())?;
     c.execute("INSERT INTO business_report_cache(range_key,fingerprint,payload,updated_at)VALUES(?1,?2,?3,CURRENT_TIMESTAMP)ON CONFLICT(range_key)DO UPDATE SET fingerprint=excluded.fingerprint,payload=excluded.payload,updated_at=CURRENT_TIMESTAMP",params![cache_key,fingerprint,payload]).map_err(|e|e.to_string())?;
     Ok(report)
+}
+
+#[tauri::command]
+fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessReport, String> {
+    business_report_blocking(range, &state)
 }
 
 fn cross_border_shipping(price: f64, weight: f64) -> Option<f64> {
@@ -10083,6 +10088,8 @@ pub fn run() {
             import_competitor_html,
             remove_competitor,
             business_report,
+            ozon_monthly::export_ozon_monthly_report,
+            ozon_monthly::export_ozon_cross_border_report,
             analytics_detail,
             cross_border_report,
             finance_breakdown,
@@ -10123,6 +10130,7 @@ pub fn run() {
             wb::wb_warehouses,
             wb::wb_stocks,
             wb::wb_finance_summary,
+            wb::export_wb_monthly_report,
             wb::sync_wb,
             wb::test_wb_feishu,
             wb::send_wb_weekly,

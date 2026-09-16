@@ -58,8 +58,6 @@ struct PurchaseOrderItem {
     #[serde(default)]
     carton_count: String,
     #[serde(default)]
-    quantity: String,
-    #[serde(default)]
     unit: String,
     #[serde(default)]
     note: String,
@@ -110,6 +108,63 @@ fn decimal(value: &str, name: &str, allow_empty: bool) -> Result<Option<i64>, St
     };
     Ok(Some(w * 10000 + f))
 }
+
+fn calculated_quantity_scaled(item: &PurchaseOrderItem) -> Result<i64, String> {
+    let rate = decimal(&item.units_per_carton, "装箱率", false)?.unwrap();
+    let cartons = decimal(&item.carton_count, "箱数", false)?.unwrap();
+    if rate <= 0 || cartons <= 0 {
+        return Err("装箱率和箱数必须大于 0".into());
+    }
+    rate.checked_mul(cartons)
+        .and_then(|value| value.checked_div(10000))
+        .ok_or_else(|| "自动计算的数量过大".to_string())
+}
+
+fn scaled_decimal_string(value: i64) -> String {
+    let whole = value / 10000;
+    let fraction = (value % 10000).abs();
+    if fraction == 0 {
+        whole.to_string()
+    } else {
+        format!("{whole}.{fraction:04}")
+            .trim_end_matches('0')
+            .to_string()
+    }
+}
+
+fn calculated_quantity(item: &PurchaseOrderItem) -> Result<String, String> {
+    calculated_quantity_scaled(item).map(scaled_decimal_string)
+}
+
+fn safe_file_component(value: &str, fallback: &str) -> String {
+    let cleaned = value
+        .trim()
+        .chars()
+        .map(|c| {
+            if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim_matches([' ', '.'])
+        .to_string();
+    if cleaned.is_empty() {
+        fallback.into()
+    } else {
+        cleaned
+    }
+}
+
+fn export_file_stem(v: &PurchaseOrderInput) -> String {
+    format!(
+        "采购单-{}-{}",
+        safe_file_component(&v.order_no, "未编号"),
+        safe_file_component(&v.title, "未命名产品")
+    )
+}
+
 fn validate(v: &PurchaseOrderInput) -> Result<(), String> {
     if v.order_no.trim().is_empty() {
         return Err("采购单号不能为空".into());
@@ -125,21 +180,19 @@ fn validate(v: &PurchaseOrderInput) -> Result<(), String> {
             return Err(format!("第 {} 行必须填写品名和 SKU", i + 1));
         }
         let price = decimal(&x.unit_price, "单价", false)?.unwrap();
-        let qty = decimal(&x.quantity, "数量", false)?.unwrap();
-        if price < 0 || qty <= 0 {
-            return Err(format!("第 {} 行单价不能为负数，数量必须大于 0", i + 1));
+        if price < 0 {
+            return Err(format!("第 {} 行单价不能为负数", i + 1));
         }
+        calculated_quantity_scaled(x).map_err(|error| format!("第 {} 行{}", i + 1, error))?;
         for (n, s) in [
             ("包装长", &x.package_length_cm),
             ("包装宽", &x.package_width_cm),
             ("包装高", &x.package_height_cm),
             ("重量", &x.unit_weight_kg),
-            ("装箱率", &x.units_per_carton),
             ("外箱重量", &x.carton_weight_kg),
             ("外箱长", &x.carton_length_cm),
             ("外箱宽", &x.carton_width_cm),
             ("外箱高", &x.carton_height_cm),
-            ("箱数", &x.carton_count),
         ] {
             decimal(s, n, true)?;
         }
@@ -156,12 +209,15 @@ fn display_number(value: &str) -> String {
     }
 }
 
+fn calculated_quantity_number(item: &PurchaseOrderItem) -> f64 {
+    calculated_quantity(item)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or_default()
+}
+
 fn purchase_order_feishu_cards(v: &PurchaseOrderInput) -> Vec<Value> {
-    let total_quantity = v
-        .items
-        .iter()
-        .map(|item| item.quantity.trim().parse::<f64>().unwrap_or_default())
-        .sum::<f64>();
+    let total_quantity = v.items.iter().map(calculated_quantity_number).sum::<f64>();
     let total_cartons = v
         .items
         .iter()
@@ -172,7 +228,7 @@ fn purchase_order_feishu_cards(v: &PurchaseOrderInput) -> Vec<Value> {
         .iter()
         .map(|item| {
             item.unit_price.trim().parse::<f64>().unwrap_or_default()
-                * item.quantity.trim().parse::<f64>().unwrap_or_default()
+                * calculated_quantity_number(item)
         })
         .sum::<f64>();
     let chunks = v.items.chunks(15).collect::<Vec<_>>();
@@ -197,13 +253,14 @@ fn purchase_order_feishu_cards(v: &PurchaseOrderInput) -> Vec<Value> {
                 String::new()
             };
             let details = chunk.iter().enumerate().map(|(offset, item)| {
+                let quantity = calculated_quantity(item).unwrap_or_default();
                 let amount = item.unit_price.trim().parse::<f64>().unwrap_or_default()
-                    * item.quantity.trim().parse::<f64>().unwrap_or_default();
+                    * calculated_quantity_number(item);
                 format!(
                     "**{}. {}**　`{}`\n单价 ¥{}｜数量 {} {}｜箱数 {}｜装箱率 {}｜小计 ¥{:.2}{}",
                     index * 15 + offset + 1,
                     item.product_name.trim(), item.sku.trim(), display_number(&item.unit_price),
-                    display_number(&item.quantity), item.unit.trim(), display_number(&item.carton_count),
+                    display_number(&quantity), item.unit.trim(), display_number(&item.carton_count),
                     display_number(&item.units_per_carton), amount,
                     if item.note.trim().is_empty() { String::new() } else { format!("｜备注 {}", item.note.trim()) },
                 )
@@ -347,7 +404,6 @@ fn sheet_xml(v: &PurchaseOrderInput) -> String {
             ("L", &x.carton_width_cm),
             ("M", &x.carton_height_cm),
             ("N", &x.carton_count),
-            ("O", &x.quantity),
         ] {
             c.push_str(&xn(
                 &format!("{col}{r}"),
@@ -355,6 +411,7 @@ fn sheet_xml(v: &PurchaseOrderInput) -> String {
                 if matches!(col, "D" | "N" | "O") { 5 } else { 4 },
             ))
         }
+        c.push_str(&xf(&format!("O{r}"), &format!("I{r}*N{r}"), 5));
         c.push_str(&xt(
             &format!("P{r}"),
             if x.unit.trim().is_empty() {
@@ -430,21 +487,7 @@ fn export_excel(v: &PurchaseOrderInput, state: &AppState) -> Result<String, Stri
         .join("exports")
         .join("purchase-orders");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let safe: String = v
-        .order_no
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let p = dir.join(format!(
-        "采购单_{}.xlsx",
-        if safe.is_empty() { "未编号" } else { &safe }
-    ));
+    let p = dir.join(format!("{}.xlsx", export_file_stem(v)));
     write_xlsx(&p, v)?;
     let _ = open::that(&p);
     Ok(p.to_string_lossy().into_owned())
@@ -476,7 +519,7 @@ pub async fn purchase_order_command(
   let mut c=db(&state)?;ensure(&c)?;match command.as_str(){
    "list"=>{let mut q=c.prepare("SELECT json_object('id',id,'orderNo',order_no,'title',title,'operator',operator,'orderDate',order_date,'expectedShipAt',expected_ship_at,'factoryAddress',factory_address,'status',status,'updatedAt',updated_at,'itemCount',(SELECT COUNT(*) FROM purchase_order_items i WHERE i.order_id=p.id)) FROM purchase_orders p WHERE status!='archived' ORDER BY order_date DESC,id DESC").map_err(|e|e.to_string())?;let rows=q.query_map([],|r|{let s:String=r.get(0)?;Ok(serde_json::from_str(&s).unwrap_or(Value::Null))}).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;Ok(json!({"orders":rows}))},
    "detail"=>detail(&c,id.ok_or("缺少采购单 ID")?),
-   "save"=>{let input:PurchaseOrderInput=serde_json::from_value(payload.unwrap_or(json!({}))).map_err(|e|e.to_string())?;validate(&input)?;let tx=c.transaction().map_err(|e|e.to_string())?;let oid=if let Some(id)=id{tx.execute("UPDATE purchase_orders SET order_no=?1,title=?2,operator=?3,order_date=?4,expected_ship_at=?5,factory_address=?6,approver=?7,note=?8,status='draft',updated_at=CURRENT_TIMESTAMP WHERE id=?9",params![input.order_no.trim(),input.title.trim(),input.operator.trim(),input.order_date,input.expected_ship_at,input.factory_address.trim(),input.approver.trim(),input.note.trim(),id]).map_err(|e|e.to_string())?;tx.execute("DELETE FROM purchase_order_items WHERE order_id=?1",[id]).map_err(|e|e.to_string())?;id}else{tx.execute("INSERT INTO purchase_orders(order_no,title,operator,order_date,expected_ship_at,factory_address,approver,note)VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![input.order_no.trim(),input.title.trim(),input.operator.trim(),input.order_date,input.expected_ship_at,input.factory_address.trim(),input.approver.trim(),input.note.trim()]).map_err(|e|e.to_string())?;tx.last_insert_rowid()};for(i,x)in input.items.iter().enumerate(){tx.execute("INSERT INTO purchase_order_items(order_id,product_name,sku,image_url,unit_price,package_length_cm,package_width_cm,package_height_cm,unit_weight_kg,units_per_carton,carton_weight_kg,carton_length_cm,carton_width_cm,carton_height_cm,carton_count,quantity,unit,note,sort_order)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",params![oid,x.product_name.trim(),x.sku.trim(),x.image_url.trim(),x.unit_price.trim(),x.package_length_cm.trim(),x.package_width_cm.trim(),x.package_height_cm.trim(),x.unit_weight_kg.trim(),x.units_per_carton.trim(),x.carton_weight_kg.trim(),x.carton_length_cm.trim(),x.carton_width_cm.trim(),x.carton_height_cm.trim(),x.carton_count.trim(),x.quantity.trim(),if x.unit.trim().is_empty(){"个"}else{x.unit.trim()},x.note.trim(),i as i64]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(json!({"id":oid}))},
+   "save"=>{let input:PurchaseOrderInput=serde_json::from_value(payload.unwrap_or(json!({}))).map_err(|e|e.to_string())?;validate(&input)?;let tx=c.transaction().map_err(|e|e.to_string())?;let oid=if let Some(id)=id{tx.execute("UPDATE purchase_orders SET order_no=?1,title=?2,operator=?3,order_date=?4,expected_ship_at=?5,factory_address=?6,approver=?7,note=?8,status='draft',updated_at=CURRENT_TIMESTAMP WHERE id=?9",params![input.order_no.trim(),input.title.trim(),input.operator.trim(),input.order_date,input.expected_ship_at,input.factory_address.trim(),input.approver.trim(),input.note.trim(),id]).map_err(|e|e.to_string())?;tx.execute("DELETE FROM purchase_order_items WHERE order_id=?1",[id]).map_err(|e|e.to_string())?;id}else{tx.execute("INSERT INTO purchase_orders(order_no,title,operator,order_date,expected_ship_at,factory_address,approver,note)VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![input.order_no.trim(),input.title.trim(),input.operator.trim(),input.order_date,input.expected_ship_at,input.factory_address.trim(),input.approver.trim(),input.note.trim()]).map_err(|e|e.to_string())?;tx.last_insert_rowid()};for(i,x)in input.items.iter().enumerate(){let quantity=calculated_quantity(x)?;tx.execute("INSERT INTO purchase_order_items(order_id,product_name,sku,image_url,unit_price,package_length_cm,package_width_cm,package_height_cm,unit_weight_kg,units_per_carton,carton_weight_kg,carton_length_cm,carton_width_cm,carton_height_cm,carton_count,quantity,unit,note,sort_order)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",params![oid,x.product_name.trim(),x.sku.trim(),x.image_url.trim(),x.unit_price.trim(),x.package_length_cm.trim(),x.package_width_cm.trim(),x.package_height_cm.trim(),x.unit_weight_kg.trim(),x.units_per_carton.trim(),x.carton_weight_kg.trim(),x.carton_length_cm.trim(),x.carton_width_cm.trim(),x.carton_height_cm.trim(),x.carton_count.trim(),quantity,if x.unit.trim().is_empty(){"个"}else{x.unit.trim()},x.note.trim(),i as i64]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(json!({"id":oid}))},
    "submit_feishu"=>{let oid=id.ok_or("请先保存采购单")?;let input:PurchaseOrderInput=serde_json::from_value(detail(&c,oid)?).map_err(|e|e.to_string())?;validate(&input)?;let cards=send_purchase_order_to_feishu(&c,&input)?;c.execute("UPDATE purchase_orders SET status='submitted',updated_at=CURRENT_TIMESTAMP WHERE id=?1",[oid]).map_err(|e|e.to_string())?;Ok(json!({"ok":true,"cards":cards,"message":format!("采购单已提交并发送到飞书群，共 {} 张卡片",cards)}))},
    "archive"=>{let id=id.ok_or("缺少采购单 ID")?;c.execute("UPDATE purchase_orders SET status='archived',updated_at=CURRENT_TIMESTAMP WHERE id=?1",[id]).map_err(|e|e.to_string())?;Ok(json!({"ok":true}))},
    "export_excel"=>{let input:PurchaseOrderInput=serde_json::from_value(payload.unwrap_or(json!({}))).map_err(|e|e.to_string())?;Ok(json!({"path":export_excel(&input,&state)?}))},
@@ -523,7 +566,6 @@ mod tests {
                 carton_width_cm: "50".into(),
                 carton_height_cm: "40".into(),
                 carton_count: "12".into(),
-                quantity: "300".into(),
                 unit: "个".into(),
                 note: "".into(),
             }],
@@ -541,6 +583,7 @@ mod tests {
             .read_to_string(&mut s)
             .unwrap();
         assert!(s.contains("D4*O4"));
+        assert!(s.contains("<c r=\"O4\" s=\"5\"><f>I4*N4</f></c>"));
         assert!(s.contains("SUM(Q4:Q4)"));
         assert!(
             s.find("<autoFilter").unwrap() < s.find("<mergeCells").unwrap(),
@@ -563,5 +606,13 @@ mod tests {
         assert!(content.contains("沙漠数码"));
         assert!(content.contains("`1.5*6`"));
         assert!(content.contains("小计 ¥3645.00"));
+    }
+
+    #[test]
+    fn quantity_and_export_name_are_derived_from_current_inputs() {
+        let value = sample();
+        assert_eq!(calculated_quantity(&value.items[0]).unwrap(), "300");
+        assert_eq!(export_file_stem(&value), "采购单-CG-1-伪装网");
+        assert_eq!(safe_file_component("伪装/网:*?", "fallback"), "伪装_网___");
     }
 }

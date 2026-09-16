@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   Clock3,
   Database,
+  FileDown,
   MapPin,
   Megaphone,
   PackageSearch,
@@ -52,8 +53,11 @@ import {
   dataCoverage,
   deleteCompetitorDemoData,
   exportDataset,
+  exportOzonMonthlyReport,
+  exportOzonCrossBorderReport,
   exportApiBundle,
   exportWbApiBundle,
+  exportWbMonthlyReport,
   fbsOrders,
   financeBreakdown,
   importProductCostsCsv,
@@ -2653,6 +2657,25 @@ export function ReportsPage({
           <button disabled={!!busy} onClick={() => syncMonth("finance")}>
             同步应计费用
           </button>
+          <button
+            className="dark-button"
+            disabled={!!busy || !data}
+            onClick={async () => {
+              setBusy("monthly-export");
+              setMessage("");
+              try {
+                const path = await exportOzonMonthlyReport(month);
+                setMessage(`完整月报已导出：${path}`);
+              } catch (error) {
+                setMessage(`月报导出失败：${String(error)}`);
+              } finally {
+                setBusy("");
+              }
+            }}
+          >
+            <FileDown size={16} />
+            {busy === "monthly-export" ? "导出中…" : "导出完整月报"}
+          </button>
           <span>
             {effectiveRange.from} 至 {effectiveRange.to}
           </span>
@@ -2731,6 +2754,25 @@ export function ReportsPage({
             }}
           >
             {busy === "cross-feishu" ? "发送中…" : "发送周报到飞书群"}
+          </button>
+          <button
+            className="dark-button"
+            disabled={!!busy || !crossData}
+            onClick={async () => {
+              setBusy("cross-export");
+              setMessage("");
+              try {
+                const path = await exportOzonCrossBorderReport(effectiveRange);
+                setMessage(`跨境利润报表已导出：${path}`);
+              } catch (error) {
+                setMessage(`跨境利润报表导出失败：${String(error)}`);
+              } finally {
+                setBusy("");
+              }
+            }}
+          >
+            <FileDown size={16} />
+            {busy === "cross-export" ? "导出中…" : "导出跨境利润报表"}
           </button>
         </div>
       )}
@@ -4747,6 +4789,8 @@ export function WbPage({
     [savedWbCost, setSavedWbCost] = useState<number | null>(null),
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState(""),
+    [reportMonth, setReportMonth] = useState(range.to.slice(0, 7)),
+    [exportingMonth, setExportingMonth] = useState(false),
     [wbApiPath, setWbApiPath] = useState("");
   const load = async () => {
     const [s, d, c, o, a, w, stocks, settled] = await Promise.all([
@@ -4772,6 +4816,7 @@ export function WbPage({
     void load();
   }, [range.from, range.to]);
   useEffect(() => setTab(section), [section]);
+  useEffect(() => setReportMonth(range.to.slice(0, 7)), [range.to]);
   useEffect(() => {
     if (tab !== "daily" || !wbChartRef.current) return;
     const daily = new Map<
@@ -4989,7 +5034,16 @@ export function WbPage({
           <section className="card trend-card wb-report-overview">
             <div className="section-heading">
               <div><h2>WB 报告中心</h2><p>把卖家后台报告映射到现有真实订单、库存、广告和利润缓存；未获得的数据明确标注，不生成模拟值。</p></div>
-              <span className="date-pill"><CalendarDays size={16} />{range.from} — {range.to}</span>
+              <div className="wb-monthly-export">
+                <label><span>导出月份</span><input type="month" value={reportMonth} onChange={(event) => setReportMonth(event.target.value)} /></label>
+                <button className="dark-button" disabled={exportingMonth || !reportMonth} onClick={async () => {
+                  setExportingMonth(true);
+                  try { const path = await exportWbMonthlyReport(reportMonth); setMessage(`月报已导出：${path}`); }
+                  catch (error) { setMessage(`月报导出失败：${String(error)}`); }
+                  finally { setExportingMonth(false); }
+                }}><FileDown size={16} />{exportingMonth ? "导出中" : "导出完整月报"}</button>
+                <span className="date-pill"><CalendarDays size={16} />{range.from} — {range.to}</span>
+              </div>
             </div>
             <div className="four-cols">
               <div className="stat blue"><span>有效订单</span><strong>{validOrders.length}</strong><small>按 srid 去重</small></div>

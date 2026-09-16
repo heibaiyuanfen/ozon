@@ -1,7 +1,13 @@
 use crate::{secrets, AppState, DateRange};
+use chrono::{Datelike, NaiveDate};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fs};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::Write,
+    path::Path,
+};
 use tauri::State;
 
 #[derive(Serialize, Deserialize)]
@@ -114,6 +120,61 @@ pub struct WbFinanceSummary {
     pub last_sync: String,
 }
 
+#[derive(Default)]
+struct MonthlySku {
+    nm_id: i64,
+    article: String,
+    name: String,
+    warehouse: String,
+    unit_cost_cny: Option<f64>,
+    units: i64,
+    sales: f64,
+    ads: f64,
+    commission: f64,
+    logistics: f64,
+    storage: f64,
+    acceptance: f64,
+    acquiring: f64,
+    penalty: f64,
+    other: f64,
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+fn xtext(cell: &str, value: &str, style: usize) -> String {
+    format!(
+        r#"<c r="{cell}" s="{style}" t="inlineStr"><is><t>{}</t></is></c>"#,
+        xml_escape(value)
+    )
+}
+fn xnum(cell: &str, value: f64, style: usize) -> String {
+    format!(r#"<c r="{cell}" s="{style}"><v>{value}</v></c>"#)
+}
+fn xformula(cell: &str, formula: &str, cached: f64, style: usize) -> String {
+    format!(
+        r#"<c r="{cell}" s="{style}"><f>{}</f><v>{cached}</v></c>"#,
+        xml_escape(formula)
+    )
+}
+fn finance_nm_id(raw: &str) -> i64 {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| {
+            ["nmId", "nm_id", "nmID"].iter().find_map(|k| {
+                v.get(*k).and_then(|x| {
+                    x.as_i64()
+                        .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+                })
+            })
+        })
+        .unwrap_or(0)
+}
+
 fn db(state: &AppState) -> Result<Connection, String> {
     let folder = state.data_dir.join("wb");
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
@@ -133,30 +194,478 @@ fn number(v: Option<&serde_json::Value>) -> f64 {
         .unwrap_or(0.0)
 }
 fn money_field(row: &serde_json::Value, names: &[&str]) -> f64 {
-    names.iter().find_map(|name| row.get(*name)).map(|v| number(Some(v))).unwrap_or(0.0)
+    names
+        .iter()
+        .find_map(|name| row.get(*name))
+        .map(|v| number(Some(v)))
+        .unwrap_or(0.0)
 }
 fn finance_logistics(row: &serde_json::Value) -> f64 {
     // deliveryAmount/returnAmount are operation counts. Finance v1 exposes
     // the actual charge as deliveryService; the remaining names are legacy.
-    money_field(row,&["deliveryService","delivery_service","deliveryRub","delivery_rub"]).abs()
+    money_field(
+        row,
+        &[
+            "deliveryService",
+            "delivery_service",
+            "deliveryRub",
+            "delivery_rub",
+        ],
+    )
+    .abs()
 }
 fn finance_storage(row: &serde_json::Value) -> f64 {
-    money_field(row,&["paidStorage","paid_storage","storageFee","storage_fee"]).abs()
+    money_field(
+        row,
+        &["paidStorage", "paid_storage", "storageFee", "storage_fee"],
+    )
+    .abs()
 }
 fn finance_acceptance(row: &serde_json::Value) -> f64 {
-    money_field(row,&["paidAcceptance","paid_acceptance","acceptance","acceptanceFee","acceptance_fee"]).abs()
+    money_field(
+        row,
+        &[
+            "paidAcceptance",
+            "paid_acceptance",
+            "acceptance",
+            "acceptanceFee",
+            "acceptance_fee",
+        ],
+    )
+    .abs()
 }
 fn finance_other(row: &serde_json::Value) -> f64 {
     // These are independent charges, not aliases. A zero additionalPayment
     // must not hide a non-zero rebilled logistics cost on the same row.
-    money_field(row,&["additionalPayment","additional_payment"]).abs()
-        + money_field(row,&["rebillLogisticCost","rebill_logistic_cost"]).abs()
+    money_field(row, &["additionalPayment", "additional_payment"]).abs()
+        + money_field(row, &["rebillLogisticCost", "rebill_logistic_cost"]).abs()
 }
 
 #[tauri::command]
-pub fn wb_finance_summary(range: DateRange, state: State<AppState>) -> Result<WbFinanceSummary, String> {
+pub fn wb_finance_summary(
+    range: DateRange,
+    state: State<AppState>,
+) -> Result<WbFinanceSummary, String> {
     let c = db(&state)?;
     c.query_row("SELECT COUNT(*),COALESCE(SUM(sales_rub),0),COALESCE(SUM(for_pay_rub),0),COALESCE(SUM(commission_rub),0),COALESCE(SUM(logistics_rub),0),COALESCE(SUM(storage_rub),0),COALESCE(SUM(acceptance_rub),0),COALESCE(SUM(acquiring_rub),0),COALESCE(SUM(penalty_rub),0),COALESCE(SUM(deduction_rub),0),COALESCE(SUM(other_rub),0),COALESCE(MAX(updated_at),'') FROM finance_details WHERE rr_day BETWEEN ?1 AND ?2", params![range.from,range.to], |r| Ok(WbFinanceSummary { rows:r.get(0)?, sales_rub:r.get(1)?, for_pay_rub:r.get(2)?, commission_rub:r.get(3)?, logistics_rub:r.get(4)?, storage_rub:r.get(5)?, acceptance_rub:r.get(6)?, acquiring_rub:r.get(7)?, penalty_rub:r.get(8)?, deduction_rub:r.get(9)?, other_rub:r.get(10)?, last_sync:r.get(11)? })).map_err(|e|e.to_string())
+}
+
+fn monthly_sheet(rows: &[MonthlySku], month: &str, store: &str, rate: f64) -> String {
+    let first = 10usize;
+    let last = first + rows.len().saturating_sub(1);
+    let summary_last = last.max(first);
+    let mut body = String::new();
+    body.push_str(&format!(
+        r#"<row r="1" ht="34" customHeight="1">{}</row>"#,
+        xtext("A1", &format!("WB 月度经营报告 · {month}"), 1)
+    ));
+    body.push_str(&format!(
+        r#"<row r="2">{}{}</row>"#,
+        xtext("A2", &format!("店铺：{store}"), 2),
+        xtext("E2", "币种：RUB；采购成本按 RUB/CNY 汇率换算", 2)
+    ));
+    let summaries = [
+        (
+            "A4",
+            "月销量",
+            "B4",
+            format!("SUM(G{first}:G{summary_last})"),
+            rows.iter().map(|x| x.units as f64).sum(),
+            5,
+        ),
+        (
+            "D4",
+            "月销售额",
+            "E4",
+            format!("SUM(I{first}:I{summary_last})"),
+            rows.iter().map(|x| x.sales).sum(),
+            6,
+        ),
+        (
+            "G4",
+            "月广告费",
+            "H4",
+            format!("SUM(J{first}:J{summary_last})"),
+            rows.iter().map(|x| x.ads).sum(),
+            6,
+        ),
+        (
+            "J4",
+            "月采购成本",
+            "K4",
+            format!("SUM(L{first}:L{summary_last})"),
+            rows.iter()
+                .filter_map(|x| x.unit_cost_cny.map(|c| c * rate * x.units as f64))
+                .sum(),
+            6,
+        ),
+        (
+            "M4",
+            "月平台及履约费",
+            "N4",
+            format!("SUM(M{first}:S{summary_last})"),
+            rows.iter()
+                .map(|x| {
+                    x.commission
+                        + x.logistics
+                        + x.storage
+                        + x.acceptance
+                        + x.acquiring
+                        + x.penalty
+                        + x.other
+                })
+                .sum(),
+            6,
+        ),
+        (
+            "P4",
+            "月总成本",
+            "Q4",
+            format!("SUM(T{first}:T{summary_last})"),
+            rows.iter()
+                .filter_map(|x| {
+                    x.unit_cost_cny.map(|c| {
+                        x.ads
+                            + c * rate * x.units as f64
+                            + x.commission
+                            + x.logistics
+                            + x.storage
+                            + x.acceptance
+                            + x.acquiring
+                            + x.penalty
+                            + x.other
+                    })
+                })
+                .sum(),
+            6,
+        ),
+        (
+            "S4",
+            "月利润",
+            "T4",
+            format!("SUM(U{first}:U{summary_last})"),
+            rows.iter()
+                .filter_map(|x| {
+                    x.unit_cost_cny.map(|c| {
+                        x.sales
+                            - (x.ads
+                                + c * rate * x.units as f64
+                                + x.commission
+                                + x.logistics
+                                + x.storage
+                                + x.acceptance
+                                + x.acquiring
+                                + x.penalty
+                                + x.other)
+                    })
+                })
+                .sum(),
+            6,
+        ),
+        (
+            "V4",
+            "缺成本 SKU",
+            "W4",
+            format!("COUNTIF(X{first}:X{summary_last},\"缺少成本\")"),
+            rows.iter().filter(|x| x.unit_cost_cny.is_none()).count() as f64,
+            5,
+        ),
+    ];
+    let mut srow = String::new();
+    for (lc, label, vc, formula, cached, style) in summaries {
+        srow.push_str(&xtext(lc, label, 3));
+        srow.push_str(&xformula(vc, &formula, cached, style));
+    }
+    body.push_str(&format!(
+        r#"<row r="4" ht="28" customHeight="1">{srow}</row>"#
+    ));
+    body.push_str(&format!(r#"<row r="6">{}{}</row>"#, xtext("A6", "公式口径", 2), xtext("B6", "利润=销售额-广告费-采购成本-平台及履约费；缺采购成本的 SKU 不计入利润合计，并在校验列提示。", 2)));
+    let headers = [
+        "nmId",
+        "SKU/货号",
+        "商品名称",
+        "仓库",
+        "单位成本 CNY",
+        "RUB/CNY",
+        "月销量",
+        "平均售价 RUB",
+        "月销售额 RUB",
+        "月广告费 RUB",
+        "单位成本 RUB",
+        "采购成本 RUB",
+        "平台佣金",
+        "物流费",
+        "仓储费",
+        "入库验收",
+        "支付手续费",
+        "罚款",
+        "其他扣款",
+        "总成本 RUB",
+        "月利润 RUB",
+        "利润率",
+        "利润贡献",
+        "成本完整性",
+        "公式校验",
+    ];
+    let cols: Vec<String> = (0..headers.len())
+        .map(|i| {
+            let mut n = i + 1;
+            let mut out = String::new();
+            while n > 0 {
+                out.insert(0, (b'A' + ((n - 1) % 26) as u8) as char);
+                n = (n - 1) / 26;
+            }
+            out
+        })
+        .collect();
+    let mut h = String::new();
+    for (i, v) in headers.iter().enumerate() {
+        h.push_str(&xtext(&format!("{}9", cols[i]), v, 4));
+    }
+    body.push_str(&format!(r#"<row r="9" ht="30" customHeight="1">{h}</row>"#));
+    for (i, x) in rows.iter().enumerate() {
+        let r = first + i;
+        let cost = x.unit_cost_cny.map(|v| v * rate);
+        let purchase = cost.map(|v| v * x.units as f64);
+        let fees = x.commission
+            + x.logistics
+            + x.storage
+            + x.acceptance
+            + x.acquiring
+            + x.penalty
+            + x.other;
+        let total_cost = purchase.map(|v| x.ads + v + fees);
+        let profit = total_cost.map(|v| x.sales - v);
+        let mut c = String::new();
+        c.push_str(&xnum(&format!("A{r}"), x.nm_id as f64, 5));
+        c.push_str(&xtext(&format!("B{r}"), &x.article, 7));
+        c.push_str(&xtext(&format!("C{r}"), &x.name, 7));
+        c.push_str(&xtext(&format!("D{r}"), &x.warehouse, 7));
+        if let Some(v) = x.unit_cost_cny {
+            c.push_str(&xnum(&format!("E{r}"), v, 6));
+        } else {
+            c.push_str(&xtext(&format!("E{r}"), "", 8));
+        }
+        c.push_str(&xnum(&format!("F{r}"), rate, 6));
+        c.push_str(&xnum(&format!("G{r}"), x.units as f64, 5));
+        c.push_str(&xformula(
+            &format!("H{r}"),
+            &format!("IFERROR(I{r}/G{r},0)"),
+            if x.units > 0 {
+                x.sales / x.units as f64
+            } else {
+                0.0
+            },
+            6,
+        ));
+        c.push_str(&xnum(&format!("I{r}"), x.sales, 6));
+        c.push_str(&xnum(&format!("J{r}"), x.ads, 6));
+        c.push_str(&xformula(
+            &format!("K{r}"),
+            &format!("IF(E{r}=\"\",\"\",E{r}*F{r})"),
+            cost.unwrap_or(0.0),
+            6,
+        ));
+        c.push_str(&xformula(
+            &format!("L{r}"),
+            &format!("IF(K{r}=\"\",\"\",K{r}*G{r})"),
+            purchase.unwrap_or(0.0),
+            6,
+        ));
+        for (col, v) in [
+            ("M", x.commission),
+            ("N", x.logistics),
+            ("O", x.storage),
+            ("P", x.acceptance),
+            ("Q", x.acquiring),
+            ("R", x.penalty),
+            ("S", x.other),
+        ] {
+            c.push_str(&xnum(&format!("{col}{r}"), v, 6));
+        }
+        c.push_str(&xformula(
+            &format!("T{r}"),
+            &format!("IF(L{r}=\"\",\"\",SUM(J{r}:S{r}))"),
+            total_cost.unwrap_or(0.0),
+            6,
+        ));
+        c.push_str(&xformula(
+            &format!("U{r}"),
+            &format!("IF(T{r}=\"\",\"\",I{r}-T{r})"),
+            profit.unwrap_or(0.0),
+            6,
+        ));
+        c.push_str(&xformula(
+            &format!("V{r}"),
+            &format!("IFERROR(U{r}/I{r},0)"),
+            profit
+                .filter(|_| x.sales != 0.0)
+                .map(|v| v / x.sales)
+                .unwrap_or(0.0),
+            9,
+        ));
+        c.push_str(&xformula(
+            &format!("W{r}"),
+            &format!("IFERROR(U{r}/$T$4,0)"),
+            0.0,
+            9,
+        ));
+        c.push_str(&xtext(
+            &format!("X{r}"),
+            if cost.is_some() {
+                "完整"
+            } else {
+                "缺少成本"
+            },
+            if cost.is_some() { 10 } else { 8 },
+        ));
+        c.push_str(&xformula(&format!("Y{r}"),&format!("IF(X{r}=\"缺少成本\",\"缺少成本\",IF(ABS(U{r}-(I{r}-T{r}))<0.01,\"通过\",\"异常\"))"),0.0,10));
+        body.push_str(&format!(
+            r#"<row r="{r}" ht="26" customHeight="1">{c}</row>"#
+        ));
+    }
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="9" topLeftCell="A10" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="20"/><cols><col min="1" max="2" width="15" customWidth="1"/><col min="3" max="4" width="24" customWidth="1"/><col min="5" max="25" width="15" customWidth="1"/></cols><sheetData>{body}</sheetData><autoFilter ref="A9:Y{summary_last}"/><mergeCells count="3"><mergeCell ref="A1:Y1"/><mergeCell ref="A2:D2"/><mergeCell ref="B6:Y6"/></mergeCells><pageMargins left="0.2" right="0.2" top="0.35" bottom="0.35" header="0.15" footer="0.15"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>"#
+    )
+}
+
+fn write_monthly_xlsx(path: &Path, sheet: String) -> Result<(), String> {
+    let styles = r#"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="2"><numFmt numFmtId="164" formatCode="₽#,##0.00;[Red]-₽#,##0.00"/><numFmt numFmtId="165" formatCode="0.00%"/></numFmts><fonts count="3"><font><sz val="10"/><name val="Microsoft YaHei"/></font><font><b/><sz val="20"/><color rgb="FF0B1F3A"/><name val="Microsoft YaHei"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Microsoft YaHei"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEDF4FF"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF246BFD"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFDDE5F0"/></left><right style="thin"><color rgb="FFDDE5F0"/></right><top style="thin"><color rgb="FFDDE5F0"/></top><bottom style="thin"><color rgb="FFDDE5F0"/></bottom></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="11"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="2" borderId="1"/><xf numFmtId="0" fontId="2" fillId="3" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="4" borderId="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="1"/><xf numFmtId="0" fontId="0" fillId="2" borderId="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#;
+    let parts=[("[Content_Types].xml",r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>"#.to_string()),("_rels/.rels",r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_string()),("xl/workbook.xml",r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="月报" sheetId="1" r:id="rId1"/></sheets><calcPr calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/></workbook>"#.to_string()),("xl/_rels/workbook.xml.rels",r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_string()),("xl/styles.xml",styles.to_string()),("xl/worksheets/sheet1.xml",sheet)];
+    let mut zip = zip::ZipWriter::new(fs::File::create(path).map_err(|e| e.to_string())?);
+    let opt = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, data) in parts {
+        zip.start_file(name, opt).map_err(|e| e.to_string())?;
+        zip.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn export_wb_monthly_report(month: String, state: State<AppState>) -> Result<String, String> {
+    let start = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d")
+        .map_err(|_| "月份格式无效，请选择 YYYY-MM".to_string())?;
+    let next = if start.month() == 12 {
+        NaiveDate::from_ymd_opt(start.year() + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(start.year(), start.month() + 1, 1)
+    }
+    .ok_or("月份无效")?;
+    let end = next
+        .pred_opt()
+        .ok_or("月份无效")?
+        .format("%Y-%m-%d")
+        .to_string();
+    let from = start.format("%Y-%m-%d").to_string();
+    let c = db(&state)?;
+    let rate = setting(&c, "rub_per_cny", "12.5")
+        .parse::<f64>()
+        .unwrap_or(12.5)
+        .max(0.0001);
+    let store = setting(&c, "store_name", "WB 店铺");
+    let mut all: BTreeMap<i64, MonthlySku> = BTreeMap::new();
+    {
+        let mut q=c.prepare("WITH ids AS(SELECT nm_id FROM product_cards UNION SELECT nm_id FROM product_costs UNION SELECT nm_id FROM orders WHERE day BETWEEN ?1 AND ?2 UNION SELECT nm_id FROM ad_daily WHERE day BETWEEN ?1 AND ?2) SELECT i.nm_id,COALESCE(NULLIF(p.vendor_code,''),NULLIF(pc.article,''),(SELECT MAX(article) FROM orders o WHERE o.nm_id=i.nm_id),''),COALESCE(p.name,''),pc.purchase_cost_cny FROM ids i LEFT JOIN product_cards p ON p.nm_id=i.nm_id LEFT JOIN product_costs pc ON pc.nm_id=i.nm_id WHERE i.nm_id>0 ORDER BY 1").map_err(|e|e.to_string())?;
+        let mut rs = q.query(params![from, end]).map_err(|e| e.to_string())?;
+        while let Some(r) = rs.next().map_err(|e| e.to_string())? {
+            let id: i64 = r.get(0).map_err(|e| e.to_string())?;
+            all.insert(
+                id,
+                MonthlySku {
+                    nm_id: id,
+                    article: r.get(1).unwrap_or_default(),
+                    name: r.get(2).unwrap_or_default(),
+                    unit_cost_cny: r.get(3).ok(),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    {
+        let mut q=c.prepare("SELECT nm_id,COALESCE(MAX(article),''),COALESCE(MAX(warehouse_name),''),SUM(quantity),SUM(revenue_rub) FROM orders WHERE day BETWEEN ?1 AND ?2 AND is_cancelled=0 GROUP BY nm_id").map_err(|e|e.to_string())?;
+        let mut rs = q.query(params![from, end]).map_err(|e| e.to_string())?;
+        while let Some(r) = rs.next().map_err(|e| e.to_string())? {
+            let id: i64 = r.get(0).unwrap_or(0);
+            let x = all.entry(id).or_insert_with(|| MonthlySku {
+                nm_id: id,
+                ..Default::default()
+            });
+            if x.article.is_empty() {
+                x.article = r.get(1).unwrap_or_default();
+            }
+            x.warehouse = r.get(2).unwrap_or_default();
+            x.units = r.get(3).unwrap_or(0);
+            x.sales = r.get(4).unwrap_or(0.0);
+        }
+    }
+    {
+        let mut q=c.prepare("SELECT nm_id,SUM(spend_rub) FROM ad_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY nm_id").map_err(|e|e.to_string())?;
+        let mut rs = q.query(params![from, end]).map_err(|e| e.to_string())?;
+        while let Some(r) = rs.next().map_err(|e| e.to_string())? {
+            let id: i64 = r.get(0).unwrap_or(0);
+            all.entry(id)
+                .or_insert_with(|| MonthlySku {
+                    nm_id: id,
+                    ..Default::default()
+                })
+                .ads = r.get(1).unwrap_or(0.0);
+        }
+    }
+    {
+        let mut q=c.prepare("SELECT commission_rub,logistics_rub,storage_rub,acceptance_rub,acquiring_rub,penalty_rub,deduction_rub+other_rub,raw_json FROM finance_details WHERE rr_day BETWEEN ?1 AND ?2").map_err(|e|e.to_string())?;
+        let mut rs = q.query(params![from, end]).map_err(|e| e.to_string())?;
+        while let Some(r) = rs.next().map_err(|e| e.to_string())? {
+            let raw: String = r.get(7).unwrap_or_default();
+            let parsed_id = finance_nm_id(&raw);
+            let id = if parsed_id > 0 { parsed_id } else { -1 };
+            let x = all.entry(id).or_insert_with(|| MonthlySku {
+                nm_id: id,
+                article: if id < 0 {
+                    "UNALLOCATED-FINANCE".into()
+                } else {
+                    String::new()
+                },
+                name: if id < 0 {
+                    "未归属到 SKU 的 Finance 结算费用".into()
+                } else {
+                    String::new()
+                },
+                unit_cost_cny: if id < 0 { Some(0.0) } else { None },
+                ..Default::default()
+            });
+            x.commission += r.get::<_, f64>(0).unwrap_or(0.0).abs();
+            x.logistics += r.get::<_, f64>(1).unwrap_or(0.0).abs();
+            x.storage += r.get::<_, f64>(2).unwrap_or(0.0).abs();
+            x.acceptance += r.get::<_, f64>(3).unwrap_or(0.0).abs();
+            x.acquiring += r.get::<_, f64>(4).unwrap_or(0.0).abs();
+            x.penalty += r.get::<_, f64>(5).unwrap_or(0.0).abs();
+            x.other += r.get::<_, f64>(6).unwrap_or(0.0).abs();
+        }
+    }
+    let rows: Vec<_> = all.into_values().collect();
+    let dir = state
+        .data_dir
+        .parent()
+        .unwrap_or(&state.data_dir)
+        .join("exports")
+        .join("wb-monthly");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let safe: String = store
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = dir.join(format!("WB月报_{safe}_{month}.xlsx"));
+    write_monthly_xlsx(&path, monthly_sheet(&rows, &month, &store, rate))?;
+    let _ = open::that(&path);
+    Ok(path.to_string_lossy().to_string())
 }
 fn wb_get(token: &str, url: &str) -> Result<serde_json::Value, String> {
     if token.is_empty() {
@@ -167,9 +676,13 @@ fn wb_get(token: &str, url: &str) -> Result<serde_json::Value, String> {
         .set("Accept", "application/json")
         .call()
         .map_err(wb_http_error)?;
-    if response.status() == 204 { return Ok(serde_json::Value::Null); }
+    if response.status() == 204 {
+        return Ok(serde_json::Value::Null);
+    }
     let raw = response.into_string().map_err(|e| e.to_string())?;
-    if raw.trim().is_empty() { return Ok(serde_json::Value::Null); }
+    if raw.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
     serde_json::from_str(&raw).map_err(|e| format!("WB API 返回无法解析：{e}"))
 }
 fn wb_http_error(error: ureq::Error) -> String {
@@ -177,8 +690,23 @@ fn wb_http_error(error: ureq::Error) -> String {
         ureq::Error::Status(code, response) => {
             let body = response.into_string().unwrap_or_default();
             let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
-            let hint = match code { 401 => "Token 无效、已过期或格式错误", 403 => "Token 缺少当前接口所需权限", 429 => "请求过于频繁，请等待接口限频窗口后重试", _ => "WB 平台拒绝了本次请求" };
-            format!("WB API HTTP {code}：{hint}{}", if compact.is_empty(){String::new()}else{format!("；平台返回：{}",compact.chars().take(600).collect::<String>())})
+            let hint = match code {
+                401 => "Token 无效、已过期或格式错误",
+                403 => "Token 缺少当前接口所需权限",
+                429 => "请求过于频繁，请等待接口限频窗口后重试",
+                _ => "WB 平台拒绝了本次请求",
+            };
+            format!(
+                "WB API HTTP {code}：{hint}{}",
+                if compact.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "；平台返回：{}",
+                        compact.chars().take(600).collect::<String>()
+                    )
+                }
+            )
         }
         other => format!("WB API 网络请求失败：{other}"),
     }
@@ -252,7 +780,11 @@ pub fn save_wb_settings(form: WbSettings, state: State<AppState>) -> Result<(), 
         return Err("人民币兑卢布汇率必须大于 0".into());
     }
     let c = db(&state)?;
-    let normalized_mode = if form.business_mode == "cross_border" { "cross_border" } else { "domestic" };
+    let normalized_mode = if form.business_mode == "cross_border" {
+        "cross_border"
+    } else {
+        "domestic"
+    };
     let identity_changed = setting(&c, "business_mode", "domestic") != normalized_mode
         || (!form.token.is_empty() && form.token != "••••••••");
     if identity_changed {
@@ -332,7 +864,12 @@ pub fn import_wb_api_bundle(path: String, state: State<AppState>) -> Result<(), 
         .and_then(|v| v.as_object())
         .ok_or("配置包缺少 credentials")?;
     let c = db(&state)?;
-    for key in ["store_name", "business_mode", "rub_per_cny", "commission_percent"] {
+    for key in [
+        "store_name",
+        "business_mode",
+        "rub_per_cny",
+        "commission_percent",
+    ] {
         if let Some(value) = values.get(key).and_then(|v| v.as_str()) {
             c.execute("INSERT INTO settings(key,value)VALUES(?1,?2)ON CONFLICT(key)DO UPDATE SET value=excluded.value", params![key,value]).map_err(|e|e.to_string())?;
         }
@@ -450,9 +987,13 @@ fn wb_post(token: &str, url: &str, body: &serde_json::Value) -> Result<serde_jso
         .set("Content-Type", "application/json")
         .send_string(&body.to_string())
         .map_err(wb_http_error)?;
-    if response.status() == 204 { return Ok(serde_json::Value::Null); }
+    if response.status() == 204 {
+        return Ok(serde_json::Value::Null);
+    }
     let raw = response.into_string().map_err(|e| e.to_string())?;
-    if raw.trim().is_empty() { return Ok(serde_json::Value::Null); }
+    if raw.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
     serde_json::from_str(&raw).map_err(|e| format!("WB API 返回无法解析：{e}"))
 }
 
@@ -695,44 +1236,86 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
             .map_err(|_| "开始日期格式无效".to_string())?;
         let to = chrono::NaiveDate::parse_from_str(&range.to, "%Y-%m-%d")
             .map_err(|_| "结束日期格式无效".to_string())?;
-        if to < from { return Err("结束日期不能早于开始日期".into()); }
+        if to < from {
+            return Err("结束日期不能早于开始日期".into());
+        }
         let mut chunk_from = from;
         let mut count = 0_i64;
         while chunk_from <= to {
             let chunk_to = std::cmp::min(chunk_from + chrono::Duration::days(29), to);
-            let date_from = chunk_from.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
-            let date_to = (chunk_to + chrono::Duration::days(1)).and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() - 1;
+            let date_from = chunk_from
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp();
+            let date_to = (chunk_to + chrono::Duration::days(1))
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+                - 1;
             let mut next = 0_i64;
             loop {
                 let payload = wb_get(&token, &format!("https://marketplace-api.wildberries.ru/api/v3/orders?limit=1000&next={next}&dateFrom={date_from}&dateTo={date_to}"))?;
-                let rows = payload.get("orders").and_then(|v|v.as_array()).cloned().unwrap_or_default();
+                let rows = payload
+                    .get("orders")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 let returned_next = integer(payload.get("next"));
-                let tx = c.transaction().map_err(|e|e.to_string())?;
+                let tx = c.transaction().map_err(|e| e.to_string())?;
                 for row in &rows {
-                    let created = row.get("createdAt").and_then(|v|v.as_str()).unwrap_or_default();
+                    let created = row
+                        .get("createdAt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
                     let day = chrono::DateTime::parse_from_rfc3339(created)
                         .ok()
-                        .and_then(|dt| chrono::FixedOffset::east_opt(3 * 3600).map(|tz| dt.with_timezone(&tz).format("%Y-%m-%d").to_string()))
+                        .and_then(|dt| {
+                            chrono::FixedOffset::east_opt(3 * 3600)
+                                .map(|tz| dt.with_timezone(&tz).format("%Y-%m-%d").to_string())
+                        })
                         .unwrap_or_else(|| created.chars().take(10).collect());
-                    if day < range.from || day > range.to { continue; }
+                    if day < range.from || day > range.to {
+                        continue;
+                    }
                     let numeric_id = integer(row.get("id"));
-                    let id = row.get("rid").and_then(|v|v.as_str()).filter(|v|!v.is_empty()).map(str::to_string)
+                    let id = row
+                        .get("rid")
+                        .and_then(|v| v.as_str())
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string)
                         .unwrap_or_else(|| format!("marketplace:{numeric_id}"));
-                    if numeric_id == 0 && id == "marketplace:0" { continue; }
-                    let price = number(row.get("convertedFinalPrice").or_else(||row.get("finalPrice")).or_else(||row.get("convertedPrice")).or_else(||row.get("price"))) / 100.0;
+                    if numeric_id == 0 && id == "marketplace:0" {
+                        continue;
+                    }
+                    let price = number(
+                        row.get("convertedFinalPrice")
+                            .or_else(|| row.get("finalPrice"))
+                            .or_else(|| row.get("convertedPrice"))
+                            .or_else(|| row.get("price")),
+                    ) / 100.0;
                     let warehouse = integer(row.get("warehouseId"));
                     tx.execute("INSERT INTO orders(srid,day,changed_at,nm_id,article,warehouse_name,quantity,revenue_rub,is_cancelled,raw_json)VALUES(?1,?2,?3,?4,?5,?6,1,?7,0,?8)ON CONFLICT(srid)DO UPDATE SET day=excluded.day,changed_at=excluded.changed_at,nm_id=excluded.nm_id,article=CASE WHEN excluded.article='' THEN orders.article ELSE excluded.article END,warehouse_name=CASE WHEN orders.warehouse_name='' THEN excluded.warehouse_name ELSE orders.warehouse_name END,revenue_rub=CASE WHEN excluded.revenue_rub=0 THEN orders.revenue_rub ELSE excluded.revenue_rub END,raw_json=excluded.raw_json", params![id,day,created,integer(row.get("nmId").or_else(||row.get("nmID"))),row.get("article").and_then(|v|v.as_str()).unwrap_or_default(),if warehouse==0 {String::new()} else {format!("仓库 #{warehouse}")},price,row.to_string()]).map_err(|e|e.to_string())?;
                     count += 1;
                 }
-                tx.commit().map_err(|e|e.to_string())?;
-                if rows.len() < 1000 || returned_next == 0 || returned_next == next { break; }
+                tx.commit().map_err(|e| e.to_string())?;
+                if rows.len() < 1000 || returned_next == 0 || returned_next == next {
+                    break;
+                }
                 next = returned_next;
             }
             chunk_from = chunk_to + chrono::Duration::days(1);
         }
         Ok(count)
     })();
-    let stored_order_count: i64 = c.query_row("SELECT COUNT(*) FROM orders WHERE day BETWEEN ?1 AND ?2", params![range.from,range.to], |r|r.get(0)).map_err(|e|e.to_string())?;
+    let stored_order_count: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM orders WHERE day BETWEEN ?1 AND ?2",
+            params![range.from, range.to],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
     let order_text = match marketplace_order_result {
         Ok(count) => format!("订单 {stored_order_count}（统计接口原始 {statistics_order_count}、日期内 {order_count}；FBS 实时 {count}）"),
         Err(error) => format!("订单 {stored_order_count}（统计接口原始 {statistics_order_count}、日期内 {order_count}；FBS 实时订单保留原缓存：{error}）"),
@@ -752,35 +1335,71 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
                 "period": "weekly"
             }),
         )?;
-        let items = payload.as_array()
-            .or_else(|| payload.pointer("/data/items").and_then(|v|v.as_array()))
-            .or_else(|| payload.get("data").and_then(|v|v.as_array()))
+        let items = payload
+            .as_array()
+            .or_else(|| payload.pointer("/data/items").and_then(|v| v.as_array()))
+            .or_else(|| payload.get("data").and_then(|v| v.as_array()))
             .ok_or_else(|| "WB Finance 返回结构中没有明细数组".to_string())?;
         if items.len() >= 100_000 {
-            return Err("当前周期达到 WB 单次 100000 行上限，请缩短日期后重试；原财务缓存未覆盖".into());
+            return Err(
+                "当前周期达到 WB 单次 100000 行上限，请缩短日期后重试；原财务缓存未覆盖".into(),
+            );
         }
-        let tx = c.transaction().map_err(|e|e.to_string())?;
-        tx.execute("DELETE FROM finance_details WHERE rr_day BETWEEN ?1 AND ?2", params![range.from,range.to]).map_err(|e|e.to_string())?;
+        let tx = c.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM finance_details WHERE rr_day BETWEEN ?1 AND ?2",
+            params![range.from, range.to],
+        )
+        .map_err(|e| e.to_string())?;
         let mut count = 0_i64;
         for (index, row) in items.iter().enumerate() {
-            let id = integer(row.get("rrdId").or_else(||row.get("rrd_id")));
-            let id = if id == 0 { chrono::Utc::now().timestamp_millis().saturating_mul(100_000).saturating_add(index as i64) } else { id };
-            let day = row.get("rrDt").or_else(||row.get("rr_dt")).or_else(||row.get("saleDt")).or_else(||row.get("sale_dt")).and_then(|v|v.as_str()).unwrap_or_default().chars().take(10).collect::<String>();
-            if day.is_empty() { continue; }
-            let sales = money_field(row,&["retailAmount","retail_amount"]);
-            let for_pay = money_field(row,&["forPay","ppvz_for_pay"]);
-            let commission = money_field(row,&["salesCommission","commissionAmount","ppvzSalesCommission","ppvz_sales_commission","ppvzVw","ppvz_vw"]).abs();
+            let id = integer(row.get("rrdId").or_else(|| row.get("rrd_id")));
+            let id = if id == 0 {
+                chrono::Utc::now()
+                    .timestamp_millis()
+                    .saturating_mul(100_000)
+                    .saturating_add(index as i64)
+            } else {
+                id
+            };
+            let day = row
+                .get("rrDt")
+                .or_else(|| row.get("rr_dt"))
+                .or_else(|| row.get("saleDt"))
+                .or_else(|| row.get("sale_dt"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .chars()
+                .take(10)
+                .collect::<String>();
+            if day.is_empty() {
+                continue;
+            }
+            let sales = money_field(row, &["retailAmount", "retail_amount"]);
+            let for_pay = money_field(row, &["forPay", "ppvz_for_pay"]);
+            let commission = money_field(
+                row,
+                &[
+                    "salesCommission",
+                    "commissionAmount",
+                    "ppvzSalesCommission",
+                    "ppvz_sales_commission",
+                    "ppvzVw",
+                    "ppvz_vw",
+                ],
+            )
+            .abs();
             let logistics = finance_logistics(row);
             let storage = finance_storage(row);
             let acceptance = finance_acceptance(row);
-            let acquiring = money_field(row,&["acquiringFee","acquiring_fee"]).abs();
-            let penalty = money_field(row,&["penalty"]).abs();
-            let deduction = money_field(row,&["deduction"]).abs();
+            let acquiring = money_field(row, &["acquiringFee", "acquiring_fee"]).abs();
+            let penalty = money_field(row, &["penalty"]).abs();
+            let deduction = money_field(row, &["deduction"]).abs();
             let other = finance_other(row);
             tx.execute("INSERT INTO finance_details(rrd_id,rr_day,sales_rub,for_pay_rub,commission_rub,logistics_rub,storage_rub,acceptance_rub,acquiring_rub,penalty_rub,deduction_rub,other_rub,raw_json,updated_at)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,CURRENT_TIMESTAMP)ON CONFLICT(rrd_id)DO UPDATE SET rr_day=excluded.rr_day,sales_rub=excluded.sales_rub,for_pay_rub=excluded.for_pay_rub,commission_rub=excluded.commission_rub,logistics_rub=excluded.logistics_rub,storage_rub=excluded.storage_rub,acceptance_rub=excluded.acceptance_rub,acquiring_rub=excluded.acquiring_rub,penalty_rub=excluded.penalty_rub,deduction_rub=excluded.deduction_rub,other_rub=excluded.other_rub,raw_json=excluded.raw_json,updated_at=CURRENT_TIMESTAMP",params![id,day,sales,for_pay,commission,logistics,storage,acceptance,acquiring,penalty,deduction,other,row.to_string()]).map_err(|e|e.to_string())?;
             count += 1;
         }
-        tx.commit().map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(count)
     })();
     // Product images are not part of the Statistics orders response.  Cache
@@ -987,7 +1606,10 @@ fn sync_wb_blocking(range: DateRange, state: &AppState) -> Result<String, String
         Ok(count) => format!("商品图片 {count}"),
         Err(error) => format!("商品图片保留原缓存（{error}）"),
     };
-    let finance_text = match finance_result { Ok(count)=>format!("财务结算 {count}"), Err(error)=>format!("财务结算保留原缓存（{error}）") };
+    let finance_text = match finance_result {
+        Ok(count) => format!("财务结算 {count}"),
+        Err(error) => format!("财务结算保留原缓存（{error}）"),
+    };
     Ok(format!(
         "WB 同步完成：{order_text}，{finance_text}，{card_text}，广告活动 {campaign_count}，统计活动 {ad_payload_count}，商品广告 {ad_count}，仓库 {warehouse_count}，{stock_text}{}",
         if campaign_count == 0 { "；未读取到广告活动，请检查 Token 的“推广”权限或 WB 后台是否存在状态为 7/9/11 的活动".to_string() }
@@ -1185,7 +1807,9 @@ mod tests {
             "deliveryService": "85.23"
         });
         assert!((finance_logistics(&row) - 85.23).abs() < 0.001);
-        assert!((finance_logistics(&serde_json::json!({"delivery_rub": -42.5})) - 42.5).abs() < 0.001);
+        assert!(
+            (finance_logistics(&serde_json::json!({"delivery_rub": -42.5})) - 42.5).abs() < 0.001
+        );
     }
     #[test]
     fn finance_v1_maps_storage_acceptance_and_adds_independent_other_charges() {
@@ -1200,5 +1824,34 @@ mod tests {
         assert!((finance_other(&row) - 2.14).abs() < 0.001);
         let both = serde_json::json!({"additionalPayment":"3.00","rebillLogisticCost":"2.00"});
         assert!((finance_other(&both) - 5.0).abs() < 0.001);
+    }
+    #[test]
+    fn monthly_export_keeps_formula_audit_and_missing_cost_visible() {
+        let rows = vec![
+            MonthlySku {
+                nm_id: 1,
+                article: "SKU-1".into(),
+                units: 2,
+                sales: 1000.0,
+                ads: 50.0,
+                unit_cost_cny: Some(10.0),
+                logistics: 25.0,
+                ..Default::default()
+            },
+            MonthlySku {
+                nm_id: 2,
+                article: "SKU-2".into(),
+                units: 1,
+                sales: 300.0,
+                unit_cost_cny: None,
+                ..Default::default()
+            },
+        ];
+        let xml = monthly_sheet(&rows, "2026-09", "测试店", 12.5);
+        assert!(xml.contains("SUM(U10:U11)"));
+        assert!(xml.contains("COUNTIF(X10:X11,&quot;缺少成本&quot;)"));
+        assert!(xml.contains("IF(ABS(U10-(I10-T10))&lt;0.01"));
+        assert!(xml.contains("缺少成本"));
+        assert!(xml.contains("autoFilter ref=\"A9:Y11\""));
     }
 }

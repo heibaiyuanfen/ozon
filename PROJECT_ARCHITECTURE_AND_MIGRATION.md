@@ -1309,3 +1309,64 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - Rust 验证：`cargo check --locked` 通过；`cargo test --locked product_master::` 40 项全部通过。
 - 正式构建：使用 `desktop-next/scripts/build-tauri-release.cmd` 成功生成嵌入式 Release EXE。
 - 覆盖结果：根目录 `ozon-analytics-next.exe` 已替换，大小 30,761,472 字节，SHA-256 `B33BF7531BB5FEC26CF4124D1FAFDD46BBD1F78BAEF8D693FEA1038CEAC7CBAE`。
+
+## 2026-09-16 WB 完整月报 Excel 导出
+
+- WB 报告中心新增按月导出完整经营月报：覆盖每个 nmId/SKU 的销量、销售额、平均售价、采购成本、广告费、Finance 平台及履约费用、总成本、利润率和利润贡献，并在顶部用 Excel 公式汇总月销量、月销售额、月广告、月采购成本、月费用、月总成本与月利润。
+- 缺采购成本的 SKU 明确标黄并从利润合计中排除；Finance 明细缺少 nmId 时汇总到“未归属到 SKU 的 Finance 结算费用”行，避免费用静默丢失。工作簿包含成本完整性、逐行利润公式校验及打开时强制重算设置。
+- 验证：Rust 全量测试 146 passed / 4 ignored；TypeScript 类型检查与 Vite 正式构建通过；公式/缺成本/筛选范围专项测试通过。
+- 正式交付：使用唯一入口 `desktop-next/scripts/build-tauri-release.cmd` 生成内嵌正式前端的 Release，并覆盖根目录 `ozon-analytics-next.exe`。Release 与根目录 EXE 均为 31,066,624 字节，SHA-256 均为 `7EAB947AF228D2746A26621D682E80EE569187857E8548D1E42D604EF35E5C49`。
+- 启动验收：根目录程序成功启动，窗口识别为 `Ozon ERP`，进程保持运行。页面级继续检查时检测到用户正在操作窗口，因此未抢占用户输入；程序保留开启状态供直接验收“报告中心 → 导出完整月报”。
+
+## 2026-09-16 Ozon ERP 完整月报 Excel 导出
+
+- Ozon ERP“报表与利润 → 月度盈亏”工具栏新增“导出完整月报”，按当前核算月份导出当前 Ozon 店铺，不读取 WB 数据。
+- Excel 包含 SKU、货号、商品名、月销量、平均售价、销售额、SKU 广告、采购成本、头程、预估平台履约费、总成本、预估利润、利润率、利润贡献、成本完整性和逐行公式校验。顶部提供月销售、店铺广告、SKU 广告、广告分配差异、采购成本、头程、SKU 月总成本、SKU 预估利润以及 Finance 结算口径数据。
+- 店铺广告与 SKU 广告分别保留并以公式显示分配差异；缺成本 SKU 标黄且不按零成本虚增利润。工作簿启用打开时自动重算、冻结表头、筛选和横向打印。
+- 验证：`cargo check --locked`、TypeScript 类型检查、Vite 正式构建和 Excel 公式专项测试通过；Rust 全量测试 147 passed / 4 ignored。
+- 正式交付：使用 `desktop-next/scripts/build-tauri-release.cmd` 构建并覆盖根目录 `ozon-analytics-next.exe`。Release 与根目录 EXE 均为 31,057,920 字节，SHA-256 均为 `E77605046B6829FA5EB19364606B38FC5C61D52001AF30538C06B47999427009`。根目录程序已成功启动，窗口识别为 `Ozon ERP`。
+
+## 2026-09-16 跨境店铺利润 Excel 导出
+
+- “报表与利润 → 跨境店铺利润”日期工具栏新增“导出跨境利润报表”，支持按当前选择的日、周、月份或自定义日期区间导出。
+- Excel 使用跨境利润页面的 CNY 口径，包含每个 SKU 的销量、FBP/RFBS/WHD 履约订单、售价、销售额、采购成本、重量、跨境运费、平台及收单调整、Finance 结算额、佣金率、收单费率、总成本、利润率及利润贡献。
+- Performance 广告与 Stars 会员费作为来源控制项保留；总广告按 SKU 销售额占比用 Excel 公式分摊，使 SKU 利润汇总与跨境利润总额对齐。缺采购成本、重量、运费或平台费率的 SKU 标黄且不按零成本虚增利润，并提供逐行公式校验。
+- 验证：Rust 全量测试 148 passed / 4 ignored；TypeScript 类型检查、Vite 正式构建、广告分摊与利润对账公式专项测试通过。
+- 正式交付：使用唯一正式入口构建并覆盖根目录启动器。Release 与根目录 `ozon-analytics-next.exe` 均为 31,165,440 字节，SHA-256 均为 `43C356AD3C1D94F33E0E49A4E5BE908A2A01907B57B37C53CBCEAA5C57E5AD73`。程序已成功启动并识别为 `Ozon ERP`。
+## 2026-09-16 广告实验阶段计划与完整 JSON 历史
+
+- 广告优化实验的每个阶段目标新增 `plannedBudgetRub`，用于记录该阶段计划周预算；旧实验缺少该字段时兼容为未设置。
+- “进入下一阶段”成功后立即打开新阶段草稿的“修改内容”步骤，要求运营人员核对并记录逐 SKU 的预算、价格、广告状态和操作原因，保存后再启动观察。
+- 阶段内补记操作新增预算、出价、状态、售价、素材、页面、促销等变更类型，前值、后值、SKU、原因与操作时间写入该阶段事件时间轴。
+- 原“导出实验 JSON”升级为“导出全部阶段 JSON”：后端沿 `parent_id` 递归收集第一阶段至当前阶段的输入、锁定基准、配置、逐日指标、评估、事件与 AI 结论，并附带 schema 版本和导出时间。
+- 回归验证：`pnpm build` 通过；`cargo check --locked` 通过；Rust 全量测试 148 通过、0 失败、4 ignored；阶段专项测试 24 通过。
+- 正式发布：使用 `desktop-next/scripts/build-tauri-release.cmd` 构建，Release EXE 与根目录 `ozon-analytics-next.exe` 均为 31,149,568 bytes，SHA-256 均为 `97C4A6C91DB8FDB0D47F831D0094E74623ADD6F45D1067D679895A7F01A077C9`。
+- 启动验收：根目录 EXE 已启动并由窗口枚举识别为 `Ozon ERP`；进一步页面截图验收时检测到用户正在操作该窗口，因此未抢占输入，保留程序运行。
+## 2026-09-16 广告实验轮次与 SKU 边际扩量规则
+
+- 广告阶段新增“滚动检查窗口”（默认 3 个完整自然日），正式观察期继续用于阶段晋级；二者职责分离。
+- 每个 SKU 可独立设置 ACOS 上限、CPA 上限、CVR 下限、TACOS 上限、达标后的下一档预算及越线后的降档预算。
+- 新增 `ad_experiment_rounds`：首次确认平台执行时建立 Round 1；阶段内补记预算、出价、状态、售价、素材、页面或促销变更时，自动结束当前 Round 并从下一个完整自然日建立新 Round。
+- 启动实验现在只锁定基准，不再提前开始观察；必须点击“确认已执行并开始观察”，从次日计入完整自然日。
+- 3 日检查严格只读取当前 Round 的数据，输出每个 SKU 的预算利用率、预算是否受限及 `INCREASE / HOLD / REDUCE / INSUFFICIENT_DATA` 建议，避免不同预算档位混算。
+- 预算利用率口径：当前 Round 最近 N 个完整日平均广告费 × 7 ÷ 当前计划周预算；只有规则达标且利用率不低于 90% 才建议继续扩量。
+- 完整阶段 JSON 自动包含各阶段的 `rounds`、每轮配置、检查结果、SKU 规则、近期指标和操作时间线。
+- 验证与发布：`pnpm build`、`cargo check --locked`、Rust 全量测试均通过（151 passed / 0 failed / 4 ignored；广告实验专项 27 passed）。使用正式入口 `desktop-next/scripts/build-tauri-release.cmd` 构建并覆盖根目录 EXE。
+- Release 与根目录 `ozon-analytics-next.exe` 均为 31,366,144 bytes，SHA-256 均为 `8D22922C298C721CD6D78ECE144BE64FF74FC59D822063EB6F9E41AA32F8A095`；根目录程序已启动，窗口识别为 `Ozon ERP`。
+## 2026-09-16 实验矩阵预算与补记操作同步修复
+
+- 修复“补记预算调整只写入时间轴、SKU 实验矩阵仍显示旧预算”的数据分叉问题。
+- 预算补记现在以事务方式同时更新：操作事件、`ad_experiment_skus` 当前配置、动作方向（增加/减少/保持）、阶段预算合计（预算完整时）和新 Round 配置快照。
+- 价格与广告状态补记同样同步更新矩阵配置，确保矩阵、滚动判断与完整 JSON 均读取同一份最新阶段配置。
+- 新增历史修复：应用加载实验数据库时按时间顺序回放已有结构化 `manual_change` 事件，自动修复此前已录入但尚未反映到矩阵的预算、价格和状态。
+- 验证：广告实验专项 28 项通过；Rust 全量测试 152 passed / 0 failed / 4 ignored；`cargo check --locked`、`pnpm build`、`git diff --check` 均通过。
+- 正式发布：使用 `desktop-next/scripts/build-tauri-release.cmd` 构建；Release 与根目录 EXE 均为 31,244,800 bytes，SHA-256 均为 `FDEA2F64142A059C862DB04BC86838985851AB05D8CBAD70DA52F1950ECD63BA`。根目录新版已启动，窗口识别为 `Ozon ERP`。
+
+## 2026-09-16 采购单自动数量与导出命名
+
+- 采购单“数量”改为只读自动结果，统一按“装箱率 × 箱数”即时计算；页面合计、总价、保存草稿、飞书审核卡片及导出均使用同一口径。
+- 后端保存时重新计算数量并覆盖旧值，避免旧草稿或客户端残留数量造成数据分叉；装箱率或箱数为空、为零时给出明确校验错误。
+- Excel 数量列写入逐行公式 `装箱率单元格 × 箱数单元格`，总价与合计继续引用公式结果，打开 Excel 后可直接核验。
+- 使用现有采购单 `title` 作为“产品名称（用于导出文件名）”，界面新增明确输入框和文件名预览。Excel 与打印/PDF 使用 `采购单-采购单编号-产品名称` 命名，非法文件名字符自动替换。
+- 验证：采购单专项测试 5 项通过；Rust 全量测试 153 passed / 0 failed / 4 ignored；`cargo check --locked`、`pnpm build`、`git diff --check` 均通过。
+- 正式发布：使用 `desktop-next/scripts/build-tauri-release.cmd` 构建；Release 与根目录 `ozon-analytics-next.exe` 均为 31,362,560 bytes，SHA-256 均为 `BC6312CE690B44C2858A8C80DD259706BEA7E64AF6CEF041288CD96BFF42C0C0`。根目录新版已启动且进程响应正常；窗口句柄存在，但 Windows 枚举未返回标题文本，因此未完成页面截图级自动验收。

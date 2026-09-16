@@ -21,6 +21,7 @@ export function openExperiment(seed: ExperimentSeed) {
 type Target = {
   dailyUnits: number;
   tacosMax: number;
+  plannedBudgetRub: number | null;
   cvr: number | null;
   cpa: number | null;
   cpc: number | null;
@@ -32,6 +33,15 @@ type Targets = {
   preferredTacosMin: number;
   preferredTacosMax: number;
   tacosHardLimit: number;
+  checkpointDays: number;
+};
+type SkuRule = {
+  acosMax: number | null;
+  cpaMax: number | null;
+  cvrMin: number | null;
+  tacosMax: number | null;
+  nextBudgetRub: number | null;
+  reduceBudgetRub: number | null;
 };
 type Change = {
   sku: string;
@@ -44,6 +54,7 @@ type Change = {
   beforeStatus: string | null;
   afterStatus: string | null;
   reason: string;
+  rule: SkuRule | null;
 };
 type Draft = {
   name: string;
@@ -79,8 +90,9 @@ type Evaluation = {
   nextAction: string;
   daily: MetricDay[];
   baselineDaily: MetricDay[];
-  skuScores: (Evaluation & { sku: string })[];
+  skuScores: (Evaluation & { sku: string; recentCheckpoint?: Metric; checkpointDecision?: {decision:string;budgetUtilizationPercent:number|null;budgetConstrained:boolean;nextBudgetRub:number|null;reduceBudgetRub:number|null;reason:string} })[];
   goals: Metric;
+  checkpoint?: { requiredDays: number; ready: boolean; series: Metric };
 };
 type MetricDay = Metric & { date: string };
 type Experiment = {
@@ -103,6 +115,7 @@ type Experiment = {
   }[];
   stableVersions: { id: number; name: string; payload: string }[];
   ai: { text: string; evaluatedAt: string } | null;
+  rounds?: { id:number; roundIndex:number; startDate:string; endDate:string|null; trigger:string; configuration:unknown; evaluation:Evaluation|null }[];
 };
 type Product = { sku: string; offerId: string; name: string };
 type Configuration = {
@@ -179,6 +192,7 @@ const date = (offset: number) => {
 const target = (units: number, tacos: number): Target => ({
   dailyUnits: units,
   tacosMax: tacos,
+  plannedBudgetRub: null,
   cvr: null,
   cpa: null,
   cpc: null,
@@ -195,6 +209,7 @@ const blankChange = (sku: string): Change => ({
   beforeStatus: null,
   afterStatus: null,
   reason: "",
+  rule: { acosMax: null, cpaMax: null, cvrMin: null, tacosMax: null, nextBudgetRub: null, reduceBudgetRub: null },
 });
 function draftFor(seed?: ExperimentSeed): Draft {
   return {
@@ -213,6 +228,7 @@ function draftFor(seed?: ExperimentSeed): Draft {
       preferredTacosMin: 6,
       preferredTacosMax: 8,
       tacosHardLimit: 10,
+      checkpointDays: 3,
     },
   };
 }
@@ -343,6 +359,7 @@ export function AdExperimentCenter({
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState(""),
     [eventSku, setEventSku] = useState(""),
+    [eventKind, setEventKind] = useState("budget"),
     [eventBefore, setEventBefore] = useState(""),
     [eventAfter, setEventAfter] = useState(""),
     [eventReason, setEventReason] = useState(""),
@@ -413,7 +430,17 @@ export function AdExperimentCenter({
       if (r.restorePlan) {
         setRestore(r.restorePlan);
         setMessage("恢复清单已生成，尚未修改平台配置。");
-      } else setSelected(r);
+      } else {
+        setSelected(r);
+        if (command === "next_stage" && r.status === "draft") {
+          setDraft(r.input);
+          setEditingId(r.id);
+          setContext(null);
+          setStep(3);
+          setCreating(true);
+          setMessage(`已创建 Stage ${r.stageIndex + 1} 草稿。请先填写本阶段预算、出价/价格等调整，再保存并启动。`);
+        }
+      }
       await reload();
     } catch (e) {
       if (live.current) setMessage(String(e));
@@ -850,6 +877,24 @@ export function AdExperimentCenter({
                         }
                       />
                     </label>
+                    <h5>该 SKU 的 {draft.targets.checkpointDays} 日滚动检查规则</h5>
+                    <div className="exp-fields exp-rule-fields">
+                      {([
+                        ["acosMax", "ACOS 上限 %"],
+                        ["cpaMax", "CPA 上限 ₽"],
+                        ["cvrMin", "CVR 下限 %"],
+                        ["tacosMax", "TACOS 上限 %"],
+                        ["nextBudgetRub", "达标后下一档预算 ₽/周"],
+                        ["reduceBudgetRub", "越线后降至预算 ₽/周"],
+                      ] as [keyof SkuRule, string][]).map(([key, label]) => (
+                        <Numeric
+                          key={key}
+                          label={label}
+                          value={x.rule?.[key] ?? null}
+                          onChange={(v) => change(x.sku, { rule: { ...(x.rule || { acosMax:null,cpaMax:null,cvrMin:null,tacosMax:null,nextBudgetRub:null,reduceBudgetRub:null }), [key]: v } })}
+                        />
+                      ))}
+                    </div>
                   </article>
                 );
               })}
@@ -886,6 +931,21 @@ export function AdExperimentCenter({
                           ...draft.targets,
                           stages: draft.targets.stages.map((x, j) =>
                             i === j ? { ...x, tacosMax: v ?? 0 } : x,
+                          ),
+                        },
+                      })
+                    }
+                  />
+                  <Numeric
+                    label="本阶段计划总预算 ₽ / 周"
+                    value={t.plannedBudgetRub}
+                    onChange={(v) =>
+                      setDraft({
+                        ...draft,
+                        targets: {
+                          ...draft.targets,
+                          stages: draft.targets.stages.map((x, j) =>
+                            i === j ? { ...x, plannedBudgetRub: v } : x,
                           ),
                         },
                       })
@@ -999,6 +1059,11 @@ export function AdExperimentCenter({
                   setDraft({ ...draft, observationDays: v ?? 3 })
                 }
               />
+              <Numeric
+                label="滚动检查窗口（天）"
+                value={draft.targets.checkpointDays}
+                onChange={(v) => setDraft({ ...draft, targets: { ...draft.targets, checkpointDays: v ?? 3 } })}
+              />
               <label>
                 操作人
                 <input
@@ -1009,8 +1074,7 @@ export function AdExperimentCenter({
                 />
               </label>
               <p>
-                启动当天为 Day
-                0，从次日开始观察；同步完成及实验页刷新后自动更新评估。
+                启动只锁定基准。完成平台调整并点击“确认已执行”后，从下一个完整自然日开始观察；滚动检查用于阶段内预算动作，正式观察期用于阶段晋级。
               </p>
             </div>
           )}
@@ -1024,6 +1088,9 @@ export function AdExperimentCenter({
               </p>
               <p>
                 保存后可查看草稿；启动时锁定基准。预算、暂停、恢复与价格的真实操作需通过现有控制页面执行；应用外改图、改页和促销需补记事件。
+              </p>
+              <p>
+                当前 Stage {editingId == null ? 1 : selected?.stageIndex != null ? selected.stageIndex + 1 : 1} 的计划总预算为 {fmt(draft.targets.stages[selected?.stageIndex ?? 0]?.plannedBudgetRub)} ₽ / 周；逐 SKU 的修改前后值与原因会随本阶段独立保存。
               </p>
               <button disabled={busy} onClick={() => void save()}>
                 保存实验草稿
@@ -1198,7 +1265,7 @@ export function AdExperimentCenter({
                   )}
                   {selected.status !== "draft" && (
                     <>
-                      <button disabled={busy} onClick={()=>void run("confirm_execution")}>确认已在平台执行计划修改</button>
+                      <button disabled={busy} onClick={()=>void run("confirm_execution")}>确认已执行并开始观察</button>
                       <button
                         disabled={busy}
                         onClick={() => void run("evaluate")}
@@ -1250,16 +1317,20 @@ export function AdExperimentCenter({
                     停止跟踪
                   </button>
                   <button
-                    onClick={() =>
-                      void exportProductAnalysisJson(
-                        `experiment-${selected.id}.json`,
-                        selected,
-                      )
-                        .then((p) => setMessage(`已导出：${p}`))
+                    disabled={busy}
+                    onClick={() => {
+                      setBusy(true);
+                      void call<Record<string, unknown>>("stage_history", {}, selected.id)
+                        .then((history) => exportProductAnalysisJson(
+                          `experiment-stage-history-${selected.id}.json`,
+                          history,
+                        ))
+                        .then((p) => setMessage(`已导出完整阶段历史：${p}`))
                         .catch((e) => setMessage(String(e)))
-                    }
+                        .finally(() => setBusy(false));
+                    }}
                   >
-                    导出实验 JSON
+                    导出全部阶段 JSON
                   </button>
                 </div>
               </section>
@@ -1289,6 +1360,16 @@ export function AdExperimentCenter({
                         value={Math.min(100, e.goals?.finalProgress ?? 0)}
                       />
                       <span>还差 {fmt(e.goals?.finalGap)} 件/天</span>
+                    </section>
+                    <section className="card">
+                      <small>本阶段计划总预算</small>
+                      <strong>{fmt(selected.input.targets.stages[selected.stageIndex]?.plannedBudgetRub)} ₽ / 周</strong>
+                      <span>预算为空表示尚未设定；以逐 SKU 调整记录为执行依据</span>
+                    </section>
+                    <section className="card">
+                      <small>最近 {e.checkpoint?.requiredDays ?? selected.input.targets.checkpointDays} 日滚动检查</small>
+                      <strong>{e.checkpoint?.ready ? "可判断" : "数据不足"}</strong>
+                      <span>日均销量 {fmt(e.checkpoint?.series?.dailyUnits)} · TACOS {fmt(e.checkpoint?.series?.tacos, "%")}</span>
                     </section>
                     <section className="card">
                       <small>数据质量</small>
@@ -1497,6 +1578,13 @@ export function AdExperimentCenter({
                               {labels[s?.decision || "INSUFFICIENT_DATA"]} ·{" "}
                               {fmt(s?.score)} 分
                             </strong>
+                            <p>
+                              近 {selected.input.targets.checkpointDays} 日：销量 {fmt(s?.recentCheckpoint?.dailyUnits)} · ACOS {fmt(s?.recentCheckpoint?.acos, "%")} · CPA {fmt(s?.recentCheckpoint?.cpa)} · CVR {fmt(s?.recentCheckpoint?.cvr, "%")}
+                            </p>
+                            <p>
+                              预算利用率 {fmt(s?.checkpointDecision?.budgetUtilizationPercent, "%")} · 建议 {s?.checkpointDecision?.decision || "—"}
+                            </p>
+                            <small>{s?.checkpointDecision?.reason}</small>
                             <p>SKU 分项供诊断；阶段销量目标按系列考核。</p>
                           </article>
                         );
@@ -1553,6 +1641,14 @@ export function AdExperimentCenter({
                 )}
               </section>
               <section className="card">
+                <h3>阶段内轮次</h3>
+                <p>每次确认执行或阶段内追加预算、出价等变更都会形成独立轮次；从下一个完整自然日计算，避免不同预算档位的数据混在一起。</p>
+                <div className="exp-table"><table><thead><tr><th>轮次</th><th>起始日</th><th>结束日</th><th>触发动作</th><th>检查结果</th></tr></thead><tbody>
+                  {(selected.rounds || []).map(round => <tr key={round.id}><td>Round {round.roundIndex}</td><td>{round.startDate}</td><td>{round.endDate || "进行中"}</td><td>{round.trigger}</td><td>{round.evaluation?.checkpoint?.ready ? "检查数据完整" : "等待完整窗口"}</td></tr>)}
+                </tbody></table></div>
+                {!(selected.rounds || []).length && <p>尚未开始轮次。请完成平台调整后确认执行。</p>}
+              </section>
+              <section className="card">
                 <h3>操作时间轴</h3>
                 <p>
                   应用内成功的广告/价格操作会自动关联；应用外修改请补记。计划记录不表示平台已执行。
@@ -1571,6 +1667,22 @@ export function AdExperimentCenter({
                   </article>
                 ))}
                 <div className="exp-fields">
+                  <label>
+                    变更类型
+                    <select
+                      value={eventKind}
+                      onChange={(e) => setEventKind(e.target.value)}
+                    >
+                      <option value="budget">预算</option>
+                      <option value="bid">出价</option>
+                      <option value="status">广告状态</option>
+                      <option value="price">售价</option>
+                      <option value="creative">素材</option>
+                      <option value="listing">商品页面</option>
+                      <option value="promotion">促销</option>
+                      <option value="other">其他</option>
+                    </select>
+                  </label>
                   <label>
                     SKU
                     <select
@@ -1609,9 +1721,13 @@ export function AdExperimentCenter({
                     onClick={() =>
                       void run("event", {
                         sku: eventSku,
-                        before: eventBefore,
-                        after: eventAfter,
+                        before: { kind: eventKind, value: eventBefore },
+                        after: { kind: eventKind, value: eventAfter },
                         reason: eventReason,
+                      }).then(() => {
+                        setEventBefore("");
+                        setEventAfter("");
+                        setEventReason("");
                       })
                     }
                   >

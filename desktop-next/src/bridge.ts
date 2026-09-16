@@ -533,6 +533,12 @@ export async function syncFeishuProducts(
 export async function sendFeishuWeekly(range: DateRange): Promise<string> {
   return invoke("send_feishu_weekly", { range });
 }
+export async function exportOzonMonthlyReport(month: string): Promise<string> {
+  return invoke("export_ozon_monthly_report", { month });
+}
+export async function exportOzonCrossBorderReport(range: DateRange): Promise<string> {
+  return invoke("export_ozon_cross_border_report", { range });
+}
 export async function sendFeishuCrossBorderWeekly(range: DateRange): Promise<string> {
   return invoke("send_feishu_cross_border_weekly", { range });
 }
@@ -603,6 +609,9 @@ export async function wbStocks(): Promise<WbStockRow[]> {
 }
 export async function wbFinanceSummary(range: DateRange): Promise<WbFinanceSummary> {
   return invoke("wb_finance_summary", { range });
+}
+export async function exportWbMonthlyReport(month: string): Promise<string> {
+  return invoke("export_wb_monthly_report", { month });
 }
 export async function syncWb(range: DateRange): Promise<string> {
   return invoke("sync_wb", { range });
