@@ -97,6 +97,7 @@ import { DailyTaskCenter } from "./DailyTaskCenter";
 import { AdAttributionPage } from "./AdAttributionPage";
 import { PurchaseContractPage } from "./PurchaseContractPage";
 import { PurchaseOrderPage } from "./PurchaseOrderPage";
+import { FreightQuotePage } from "./FreightQuotePage";
 import { ProductMasterPage } from "./ProductMasterPage";
 import { WbShopApiCenter } from "./WbShopApiCenter";
 import { PackingDocumentsPage } from "./PackingDocumentsPage";
@@ -225,7 +226,7 @@ function Sidebar({
     { id: "operations", label: "经营管理", icon: LayoutDashboard, items: [["dashboard", "经营总览", LayoutDashboard], ["daily_tasks", "每日任务", ListTodo], ["purchase_orders", "采购单添加", FilePlus2], ["contracts", "采购合同", FileText], ["orders", "订单中心", ShoppingBag], ["products", "商品中心", Box], ["fbs", "FBS 管理", Truck]] },
     { id: "marketing", label: "营销与洞察", icon: Target, items: [["growth_center", "增长中心", BarChart3], ["product_analysis", "产品分析", Target], ["advertising", "广告运营", Megaphone], ["ad_attribution", "系列广告归因", GitBranch], ["ad_experiments", "广告优化实验中心", Target], ["competitors", "竞品跟踪", PackageSearch], ["differentiation", "亚马逊差异化选品", Target], ["ai", "AI 分析", BrainCircuit]] },
     { id: "reports", label: "报表与利润", icon: BarChart3, items: [["reports", "数据报告", BarChart3], ["monthly_profit", "月度盈亏", BarChart3], ["weekly_report", "经营周报", CalendarDays], ["cross_profit", "跨境店铺利润", BarChart3]] },
-    { id: "inventory", label: "库存与供应链", icon: PackageSearch, items: [["inventory", "库存管理", PackageSearch], ["packing", "补货装箱", FileText], ["supply", "约仓计划", Truck]] },
+    { id: "inventory", label: "库存与供应链", icon: PackageSearch, items: [["inventory", "库存管理", PackageSearch], ["freight_quotes", "物流询价配货表", Truck], ["packing", "补货装箱", FileText], ["supply", "约仓计划", Truck]] },
     { id: "cross", label: "跨境运营", icon: Truck, items: [["cross_border_ops", "俄罗斯跨境经营", Truck], ["listing", "产品台账", PackageSearch]] },
     { id: "data", label: "数据与协作", icon: Database, items: [["mind_map", "可视化报告", Network], ["sync", "数据同步", RefreshCw], ["feishu", "飞书协作", Database], ["migration", "数据迁移", Database]] },
     { id: "system", label: "系统设置", icon: Settings2, items: [["shops", "店铺管理", Store], ["settings", "连接设置", Settings2]] },
@@ -1491,6 +1492,7 @@ export function App() {
             {page === "daily_tasks" && <DailyTaskCenter key={activeShop?.id} />}
             {page === "contracts" && <PurchaseContractPage />}
             {page === "purchase_orders" && <PurchaseOrderPage />}
+            {page === "freight_quotes" && <FreightQuotePage />}
             {page === "mind_map" && <MindMapPage shopId={activeShop?.id || ""} />}{" "}
             {page === "inventory" && (
               <InventoryPage

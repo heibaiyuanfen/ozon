@@ -101,6 +101,9 @@ import {
   syncFeishuShipments,
   syncFinance,
   syncAllData,
+  getAutoSyncState,
+  saveAutoSyncSettings,
+  syncAllShops,
   syncListingCosts,
   syncLogs,
   syncPerformance,
@@ -148,6 +151,7 @@ import type {
   SupplyClusterPlan,
   SupplyTimeslot,
   SyncLog,
+  AutoSyncState,
   WarehouseMapping,
   WbCost,
   WbDaily,
@@ -4165,6 +4169,7 @@ export function SupplyPage() {
 export function SyncPage({ range }: { range: DateRange }) {
   const [logs, setLogs] = useState<SyncLog[]>([]),
     [coverage, setCoverage] = useState<DataCoverageRow[]>([]),
+    [autoSync, setAutoSync] = useState<AutoSyncState | null>(null),
     [syncRange, setSyncRange] = useState<DateRange>(range),
     [forceSync, setForceSync] = useState(false),
     [pruneBefore, setPruneBefore] = useState(() => {
@@ -4185,9 +4190,10 @@ export function SyncPage({ range }: { range: DateRange }) {
       syncRange.from <= syncRange.to &&
       syncRange.to <= today;
   const load = async () => {
-    const [l, c] = await Promise.all([syncLogs(), dataCoverage()]);
+    const [l, c, automatic] = await Promise.all([syncLogs(), dataCoverage(), getAutoSyncState()]);
     setLogs(l);
     setCoverage(c);
+    setAutoSync(automatic);
   };
   useEffect(() => {
     void load();
@@ -4199,8 +4205,8 @@ export function SyncPage({ range }: { range: DateRange }) {
       if (pending) return;
       pending = true;
       try {
-        const next = await syncLogs();
-        if (!cancelled) setLogs(next);
+        const [next, automatic] = await Promise.all([syncLogs(), getAutoSyncState()]);
+        if (!cancelled) { setLogs(next); setAutoSync(automatic); }
       } catch (error) {
         if (!cancelled) setMessage(`同步进度读取失败：${String(error)}`);
       } finally { pending = false; }
@@ -4306,6 +4312,43 @@ export function SyncPage({ range }: { range: DateRange }) {
           </button>
         </div>
       </header>
+      {autoSync && <section className="card auto-sync-card">
+        <div className="auto-sync-heading">
+          <div>
+            <span className="eyebrow">ALL SHOPS AUTO SYNC</span>
+            <h3>全店自动同步</h3>
+            <p>每家店铺继续写入自己的独立数据库，不会混合店铺数据。</p>
+          </div>
+          <span className={`sync-status ${autoSync.lastStatus}`}>{autoSync.lastStatus === "running" ? "同步中" : autoSync.lastStatus === "success" ? "正常" : autoSync.lastStatus === "partial" ? "部分失败" : autoSync.lastStatus === "failed" ? "失败" : "未运行"}</span>
+        </div>
+        <div className="auto-sync-controls">
+          <label className="auto-sync-check"><input type="checkbox" checked={autoSync.syncOnStartup} onChange={(e) => setAutoSync({ ...autoSync, syncOnStartup: e.target.checked })} /> 软件启动后同步所有店铺</label>
+          <label className="auto-sync-check"><input type="checkbox" checked={autoSync.scheduledEnabled} onChange={(e) => setAutoSync({ ...autoSync, scheduledEnabled: e.target.checked })} /> 开启定时同步</label>
+          <label>同步间隔<select value={autoSync.intervalMinutes} onChange={(e) => setAutoSync({ ...autoSync, intervalMinutes: Number(e.target.value) })}>
+            <option value={30}>每 30 分钟</option><option value={60}>每 1 小时</option><option value={120}>每 2 小时</option><option value={240}>每 4 小时</option><option value={480}>每 8 小时</option><option value={720}>每 12 小时</option><option value={1440}>每天</option>
+          </select></label>
+          <label>回溯范围<select value={autoSync.lookbackDays} onChange={(e) => setAutoSync({ ...autoSync, lookbackDays: Number(e.target.value) })}>
+            <option value={7}>最近 7 天</option><option value={14}>最近 14 天</option><option value={30}>最近 30 天</option><option value={60}>最近 60 天</option><option value={90}>最近 90 天</option>
+          </select></label>
+          <button disabled={!!busy || autoSync.lastStatus === "running"} onClick={async () => {
+            setBusy("auto-save");
+            try { const next = await saveAutoSyncSettings({ syncOnStartup: autoSync.syncOnStartup, scheduledEnabled: autoSync.scheduledEnabled, intervalMinutes: autoSync.intervalMinutes, lookbackDays: autoSync.lookbackDays }); setAutoSync(next); setMessage("全店自动同步设置已保存。"); }
+            catch (e) { setMessage(`设置保存失败：${String(e)}`); } finally { setBusy(""); }
+          }}><Save size={15}/>{busy === "auto-save" ? "保存中" : "保存设置"}</button>
+          <button className="dark-button" disabled={!!busy || autoSync.lastStatus === "running"} onClick={async () => {
+            setBusy("all-shops"); setMessage("所有 Ozon 店铺正在依次同步；每家店铺的数据仍保持隔离…");
+            try { const next = await syncAllShops(forceSync); setAutoSync(next); clearReportCache(); setMessage(next.lastMessage); await load(); }
+            catch (e) { setMessage(`全店同步失败：${String(e)}`); await load(); } finally { setBusy(""); }
+          }}><RefreshCw className={busy === "all-shops" ? "spin" : ""} size={15}/>{busy === "all-shops" ? "全店同步中" : "立即同步全部店铺"}</button>
+        </div>
+        <div className="auto-sync-summary">
+          <span>{autoSync.lastMessage}</span>
+          <small>开始：{autoSync.lastStartedAt || "—"}　完成：{autoSync.lastFinishedAt || "—"}</small>
+        </div>
+        {!!autoSync.shopResults.length && <div className="auto-sync-shops">{autoSync.shopResults.map((shop) => <div key={shop.shopId} className={shop.status}>
+          <b>{shop.shopName}</b><span>{shop.status === "success" ? "同步成功" : "同步失败"}</span><small>{shop.message}</small>
+        </div>)}</div>}
+      </section>}
       <div className="month-toolbar sync-range-toolbar">
         <b>同步日期</b>
         <div className="sync-mode-tabs">

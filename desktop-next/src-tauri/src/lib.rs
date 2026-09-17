@@ -16,6 +16,7 @@ mod ad_history;
 mod ad_series;
 mod contracts;
 mod daily_tasks;
+mod freight_quotes;
 mod insights;
 mod listing;
 mod mercadolibre;
@@ -32,6 +33,7 @@ static INVENTORY_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static SELLER_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static PERFORMANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static FINANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
+static AUTO_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 static COMPETITOR_COLLECTION_STOP: AtomicBool = AtomicBool::new(false);
 static COMPETITOR_TASK_STOPS: LazyLock<Mutex<HashSet<i64>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -848,6 +850,57 @@ struct SyncAllResult {
     seller_error: String,
     performance_error: String,
     finance_error: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoSyncShopResult {
+    shop_id: String,
+    shop_name: String,
+    status: String,
+    message: String,
+    seller_rows: Option<i64>,
+    performance_rows: Option<i64>,
+    finance_rows: Option<i64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AutoSyncState {
+    sync_on_startup: bool,
+    scheduled_enabled: bool,
+    interval_minutes: u64,
+    lookback_days: i64,
+    last_started_at: String,
+    last_finished_at: String,
+    last_status: String,
+    last_message: String,
+    shop_results: Vec<AutoSyncShopResult>,
+}
+
+impl Default for AutoSyncState {
+    fn default() -> Self {
+        Self {
+            sync_on_startup: true,
+            scheduled_enabled: false,
+            interval_minutes: 60,
+            lookback_days: 30,
+            last_started_at: String::new(),
+            last_finished_at: String::new(),
+            last_status: "idle".into(),
+            last_message: "尚未执行全店自动同步".into(),
+            shop_results: Vec::new(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoSyncSettingsInput {
+    sync_on_startup: bool,
+    scheduled_enabled: bool,
+    interval_minutes: u64,
+    lookback_days: i64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -8058,6 +8111,201 @@ async fn sync_finance(
         .map_err(|e| e.to_string())?
 }
 
+fn auto_sync_state_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("auto-sync.json")
+}
+
+fn read_auto_sync_state(data_dir: &Path) -> AutoSyncState {
+    fs::read_to_string(auto_sync_state_path(data_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_auto_sync_state(data_dir: &Path, value: &AutoSyncState) -> Result<(), String> {
+    let path = auto_sync_state_path(data_dir);
+    let temporary = path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    fs::write(&temporary, text).map_err(|e| e.to_string())?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    fs::rename(temporary, path).map_err(|e| e.to_string())
+}
+
+fn sync_one_shop_all(range: DateRange, force: bool, state: &AppState) -> SyncAllResult {
+    let seller = (|| {
+        let count = sync_seller_sales_blocking(range.clone(), force, state)?;
+        ad_experiments::after_sync(state);
+        let _ = sync_fbs_orders_blocking(range.clone(), state);
+        let _ = sync_fbo_orders_blocking(range.clone(), state);
+        let _ = rebuild_cancellation_events(&range, state);
+        let _ = sync_customer_returns_blocking(&range, state);
+        Ok::<i64, String>(count)
+    })();
+    let performance = (|| {
+        let count = sync_performance_ads_blocking(range.clone(), force, state)?;
+        ad_experiments::after_sync(state);
+        Ok::<i64, String>(count)
+    })();
+    let finance = sync_finance_blocking(range, force, state);
+    SyncAllResult {
+        seller_rows: seller.as_ref().ok().copied(),
+        performance_rows: performance.as_ref().ok().copied(),
+        finance_rows: finance.as_ref().ok().copied(),
+        seller_error: seller.err().unwrap_or_default(),
+        performance_error: performance.err().unwrap_or_default(),
+        finance_error: finance.err().unwrap_or_default(),
+    }
+}
+
+struct AutoSyncRunningGuard;
+impl Drop for AutoSyncRunningGuard {
+    fn drop(&mut self) {
+        AUTO_SYNC_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn run_all_shops_sync(data_dir: &Path, force: bool) -> Result<AutoSyncState, String> {
+    if AUTO_SYNC_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("所有店铺数据同步已在运行，请勿重复启动".into());
+    }
+    let _guard = AutoSyncRunningGuard;
+    let mut state = read_auto_sync_state(data_dir);
+    state.last_started_at = chrono::Local::now().to_rfc3339();
+    state.last_finished_at.clear();
+    state.last_status = "running".into();
+    state.last_message = "正在逐店同步 Seller、Performance 与 Finance 数据".into();
+    state.shop_results.clear();
+    write_auto_sync_state(data_dir, &state)?;
+
+    let registry = read_registry(data_dir)?;
+    let today = chrono::Local::now().date_naive();
+    let from = today - chrono::Duration::days(state.lookback_days.saturating_sub(1));
+    let range = DateRange {
+        from: from.format("%Y-%m-%d").to_string(),
+        to: today.format("%Y-%m-%d").to_string(),
+    };
+    for shop in registry.shops {
+        let shop_state = AppState {
+            data_dir: data_dir.to_path_buf(),
+            active_shop_id: Mutex::new(shop.id.clone()),
+        };
+        let result = sync_one_shop_all(range.clone(), force, &shop_state);
+        let errors = [
+            (!result.seller_error.is_empty()).then(|| format!("Seller：{}", result.seller_error)),
+            (!result.performance_error.is_empty()).then(|| format!("Performance：{}", result.performance_error)),
+            (!result.finance_error.is_empty()).then(|| format!("Finance：{}", result.finance_error)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        state.shop_results.push(AutoSyncShopResult {
+            shop_id: shop.id,
+            shop_name: shop.name,
+            status: if errors.is_empty() { "success" } else { "failed" }.into(),
+            message: if errors.is_empty() {
+                "Seller、Performance、Finance 同步完成".into()
+            } else {
+                errors.join("；")
+            },
+            seller_rows: result.seller_rows,
+            performance_rows: result.performance_rows,
+            finance_rows: result.finance_rows,
+        });
+        // Keep the status file useful even when the process exits during a long multi-shop run.
+        write_auto_sync_state(data_dir, &state)?;
+    }
+    let successes = state.shop_results.iter().filter(|row| row.status == "success").count();
+    state.last_finished_at = chrono::Local::now().to_rfc3339();
+    state.last_status = if successes == state.shop_results.len() {
+        "success"
+    } else if successes == 0 {
+        "failed"
+    } else {
+        "partial"
+    }
+    .into();
+    state.last_message = format!(
+        "全店同步完成：成功 {successes} 家，失败 {} 家；范围 {} 至 {}",
+        state.shop_results.len().saturating_sub(successes), range.from, range.to
+    );
+    write_auto_sync_state(data_dir, &state)?;
+    Ok(state)
+}
+
+fn auto_sync_is_due(state: &AutoSyncState, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if !state.scheduled_enabled {
+        return false;
+    }
+    let reference = if state.last_finished_at.is_empty() {
+        &state.last_started_at
+    } else {
+        &state.last_finished_at
+    };
+    let elapsed = chrono::DateTime::parse_from_rfc3339(reference)
+        .map(|last| {
+            now.signed_duration_since(last.with_timezone(&chrono::Utc))
+                .num_minutes()
+        })
+        .unwrap_or(i64::MAX);
+    if state.last_status == "running" {
+        // Recover after an unexpected process exit left the persisted state as running.
+        return elapsed >= state.interval_minutes.max(60) as i64;
+    }
+    elapsed >= state.interval_minutes as i64
+}
+
+fn start_auto_sync_worker(data_dir: PathBuf) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let mut first_check = true;
+        loop {
+            let state = read_auto_sync_state(&data_dir);
+            let should_run = (first_check && state.sync_on_startup)
+                || auto_sync_is_due(&state, chrono::Utc::now());
+            first_check = false;
+            if should_run {
+                let _ = run_all_shops_sync(&data_dir, false);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    });
+}
+
+#[tauri::command]
+fn auto_sync_state(state: State<AppState>) -> AutoSyncState {
+    read_auto_sync_state(&state.data_dir)
+}
+
+#[tauri::command]
+fn save_auto_sync_settings(
+    settings: AutoSyncSettingsInput,
+    state: State<AppState>,
+) -> Result<AutoSyncState, String> {
+    if !(15..=1440).contains(&settings.interval_minutes) {
+        return Err("自动同步间隔必须在 15 至 1440 分钟之间".into());
+    }
+    if !(1..=90).contains(&settings.lookback_days) {
+        return Err("自动同步回溯天数必须在 1 至 90 天之间".into());
+    }
+    let mut current = read_auto_sync_state(&state.data_dir);
+    current.sync_on_startup = settings.sync_on_startup;
+    current.scheduled_enabled = settings.scheduled_enabled;
+    current.interval_minutes = settings.interval_minutes;
+    current.lookback_days = settings.lookback_days;
+    write_auto_sync_state(&state.data_dir, &current)?;
+    Ok(current)
+}
+
+#[tauri::command]
+async fn sync_all_shops(force: bool, state: State<'_, AppState>) -> Result<AutoSyncState, String> {
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || run_all_shops_sync(&data_dir, force))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn sync_all_data(
     range: DateRange,
@@ -10002,6 +10250,42 @@ mod cross_border_display_tests {
     }
 }
 
+#[cfg(test)]
+mod auto_sync_tests {
+    use super::{auto_sync_is_due, AutoSyncState};
+
+    #[test]
+    fn defaults_enable_startup_without_enabling_schedule() {
+        let state = AutoSyncState::default();
+        assert!(state.sync_on_startup);
+        assert!(!state.scheduled_enabled);
+        assert_eq!(state.interval_minutes, 60);
+        assert_eq!(state.lookback_days, 30);
+    }
+
+    #[test]
+    fn scheduled_sync_obeys_interval() {
+        let now = chrono::Utc::now();
+        let mut state = AutoSyncState::default();
+        state.scheduled_enabled = true;
+        state.sync_on_startup = false;
+        state.last_finished_at = (now - chrono::Duration::minutes(59)).to_rfc3339();
+        assert!(!auto_sync_is_due(&state, now));
+        state.last_finished_at = (now - chrono::Duration::minutes(60)).to_rfc3339();
+        assert!(auto_sync_is_due(&state, now));
+    }
+
+    #[test]
+    fn stale_running_state_recovers_after_restart() {
+        let now = chrono::Utc::now();
+        let mut state = AutoSyncState::default();
+        state.scheduled_enabled = true;
+        state.last_status = "running".into();
+        state.last_started_at = (now - chrono::Duration::minutes(61)).to_rfc3339();
+        assert!(auto_sync_is_due(&state, now));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -10014,6 +10298,7 @@ pub fn run() {
                 .map_err(std::io::Error::other)?;
             let registry = read_registry(&data_dir).map_err(std::io::Error::other)?;
             product_worker::start(data_dir.clone());
+            start_auto_sync_worker(data_dir.clone());
             app.manage(AppState {
                 data_dir,
                 active_shop_id: Mutex::new(registry.active_shop_id),
@@ -10106,6 +10391,9 @@ pub fn run() {
             sync_performance_ads,
             sync_finance,
             sync_all_data,
+            auto_sync_state,
+            save_auto_sync_settings,
+            sync_all_shops,
             test_feishu,
             sync_feishu_products,
             send_feishu_weekly,
@@ -10138,6 +10426,7 @@ pub fn run() {
             product_master::product_master,
             price_center::price_center,
             purchase_orders::purchase_order_command,
+            freight_quotes::freight_quote_command,
             listing::listing_settings,
             listing::save_listing_settings,
             listing::listing_rows,

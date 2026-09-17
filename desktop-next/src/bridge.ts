@@ -42,6 +42,8 @@ import type {
   SupplyTimeslot,
   SyncLog,
   SyncAllResult,
+  AutoSyncState,
+  AutoSyncSettingsInput,
   WarehouseMapping,
   WbCost,
   WbDaily,
@@ -521,6 +523,15 @@ export async function syncFinance(range: DateRange, force = false): Promise<numb
 }
 export async function syncAllData(range: DateRange, force = false): Promise<SyncAllResult> {
   return invoke("sync_all_data", { range, force });
+}
+export async function getAutoSyncState(): Promise<AutoSyncState> {
+  return invoke("auto_sync_state");
+}
+export async function saveAutoSyncSettings(settings: AutoSyncSettingsInput): Promise<AutoSyncState> {
+  return invoke("save_auto_sync_settings", { settings });
+}
+export async function syncAllShops(force = false): Promise<AutoSyncState> {
+  return invoke("sync_all_shops", { force });
 }
 export async function testFeishu(): Promise<string> {
   return invoke("test_feishu");

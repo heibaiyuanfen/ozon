@@ -8,6 +8,7 @@ export type PageKey =
   | "daily_tasks"
   | "contracts"
   | "purchase_orders"
+  | "freight_quotes"
   | "reports"
   | "monthly_profit"
   | "weekly_report"
@@ -419,6 +420,32 @@ export interface SyncAllResult {
   sellerError: string;
   performanceError: string;
   financeError: string;
+}
+export interface AutoSyncShopResult {
+  shopId: string;
+  shopName: string;
+  status: string;
+  message: string;
+  sellerRows: number | null;
+  performanceRows: number | null;
+  financeRows: number | null;
+}
+export interface AutoSyncState {
+  syncOnStartup: boolean;
+  scheduledEnabled: boolean;
+  intervalMinutes: number;
+  lookbackDays: number;
+  lastStartedAt: string;
+  lastFinishedAt: string;
+  lastStatus: string;
+  lastMessage: string;
+  shopResults: AutoSyncShopResult[];
+}
+export interface AutoSyncSettingsInput {
+  syncOnStartup: boolean;
+  scheduledEnabled: boolean;
+  intervalMinutes: number;
+  lookbackDays: number;
 }
 export interface BusinessReport {
   revenue: number;

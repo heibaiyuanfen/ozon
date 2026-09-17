@@ -1370,3 +1370,23 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 使用现有采购单 `title` 作为“产品名称（用于导出文件名）”，界面新增明确输入框和文件名预览。Excel 与打印/PDF 使用 `采购单-采购单编号-产品名称` 命名，非法文件名字符自动替换。
 - 验证：采购单专项测试 5 项通过；Rust 全量测试 153 passed / 0 failed / 4 ignored；`cargo check --locked`、`pnpm build`、`git diff --check` 均通过。
 - 正式发布：使用 `desktop-next/scripts/build-tauri-release.cmd` 构建；Release 与根目录 `ozon-analytics-next.exe` 均为 31,362,560 bytes，SHA-256 均为 `BC6312CE690B44C2858A8C80DD259706BEA7E64AF6CEF041288CD96BFF42C0C0`。根目录新版已启动且进程响应正常；窗口句柄存在，但 Windows 枚举未返回标题文本，因此未完成页面截图级自动验收。
+
+## 2026-09-17 Ozon 全店启动与定时自动同步
+
+- 数据同步页新增“全店自动同步”设置，可分别启用软件启动后同步、周期同步，并选择 30 分钟至 24 小时的间隔及 7–90 天回溯范围。
+- 调度器在 Rust 后台运行，不依赖当前页面是否打开；启动同步默认启用，周期同步默认关闭且默认间隔为 60 分钟。
+- 每次任务从 `shops.json` 读取全部 Ozon 店铺，逐店复用 Seller、Performance、Finance、FBS/FBO、取消与退货同步链路；每个店铺仍以独立 `AppState` 写入自己的数据库，不切换界面当前店铺、不混合数据。
+- 使用全局运行锁避免启动、定时和手工“立即同步全部店铺”重复并发；异常退出遗留的 `running` 状态在达到恢复阈值后允许重新调度。
+- 配置、最近开始/完成时间、总体状态、总体消息及逐店成功/失败原因持久化到全局 `auto-sync.json`，界面每 3 秒刷新，方便识别凭证或单一 API 失败。
+- 验证：`cargo check --locked`、`pnpm build` 通过；Rust 全量测试 156 passed / 0 failed / 4 ignored，其中新增启动默认值、周期到期与异常退出恢复专项测试。
+- 正式发布：使用唯一正式入口 `desktop-next/scripts/build-tauri-release.cmd` 构建并覆盖根目录启动器；Release 与根目录 `ozon-analytics-next.exe` 均为 31,457,280 bytes，SHA-256 均为 `F144EC50B4077121E703ADFE0F27F2CD262697249EC0466CCA273F037475AAEE`。根目录新版已启动且进程响应正常。
+
+## 2026-09-17 物流询价配货表
+
+- “库存与供应链”新增“物流询价配货表”，用于维护询价编号、线路、目的地、联系人及逐产品包装/装箱参数；草稿修改后 500ms 自动缓存在本机，也支持手动保存。
+- 明细包含产品图片、产品名称、SKU、包装长宽高、单件重量、装箱率、箱规长宽高、单箱重、箱数与备注；页面即时计算总数量、总重、总体积及密度，并在页首显示整票汇总。
+- Excel 导出使用公式保留计算链：总数量=`装箱率×箱数`、总重=`单箱重×箱数`、总体积=`箱规长×宽×高÷1,000,000×箱数`、密度=`总重÷总体积`；合计行再以公式汇总整票箱数、数量、重量、体积和总密度。
+- 网络 HTTPS 图片和本地 PNG/JPG 路径在导出时写入 XLSX 媒体与 Drawing 关系，真正嵌入产品图片；无法读取的图片不会阻断其余产品与公式导出，界面会报告嵌入成功数量。
+- Excel 使用横向打印、冻结产品识别列和表头、输入/公式分色、中文字体与自动筛选，文件输出至 `exports/freight-quotes` 并自动打开。
+- 验证：`cargo check --locked`、`pnpm build` 通过；Rust 全量测试 159 passed / 0 failed / 4 ignored，其中新增公式、工作簿可读性、图片嵌入和必填尺寸专项测试。
+- 正式发布：使用 `desktop-next/scripts/build-tauri-release.cmd` 构建并覆盖根目录启动器；Release 与根目录 `ozon-analytics-next.exe` 均为 31,514,624 bytes，SHA-256 均为 `CFBFC74CC3D402EE1BE10D22CB9043D93E048BDFBC85B7B727BE0376B3A27BAC`。新版已启动且进程响应正常。
