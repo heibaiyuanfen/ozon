@@ -38,6 +38,8 @@ import type {
   ShipmentSettlementItem,
   Shop,
   SupplyOrder,
+  SupplyOrderItemsResult,
+  SupplyOrderItemsProgress,
   SupplyClusterPlan,
   SupplyTimeslot,
   SyncLog,
@@ -481,6 +483,18 @@ export async function aiAnalysis(
 export async function supplyOrders(): Promise<SupplyOrder[]> {
   return isTauri() ? invoke("supply_orders") : [];
 }
+export async function supplyOrderItems(orderId: number, refresh = false): Promise<SupplyOrderItemsResult> {
+  return isTauri() ? invoke("supply_order_items", { orderId, refresh }) : { rows: [], warning: "", fromCache: false, cachedAt: "" };
+}
+export async function supplyOrderItemsProgress(orderId: number): Promise<SupplyOrderItemsProgress> {
+  return isTauri() ? invoke("supply_order_items_progress", { orderId }) : { status: "idle", total: 0, completed: 0, stage: "", message: "" };
+}
+export async function exportSupplyCargoMarks(orderId: number): Promise<string> {
+  return isTauri() ? invoke("export_supply_cargo_marks", { orderId }) : "仅桌面版支持导出";
+}
+export async function downloadSupplyCargoLabels(orderId: number): Promise<string> {
+  return isTauri() ? invoke("download_supply_cargo_labels", { orderId }) : "仅桌面版支持下载";
+}
 export async function supplyClusterPlans(targetDays: number, query: string): Promise<SupplyClusterPlan[]> {
   return isTauri() ? invoke("supply_cluster_plans", { targetDays, query }) : [];
 }
@@ -530,8 +544,8 @@ export async function getAutoSyncState(): Promise<AutoSyncState> {
 export async function saveAutoSyncSettings(settings: AutoSyncSettingsInput): Promise<AutoSyncState> {
   return invoke("save_auto_sync_settings", { settings });
 }
-export async function syncAllShops(force = false): Promise<AutoSyncState> {
-  return invoke("sync_all_shops", { force });
+export async function syncAllShops(force = false, shopIds: string[] = []): Promise<AutoSyncState> {
+  return invoke("sync_all_shops", { force, shopIds });
 }
 export async function testFeishu(): Promise<string> {
   return invoke("test_feishu");

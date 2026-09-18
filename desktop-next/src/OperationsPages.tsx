@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./analytics.css";
 import "./listing.css";
+import { displayTime } from "./time";
 import * as echarts from "./charts";
 import {
   AlertTriangle,
@@ -95,6 +96,10 @@ import {
   shipmentSettlement,
   settleShipment,
   supplyOrders,
+  supplyOrderItems,
+  supplyOrderItemsProgress,
+  exportSupplyCargoMarks,
+  downloadSupplyCargoLabels,
   supplyTimeslots,
   syncFbsOrders,
   syncFeishuProducts,
@@ -148,6 +153,8 @@ import type {
   ShipmentSkuOption,
   ShipmentSettlementItem,
   SupplyOrder,
+  SupplyOrderItem,
+  SupplyOrderItemsProgress,
   SupplyClusterPlan,
   SupplyTimeslot,
   SyncLog,
@@ -165,6 +172,24 @@ import type {
 
 const money = (v: number, currency: string) =>
   `${currency === "CNY" ? "¥" : "₽"}${v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const zonedDateTime = (value: string, timeZone: string) => {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  try {
+    return new Intl.DateTimeFormat("zh-CN", {
+      timeZone,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).format(date).replaceAll("/", "-");
+  } catch { return value; }
+};
+const zonedRange = (from: string, to: string, timeZone: string) => {
+  const start = zonedDateTime(from, timeZone), end = zonedDateTime(to, timeZone);
+  if (start === "—" || end === "—") return start;
+  const endTime = end.includes(" ") ? end.split(" ").at(-1) : end;
+  return `${start} — ${endTime}`;
+};
 const reportCache = new Map<string, Promise<BusinessReport>>(),
   detailCache = new Map<string, Promise<AnalyticsDetail>>();
 const cachedReport = (range: DateRange) => {
@@ -669,7 +694,7 @@ export function ListingPage() {
                       / {job.status}
                       <small>{job.error}</small>
                     </td>
-                    <td>{job.updatedAt}</td>
+                    <td>{displayTime(job.updatedAt)}</td>
                     <td>
                       <button
                         className="outline-button"
@@ -1322,7 +1347,7 @@ export function ListingPage() {
                 </td>
                 <td>
                   <b>{row.status || "—"}</b>
-                  <small>{row.updatedAt}</small>
+                  <small>{displayTime(row.updatedAt)}</small>
                 </td>
               </tr>
             ))}
@@ -1816,7 +1841,7 @@ export function CompetitorsPage() {
           <div>
             <b>最近采集批次</b>
             <small>
-              {latestRun.startedAt} · {latestRun.runId}
+              {displayTime(latestRun.startedAt)} · {latestRun.runId}
             </small>
           </div>
           <span className="badge blue">
@@ -3927,6 +3952,15 @@ export function SupplyPage() {
     [chosenPlan, setChosenPlan] = useState<SupplyClusterPlan | null>(null),
     [supplyMode, setSupplyMode] = useState<"CROSSDOCK" | "DIRECT">("CROSSDOCK"),
     [selected, setSelected] = useState<SupplyOrder | null>(null),
+    [itemOrder, setItemOrder] = useState<SupplyOrder | null>(null),
+    [orderItems, setOrderItems] = useState<SupplyOrderItem[]>([]),
+    [itemWarning, setItemWarning] = useState(""),
+    [itemsCachedAt, setItemsCachedAt] = useState(""),
+    [itemsFromCache, setItemsFromCache] = useState(false),
+    [itemProgress, setItemProgress] = useState<SupplyOrderItemsProgress>({ status: "idle", total: 0, completed: 0, stage: "", message: "" }),
+    [itemsBusy, setItemsBusy] = useState<number | null>(null),
+    [cargoAction, setCargoAction] = useState<"" | "excel" | "labels">(""),
+    [supplyView, setSupplyView] = useState<"plan" | "orders">("plan"),
     [slots, setSlots] = useState<SupplyTimeslot[]>([]),
     [from, setFrom] = useState(today),
     [to, setTo] = useState(later),
@@ -3975,9 +4009,47 @@ export function SupplyPage() {
       if (mounted.current) setBusy(false);
     }
   };
+  const findItems = async (row: SupplyOrder, refresh = false) => {
+    setItemOrder(row);
+    setItemsBusy(row.orderId);
+    setItemWarning("");
+    setItemProgress({ status: "running", total: 1, completed: 0, stage: "queued", message: refresh ? "准备重新读取 Ozon" : "正在检查本地缓存" });
+    setError("");
+    try {
+      const result = await supplyOrderItems(row.orderId, refresh);
+      if (mounted.current) {
+        setOrderItems(result.rows);
+        setItemWarning(result.warning);
+        setItemsCachedAt(result.cachedAt);
+        setItemsFromCache(result.fromCache);
+        setItemProgress(await supplyOrderItemsProgress(row.orderId));
+      }
+    } catch (e) {
+      if (mounted.current) {
+        setOrderItems([]);
+        setError(String(e));
+      }
+    } finally {
+      if (mounted.current) setItemsBusy(null);
+    }
+  };
+  useEffect(() => {
+    if (!itemOrder || itemsBusy === null) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const progress = await supplyOrderItemsProgress(itemOrder.orderId);
+        if (!cancelled) setItemProgress(progress);
+      } catch { /* 主请求负责展示错误 */ }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 350);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [itemOrder?.orderId, itemsBusy]);
   const book = async (slot: SupplyTimeslot) => {
     if (!selected) return;
-    const prompt = `确认预约供应单 ${selected.orderNumber || selected.orderId}\n${slot.from} 至 ${slot.to}\n\n该操作将真实写入 Ozon，且不会自动重试。请输入“确认预约”继续：`;
+    const warehouseZone = selected.timezoneName || "UTC";
+    const prompt = `确认预约供应单 ${selected.orderNumber || selected.orderId}\n仓库当地时间：${zonedRange(slot.from, slot.to, warehouseZone)}（${warehouseZone}）\n中国时间：${zonedRange(slot.from, slot.to, "Asia/Shanghai")}\n\n该操作将使用 Ozon API 原始 UTC 时间提交，不会发生二次偏移，也不会自动重试。请输入“确认预约”继续：`;
     if (window.prompt(prompt) !== "确认预约") return;
     setBusy(true);
     try {
@@ -3995,6 +4067,21 @@ export function SupplyPage() {
       if (mounted.current) setError(String(e));
     } finally {
       if (mounted.current) setBusy(false);
+    }
+  };
+  const runCargoAction = async (kind: "excel" | "labels") => {
+    if (!itemOrder) return;
+    setCargoAction(kind);
+    setError("");
+    try {
+      const message = kind === "excel"
+        ? await exportSupplyCargoMarks(itemOrder.orderId)
+        : await downloadSupplyCargoLabels(itemOrder.orderId);
+      if (mounted.current) window.alert(message);
+    } catch (e) {
+      if (mounted.current) setError(String(e));
+    } finally {
+      if (mounted.current) setCargoAction("");
     }
   };
   return (
@@ -4016,8 +4103,19 @@ export function SupplyPage() {
           {error}
         </div>
       )}
+      <section className="supply-command-card">
+        <div className="supply-command-summary">
+          <span><small>库存计划</small><b>{plans.length}</b><em>条候选集群</em></span>
+          <span><small>活动供应单</small><b>{rows.length}</b><em>可查询与预约</em></span>
+          <span><small>当前选择</small><b>{chosenPlan ? chosenPlan.plannedQty : "—"}</b><em>{chosenPlan ? `${chosenPlan.offerId || chosenPlan.sku} · ${chosenPlan.clusterName}` : "尚未选择计划"}</em></span>
+        </div>
+        <div className="supply-view-switch" role="tablist" aria-label="约仓工作区">
+          <button className={supplyView === "plan" ? "active" : ""} onClick={() => setSupplyView("plan")}><PackageSearch size={16} /><span>计划生成<small>按库存集群确定数量</small></span></button>
+          <button className={supplyView === "orders" ? "active" : ""} onClick={() => setSupplyView("orders")}><CalendarDays size={16} /><span>供应单预约<small>查时段、货品与箱唛</small></span></button>
+        </div>
+      </section>
       <div className="supply-layout">
-        <section className="card table-card" style={{ gridColumn: "1 / -1" }}>
+        {supplyView === "plan" && <section className="card table-card supply-plan-card">
           <div className="card-title">
             从库存集群生成约仓计划
             <span>库存管理中保存的配送量会在这里直接作为计划数量</span>
@@ -4059,8 +4157,9 @@ export function SupplyPage() {
               <button className={supplyMode === "DIRECT" ? "active" : ""} onClick={() => setSupplyMode("DIRECT")}>直送</button>
             </div>
           </div>}
-        </section>
-        <section className="card table-card">
+        </section>}
+        {supplyView === "orders" && <>
+        <section className="card table-card supply-orders-card">
           <table>
             <thead>
               <tr>
@@ -4101,16 +4200,16 @@ export function SupplyPage() {
                     </small>
                   </td>
                   <td>
-                    <b>{row.timeslotFrom || "未预约"}</b>
-                    <small>{row.timeslotTo}</small>
+                    <b>{row.timeslotFrom ? zonedRange(row.timeslotFrom, row.timeslotTo, row.timezoneName || "UTC") : "未预约"}</b>
+                    {row.timeslotFrom && <small>仓库时间 · {row.timezoneName || "UTC"}<br />中国 {zonedRange(row.timeslotFrom, row.timeslotTo, "Asia/Shanghai")}</small>}
                   </td>
                   <td>
-                    <button
-                      className="outline-button"
-                      onClick={() => findSlots(row)}
-                    >
-                      查询时段
-                    </button>
+                    <div className="table-actions">
+                      <button className="outline-button" onClick={() => findSlots(row)}>查询时段</button>
+                      <button className="outline-button" onClick={() => findItems(row)} disabled={itemsBusy === row.orderId}>
+                        {itemsBusy === row.orderId ? "读取中" : "货品 / 箱唛"}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -4145,12 +4244,13 @@ export function SupplyPage() {
           {selected && (
             <p>
               供应单：<b>{selected.orderNumber || selected.orderId}</b>
+              <small className="supply-timezone-note">仓库时区：{selected.timezoneName || "未返回，暂按 UTC 显示"}<br />下方同时换算中国时间（Asia/Shanghai）</small>
             </p>
           )}
           {slots.map((slot) => (
             <button key={slot.from} onClick={() => book(slot)}>
-              <span>{slot.from}</span>
-              <small>至 {slot.to}</small>
+              <span>{zonedRange(slot.from, slot.to, selected?.timezoneName || "UTC")}</span>
+              <small>仓库当地 · {selected?.timezoneName || "UTC"}<br />中国 {zonedRange(slot.from, slot.to, "Asia/Shanghai")}</small>
               <b>预约</b>
             </button>
           ))}
@@ -4161,7 +4261,49 @@ export function SupplyPage() {
             预约是远程写操作，提交前必须手工输入“确认预约”；网络响应不明确时不会重复提交。
           </p>
         </aside>
+        </>}
       </div>
+      {itemOrder && <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setItemOrder(null); }}>
+        <section className="cost-modal supply-items-modal">
+          <button className="modal-close" onClick={() => setItemOrder(null)} aria-label="关闭">×</button>
+          <header className="supply-items-head">
+            <div><span className="eyebrow">SUPPLY CONTENT</span><h2>货品与箱唛</h2>
+              <p>供应单 {itemOrder.orderNumber || itemOrder.orderId} · {orderItems.length} 个商品</p></div>
+            <div className="supply-cache-state">
+              <b>{itemsFromCache ? "已读取缓存" : "Ozon 最新数据"}</b>
+              <small>{itemsCachedAt ? `读取时间 ${itemsCachedAt}` : "尚未完成读取"}</small>
+            </div>
+          </header>
+          {itemWarning && <div className="warning-banner"><AlertTriangle size={18} />{itemWarning}</div>}
+          <div className={`supply-progress-board ${itemProgress.status}`}>
+            <div className="supply-progress-copy">
+              <span>{itemProgress.status === "cached" ? "缓存命中" : itemProgress.status === "success" ? "读取完成" : itemProgress.status === "failed" ? "读取失败" : "读取进度"}</span>
+              <b>{itemProgress.message || "等待读取"}</b>
+              <small>{itemProgress.total > 0 ? `${itemProgress.completed} / ${itemProgress.total} 步骤` : "正在初始化"}</small>
+            </div>
+            <div className="supply-progress-track"><i style={{ width: `${itemProgress.total > 0 ? Math.min(100, itemProgress.completed / itemProgress.total * 100) : 0}%` }} /></div>
+          </div>
+          <div className="supply-items-table">
+            {itemsBusy !== null && <div className="empty"><RefreshCw className="spin" size={18} />正在读取供应单货品与箱唛…</div>}
+            <table>
+              <thead><tr><th>产品</th><th>SKU</th><th>货号</th><th>箱唛</th></tr></thead>
+              <tbody>{orderItems.map((item, index) => <tr key={`${item.sku}|${item.offerId}|${index}`}>
+                <td><b>{item.productName || "未命名产品"}</b>{item.quantity > 0 && <small>{item.quantity} 件</small>}</td>
+                <td><code>{item.sku || "—"}</code></td>
+                <td>{item.offerId || "—"}</td>
+                <td>{item.cargoMarks.length ? item.cargoMarks.map((mark) => <span className="cargo-mark" key={mark}>{mark}</span>) : <span className="muted">未设置箱唛</span>}</td>
+              </tr>)}</tbody>
+            </table>
+            {!orderItems.length && itemsBusy === null && <div className="empty">该供应单暂未返回货品明细。</div>}
+          </div>
+          <footer className="modal-actions">
+            <button className="outline-button" disabled={itemsBusy !== null || cargoAction !== "" || !orderItems.length} onClick={() => void runCargoAction("excel")}><FileDown size={15} />{cargoAction === "excel" ? "导出中" : "导出箱唛 Excel"}</button>
+            <button className="outline-button" disabled={itemsBusy !== null || cargoAction !== "" || !orderItems.some((item) => item.cargoMarks.length)} onClick={() => void runCargoAction("labels")}><PackageSearch size={15} />{cargoAction === "labels" ? "下载中" : "下载全部箱唛 PDF"}</button>
+            <button className="outline-button" disabled={itemsBusy !== null} onClick={() => void findItems(itemOrder, true)}><RefreshCw size={15} />{itemsBusy !== null ? "重新读取中" : "重新读取 Ozon"}</button>
+            <button className="dark-button" onClick={() => setItemOrder(null)}>完成</button>
+          </footer>
+        </section>
+      </div>}
     </>
   );
 }
@@ -4179,6 +4321,11 @@ export function SyncPage({ range }: { range: DateRange }) {
     }),
     [busy, setBusy] = useState(""),
     [message, setMessage] = useState("");
+  const autoSyncDirty = useRef(false);
+  const updateAutoSyncDraft = (patch: Partial<AutoSyncState>) => {
+    autoSyncDirty.current = true;
+    setAutoSync((current) => current ? { ...current, ...patch } : current);
+  };
   const today = new Date().toISOString().slice(0, 10),
     recentFrom = (days: number) =>
       new Date(Date.parse(`${today}T00:00:00Z`) - days * 86400000)
@@ -4193,6 +4340,7 @@ export function SyncPage({ range }: { range: DateRange }) {
     const [l, c, automatic] = await Promise.all([syncLogs(), dataCoverage(), getAutoSyncState()]);
     setLogs(l);
     setCoverage(c);
+    autoSyncDirty.current = false;
     setAutoSync(automatic);
   };
   useEffect(() => {
@@ -4206,7 +4354,17 @@ export function SyncPage({ range }: { range: DateRange }) {
       pending = true;
       try {
         const [next, automatic] = await Promise.all([syncLogs(), getAutoSyncState()]);
-        if (!cancelled) { setLogs(next); setAutoSync(automatic); }
+        if (!cancelled) {
+          setLogs(next);
+          setAutoSync((current) => autoSyncDirty.current && current ? {
+            ...automatic,
+            syncOnStartup: current.syncOnStartup,
+            scheduledEnabled: current.scheduledEnabled,
+            intervalMinutes: current.intervalMinutes,
+            startupShopIds: current.startupShopIds,
+            manualShopIds: current.manualShopIds,
+          } : automatic);
+        }
       } catch (error) {
         if (!cancelled) setMessage(`同步进度读取失败：${String(error)}`);
       } finally { pending = false; }
@@ -4317,29 +4475,47 @@ export function SyncPage({ range }: { range: DateRange }) {
           <div>
             <span className="eyebrow">ALL SHOPS AUTO SYNC</span>
             <h3>全店自动同步</h3>
-            <p>每家店铺继续写入自己的独立数据库，不会混合店铺数据。</p>
+            <p>启动与定时任务均固定同步最近 7 天；每家店铺继续写入自己的独立数据库。</p>
           </div>
           <span className={`sync-status ${autoSync.lastStatus}`}>{autoSync.lastStatus === "running" ? "同步中" : autoSync.lastStatus === "success" ? "正常" : autoSync.lastStatus === "partial" ? "部分失败" : autoSync.lastStatus === "failed" ? "失败" : "未运行"}</span>
         </div>
         <div className="auto-sync-controls">
-          <label className="auto-sync-check"><input type="checkbox" checked={autoSync.syncOnStartup} onChange={(e) => setAutoSync({ ...autoSync, syncOnStartup: e.target.checked })} /> 软件启动后同步所有店铺</label>
-          <label className="auto-sync-check"><input type="checkbox" checked={autoSync.scheduledEnabled} onChange={(e) => setAutoSync({ ...autoSync, scheduledEnabled: e.target.checked })} /> 开启定时同步</label>
-          <label>同步间隔<select value={autoSync.intervalMinutes} onChange={(e) => setAutoSync({ ...autoSync, intervalMinutes: Number(e.target.value) })}>
+          <label className="auto-sync-check"><input type="checkbox" checked={autoSync.syncOnStartup} onChange={(e) => updateAutoSyncDraft({ syncOnStartup: e.target.checked })} /> 软件启动后同步已选店铺最近 7 天</label>
+          <label className="auto-sync-check"><input type="checkbox" checked={autoSync.scheduledEnabled} onChange={(e) => updateAutoSyncDraft({ scheduledEnabled: e.target.checked })} /> 开启定时同步（最近 7 天）</label>
+          <label>同步间隔<select value={autoSync.intervalMinutes} onChange={(e) => updateAutoSyncDraft({ intervalMinutes: Number(e.target.value) })}>
             <option value={30}>每 30 分钟</option><option value={60}>每 1 小时</option><option value={120}>每 2 小时</option><option value={240}>每 4 小时</option><option value={480}>每 8 小时</option><option value={720}>每 12 小时</option><option value={1440}>每天</option>
           </select></label>
-          <label>回溯范围<select value={autoSync.lookbackDays} onChange={(e) => setAutoSync({ ...autoSync, lookbackDays: Number(e.target.value) })}>
-            <option value={7}>最近 7 天</option><option value={14}>最近 14 天</option><option value={30}>最近 30 天</option><option value={60}>最近 60 天</option><option value={90}>最近 90 天</option>
-          </select></label>
-          <button disabled={!!busy || autoSync.lastStatus === "running"} onClick={async () => {
+          <label>自动同步范围<span className="auto-sync-fixed-range">最近 7 天（固定）</span></label>
+          <button disabled={!!busy} onClick={async () => {
             setBusy("auto-save");
-            try { const next = await saveAutoSyncSettings({ syncOnStartup: autoSync.syncOnStartup, scheduledEnabled: autoSync.scheduledEnabled, intervalMinutes: autoSync.intervalMinutes, lookbackDays: autoSync.lookbackDays }); setAutoSync(next); setMessage("全店自动同步设置已保存。"); }
+            try { const next = await saveAutoSyncSettings({ syncOnStartup: autoSync.syncOnStartup, scheduledEnabled: autoSync.scheduledEnabled, intervalMinutes: autoSync.intervalMinutes, startupShopIds: autoSync.startupShopIds, manualShopIds: autoSync.manualShopIds }); autoSyncDirty.current = false; setAutoSync(next); setMessage(next.syncOnStartup ? `设置已保存；下次启动同步 ${next.startupShopIds.length} 家，手动同步已选 ${next.manualShopIds.length} 家。` : `设置已保存；启动同步关闭，手动同步已选 ${next.manualShopIds.length} 家。`); }
             catch (e) { setMessage(`设置保存失败：${String(e)}`); } finally { setBusy(""); }
           }}><Save size={15}/>{busy === "auto-save" ? "保存中" : "保存设置"}</button>
           <button className="dark-button" disabled={!!busy || autoSync.lastStatus === "running"} onClick={async () => {
             setBusy("all-shops"); setMessage("所有 Ozon 店铺正在依次同步；每家店铺的数据仍保持隔离…");
-            try { const next = await syncAllShops(forceSync); setAutoSync(next); clearReportCache(); setMessage(next.lastMessage); await load(); }
+            try { if (!autoSync.manualShopIds.length) throw new Error("请至少选择一家手动同步店铺"); const next = await syncAllShops(forceSync, autoSync.manualShopIds); setAutoSync(next); clearReportCache(); setMessage(next.lastMessage); await load(); }
             catch (e) { setMessage(`全店同步失败：${String(e)}`); await load(); } finally { setBusy(""); }
-          }}><RefreshCw className={busy === "all-shops" ? "spin" : ""} size={15}/>{busy === "all-shops" ? "全店同步中" : "立即同步全部店铺"}</button>
+          }}><RefreshCw className={busy === "all-shops" ? "spin" : ""} size={15}/>{busy === "all-shops" ? "已选店铺同步中" : `立即同步已选店铺（${autoSync.manualShopIds.length}）`}</button>
+        </div>
+        <div className="auto-sync-shop-picker">
+          <div><b>启动时同步店铺</b><span>已选 {autoSync.startupShopIds.length} / {autoSync.availableShops.length} 家</span></div>
+          <div className="auto-sync-shop-options">{autoSync.availableShops.map((shop) => {
+            const selected = autoSync.startupShopIds.includes(shop.shopId);
+            return <label key={shop.shopId} className={selected ? "selected" : ""}>
+              <input type="checkbox" checked={selected} onChange={(event) => updateAutoSyncDraft({ startupShopIds: event.target.checked ? [...autoSync.startupShopIds, shop.shopId] : autoSync.startupShopIds.filter((id) => id !== shop.shopId) })} />
+              <span>{shop.shopName}</span>
+            </label>;
+          })}</div>
+        </div>
+        <div className="auto-sync-shop-picker">
+          <div><b>手动一次性同步店铺</b><span>已选 {autoSync.manualShopIds.length} / {autoSync.availableShops.length} 家</span></div>
+          <div className="auto-sync-shop-options">{autoSync.availableShops.map((shop) => {
+            const selected = autoSync.manualShopIds.includes(shop.shopId);
+            return <label key={shop.shopId} className={selected ? "selected" : ""}>
+              <input type="checkbox" checked={selected} onChange={(event) => updateAutoSyncDraft({ manualShopIds: event.target.checked ? [...autoSync.manualShopIds, shop.shopId] : autoSync.manualShopIds.filter((id) => id !== shop.shopId) })} />
+              <span>{shop.shopName}</span>
+            </label>;
+          })}</div>
         </div>
         <div className="auto-sync-summary">
           <span>{autoSync.lastMessage}</span>
@@ -4416,7 +4592,7 @@ export function SyncPage({ range }: { range: DateRange }) {
                 : "尚无本地数据"}
             </small>
             <small>
-              {x.lastSuccess ? `最近成功：${x.lastSuccess}` : "尚无成功同步"}
+              {x.lastSuccess ? `最近成功：${displayTime(x.lastSuccess)}` : "尚无成功同步"}
             </small>
           </section>
         ))}
@@ -4529,7 +4705,7 @@ export function SyncPage({ range }: { range: DateRange }) {
           <tbody>
             {logs.map((log) => (
               <tr key={log.id}>
-                <td>{log.startedAt}</td>
+                <td>{displayTime(log.startedAt)}</td>
                 <td>
                   <b>{log.source}</b>
                 </td>
@@ -4539,7 +4715,7 @@ export function SyncPage({ range }: { range: DateRange }) {
                   </span>
                 </td>
                 <td>{log.rowsCount}</td>
-                <td>{log.finishedAt || "—"}</td>
+                <td>{log.finishedAt ? displayTime(log.finishedAt) : "—"}</td>
                 <td>{log.message}</td>
               </tr>
             ))}
@@ -5652,7 +5828,7 @@ export function WbPage({
                   <td>{row.quantity}</td>
                   <td>{row.inWayToClient}</td>
                   <td>{row.inWayFromClient}</td>
-                  <td>{row.updatedAt}</td>
+                  <td>{displayTime(row.updatedAt)}</td>
                 </tr>
               ))}
             </tbody>

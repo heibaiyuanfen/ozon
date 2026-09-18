@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, BadgeRussianRuble, CheckCircle2, History, RefreshCw, ShieldCheck, Tags } from "lucide-react";
 import "./price-promotion-center.css";
+import { displayTime } from "./time";
 
 type Shop={id:string;name:string;status:string};
 type Row={listingId:string;skuId?:string;sku?:string;name?:string;nmId:string;mappingStatus:string;basePrice?:string;discountPct?:string;effectivePrice?:string;currency:string;observedAt?:string;dataStatus:string;minimumSafePrice?:string};

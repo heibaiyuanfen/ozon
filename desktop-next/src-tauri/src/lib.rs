@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -34,11 +35,14 @@ static SELLER_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static PERFORMANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static FINANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static AUTO_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
+static AUTO_SYNC_STATE_LOCK: Mutex<()> = Mutex::new(());
 static COMPETITOR_COLLECTION_STOP: AtomicBool = AtomicBool::new(false);
 static COMPETITOR_TASK_STOPS: LazyLock<Mutex<HashSet<i64>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static COMPETITOR_COLLECTION_PROGRESS: LazyLock<Mutex<CompetitorCollectionProgress>> =
     LazyLock::new(|| Mutex::new(CompetitorCollectionProgress::default()));
+static SUPPLY_ITEM_PROGRESS: LazyLock<Mutex<std::collections::BTreeMap<i64, SupplyOrderItemsProgress>>> =
+    LazyLock::new(|| Mutex::new(std::collections::BTreeMap::new()));
 
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -755,6 +759,32 @@ struct SupplyOrderRow {
     supply_states: String,
     supplies_count: usize,
 }
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct SupplyOrderItemRow {
+    product_name: String,
+    sku: String,
+    offer_id: String,
+    cargo_marks: Vec<String>,
+    quantity: i64,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyOrderItemsResult {
+    rows: Vec<SupplyOrderItemRow>,
+    warning: String,
+    from_cache: bool,
+    cached_at: String,
+}
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyOrderItemsProgress {
+    status: String,
+    total: usize,
+    completed: usize,
+    stage: String,
+    message: String,
+}
 #[derive(Serialize)]
 struct SupplyTimeslot {
     from: String,
@@ -865,12 +895,25 @@ struct AutoSyncShopResult {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoSyncShopOption {
+    shop_id: String,
+    shop_name: String,
+}
+
+const AUTO_SYNC_LOOKBACK_DAYS: i64 = 7;
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct AutoSyncState {
     sync_on_startup: bool,
+    startup_sync_consent_version: Option<u8>,
     scheduled_enabled: bool,
     interval_minutes: u64,
     lookback_days: i64,
+    startup_shop_ids: Vec<String>,
+    manual_shop_ids: Vec<String>,
+    available_shops: Vec<AutoSyncShopOption>,
     last_started_at: String,
     last_finished_at: String,
     last_status: String,
@@ -881,10 +924,14 @@ struct AutoSyncState {
 impl Default for AutoSyncState {
     fn default() -> Self {
         Self {
-            sync_on_startup: true,
+            sync_on_startup: false,
+            startup_sync_consent_version: None,
             scheduled_enabled: false,
             interval_minutes: 60,
-            lookback_days: 30,
+            lookback_days: AUTO_SYNC_LOOKBACK_DAYS,
+            startup_shop_ids: Vec::new(),
+            manual_shop_ids: Vec::new(),
+            available_shops: Vec::new(),
             last_started_at: String::new(),
             last_finished_at: String::new(),
             last_status: "idle".into(),
@@ -900,7 +947,8 @@ struct AutoSyncSettingsInput {
     sync_on_startup: bool,
     scheduled_enabled: bool,
     interval_minutes: u64,
-    lookback_days: i64,
+    startup_shop_ids: Vec<String>,
+    manual_shop_ids: Vec<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1328,7 +1376,11 @@ fn seller_error_detail(raw: &str) -> String {
 
 #[cfg(test)]
 mod seller_api_error_tests {
-    use super::{finance_timestamp, normalize_finance_accrual, seller_error_detail};
+    use super::{
+        finance_accrual_type_name, finance_timestamp, normalize_finance_accrual,
+        repair_finance_accrual_attribution, seller_error_detail, DateRange,
+    };
+    use rusqlite::{params, Connection};
     use std::collections::HashMap;
 
     #[test]
@@ -1373,6 +1425,67 @@ mod seller_api_error_tests {
         assert_eq!(normalized["delivery_charge"], -5.0);
         assert_eq!(normalized["items"][0]["sku"], "7001");
         assert_eq!(normalized["posting"]["posting_number"], "123-1");
+    }
+
+    #[test]
+    fn normalizes_item_fee_sku_and_type_from_accrual_by_day() {
+        let accrual = serde_json::json!({
+            "accrual_id":61622729143_i64,
+            "accrued_category":"ITEM",
+            "date":"2026-09-01",
+            "unit_number":"0119857515-0031",
+            "total_amount":{"amount":"-25.77"},
+            "posting":null,
+            "item_fees":{"fees":[{
+                "sku":2550136937_i64,
+                "quantity":1,
+                "fees":[{"type_id":1,"accrued":{"amount":"-25.77"}}]
+            }]},
+            "non_item_fee":null
+        });
+        let names = HashMap::from([(1, "OperationMarketplaceServiceItemFulfillment".to_string())]);
+        let normalized = normalize_finance_accrual("2026-09-01", 0, &accrual, &names);
+        assert_eq!(normalized["operation_id"], "accrual-61622729143");
+        assert_eq!(
+            normalized["operation_type"],
+            "OperationMarketplaceServiceItemFulfillment"
+        );
+        assert_eq!(normalized["items"][0]["sku"], "2550136937");
+        assert_eq!(normalized["items"][0]["quantity"], 1);
+    }
+
+    #[test]
+    fn known_accrual_type_ids_keep_stable_category_names_without_api_dictionary() {
+        let empty = HashMap::new();
+        assert_eq!(finance_accrual_type_name(1, &empty), "Acquiring");
+        assert_eq!(finance_accrual_type_name(32, &empty), "Logistic");
+        assert_eq!(finance_accrual_type_name(41, &empty), "PayPerClick");
+        assert_eq!(finance_accrual_type_name(59, &empty), "ReturnFlowLogistic");
+    }
+
+    #[test]
+    fn repairs_cached_accrual_rows_without_requesting_the_api_again() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE finance_transactions(operation_id TEXT PRIMARY KEY,operation_date TEXT,operation_type TEXT,sku TEXT,raw_json TEXT);CREATE TABLE business_report_cache(range_key TEXT);CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);").unwrap();
+        let raw = serde_json::json!({
+            "operation_type":"AccrualType0","items":[],"amount":100.0,
+            "accrual_raw":{
+                "accrual_id":99,"accrued_category":"POSTING","date":"2026-09-01",
+                "unit_number":"posting-1","total_amount":{"amount":"100"},
+                "posting":{"delivery_schema":"FBO","products":[{
+                    "sku":7001,"quantity":2,"commission":{"seller_price":{"amount":"100"},"sale_commission":{"amount":"-10"}},
+                    "delivery":{"total_accrued":{"amount":"-5"},"services":[]}
+                }]},"item_fees":null,"non_item_fee":null
+            }
+        });
+        connection.execute("INSERT INTO finance_transactions VALUES('legacy','2026-09-01','AccrualType0','',?1)",params![raw.to_string()]).unwrap();
+        let count = repair_finance_accrual_attribution(
+            &mut connection,
+            &DateRange { from: "2026-09-01".into(), to: "2026-09-30".into() },
+        ).unwrap();
+        let repaired: (String, String) = connection.query_row("SELECT operation_type,sku FROM finance_transactions WHERE operation_id='legacy'",[],|row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(repaired, ("OperationAgentDeliveredToCustomer".into(), "7001".into()));
     }
 }
 
@@ -5966,7 +6079,7 @@ fn missing_cost_rows(
     // Finance is the canonical settled-unit source for the Finance P&L. A
     // posting event is only a fallback when that SKU has no attributable
     // Finance delivery, because migrated posting history can be partial.
-    let mut stmt = c.prepare("WITH sales AS(SELECT sku,MAX(product_name) product_name FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) units FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) units FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),base AS(SELECT s.sku,s.product_name,COALESCE(fd.units,d.units,0) units FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku) SELECT b.sku,COALESCE(MAX(p.offer_id),''),COALESCE(MAX(NULLIF(p.name,'')),MAX(b.product_name),''),MAX(b.units),MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)),MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)),MAX(pc.weight_kg),MAX(pc.length_cm),MAX(pc.width_cm),MAX(pc.height_cm),COALESCE(MAX(pc.note),'') FROM base b LEFT JOIN products p ON p.sku=b.sku LEFT JOIN product_costs pc ON pc.sku=b.sku WHERE b.units>0 GROUP BY b.sku HAVING MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)) IS NULL OR MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)) IS NULL ORDER BY MAX(b.units) DESC,b.sku").map_err(|e|e.to_string())?;
+    let mut stmt = c.prepare("WITH sales AS(SELECT sku,MAX(product_name) product_name,SUM(delivered_units) analytics_units FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) units FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) units FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),base AS(SELECT s.sku,s.product_name,COALESCE(NULLIF(fd.units,0),NULLIF(d.units,0),s.analytics_units,0) units FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku) SELECT b.sku,COALESCE(MAX(p.offer_id),''),COALESCE(MAX(NULLIF(p.name,'')),MAX(b.product_name),''),MAX(b.units),MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)),MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)),MAX(pc.weight_kg),MAX(pc.length_cm),MAX(pc.width_cm),MAX(pc.height_cm),COALESCE(MAX(pc.note),'') FROM base b LEFT JOIN products p ON p.sku=b.sku LEFT JOIN product_costs pc ON pc.sku=b.sku WHERE b.units>0 GROUP BY b.sku HAVING MAX(COALESCE(pc.unit_cost_cny,pc.unit_cost)) IS NULL OR MAX(COALESCE(pc.first_mile_cost,pc.first_mile_cost_cny)) IS NULL ORDER BY MAX(b.units) DESC,b.sku").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map(params![range.from, range.to], |r| {
             let length: Option<f64> = r.get(7)?;
@@ -6000,10 +6113,11 @@ fn missing_cost_rows(
 }
 
 fn business_report_blocking(range: DateRange, state: &AppState) -> Result<BusinessReport, String> {
-    let c = db(state)?;
+    let mut c = db(state)?;
     let rate = rub_per_cny_for(state, &c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS business_report_cache(range_key TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
-    let fingerprint:String=c.query_row("SELECT 'finance-v7-ozon-advertising-types|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    repair_finance_accrual_attribution(&mut c, &range)?;
+    let fingerprint:String=c.query_row("SELECT 'finance-v9-stable-accrual-types|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     let cache_key = format!("{}|{}", range.from, range.to);
     if let Ok(payload) = c.query_row(
         "SELECT payload FROM business_report_cache WHERE range_key=?1 AND fingerprint=?2",
@@ -6017,7 +6131,7 @@ fn business_report_blocking(range: DateRange, state: &AppState) -> Result<Busine
     // Match the Finance-settled P&L: Finance delivered operations are the
     // canonical per-SKU quantity. Posting delivery events are a fallback only
     // when Finance has no attributable delivery row for that SKU.
-    let(revenue,orders,purchase,first_mile,missing,costed_units,missing_cost_skus):(f64,i64,f64,f64,i64,i64,i64)=c.query_row("WITH sales AS(SELECT sku,SUM(revenue) revenue,SUM(ordered_units) ordered FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) delivered FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) delivered FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),cost_base AS(SELECT s.sku,s.revenue,s.ordered,COALESCE(fd.delivered,d.delivered,0) cost_units,pc.unit_cost_cny,pc.unit_cost,pc.first_mile_cost,pc.first_mile_cost_cny FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku LEFT JOIN product_costs pc ON pc.sku=s.sku) SELECT COALESCE(SUM(revenue),0),COALESCE(SUM(ordered),0),COALESCE(SUM(cost_units*COALESCE(unit_cost_cny*?3,unit_cost,0)),0),COALESCE(SUM(cost_units*COALESCE(first_mile_cost,first_mile_cost_cny*?3,0)),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)THEN cost_units ELSE 0 END),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NOT NULL OR unit_cost IS NOT NULL)AND(first_mile_cost IS NOT NULL OR first_mile_cost_cny IS NOT NULL)THEN cost_units ELSE 0 END),0),COALESCE(COUNT(DISTINCT CASE WHEN cost_units>0 AND ((unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)) THEN sku END),0) FROM cost_base",params![range.from,range.to,rate],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).map_err(|e|e.to_string())?;
+    let(revenue,orders,purchase,first_mile,missing,costed_units,missing_cost_skus):(f64,i64,f64,f64,i64,i64,i64)=c.query_row("WITH sales AS(SELECT sku,SUM(revenue) revenue,SUM(ordered_units) ordered,SUM(delivered_units) analytics_delivered FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),delivered AS(SELECT sku,SUM(quantity) delivered FROM delivery_events WHERE day BETWEEN ?1 AND ?2 GROUP BY sku),finance_delivered AS(SELECT sku,COUNT(DISTINCT operation_id) delivered FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2 AND sku<>'' AND lower(operation_type) LIKE '%deliveredtocustomer%' GROUP BY sku),cost_base AS(SELECT s.sku,s.revenue,s.ordered,COALESCE(NULLIF(fd.delivered,0),NULLIF(d.delivered,0),s.analytics_delivered,0) cost_units,pc.unit_cost_cny,pc.unit_cost,pc.first_mile_cost,pc.first_mile_cost_cny FROM sales s LEFT JOIN delivered d ON d.sku=s.sku LEFT JOIN finance_delivered fd ON fd.sku=s.sku LEFT JOIN product_costs pc ON pc.sku=s.sku) SELECT COALESCE(SUM(revenue),0),COALESCE(SUM(ordered),0),COALESCE(SUM(cost_units*COALESCE(unit_cost_cny*?3,unit_cost,0)),0),COALESCE(SUM(cost_units*COALESCE(first_mile_cost,first_mile_cost_cny*?3,0)),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)THEN cost_units ELSE 0 END),0),COALESCE(SUM(CASE WHEN(unit_cost_cny IS NOT NULL OR unit_cost IS NOT NULL)AND(first_mile_cost IS NOT NULL OR first_mile_cost_cny IS NOT NULL)THEN cost_units ELSE 0 END),0),COALESCE(COUNT(DISTINCT CASE WHEN cost_units>0 AND ((unit_cost_cny IS NULL AND unit_cost IS NULL)OR(first_mile_cost IS NULL AND first_mile_cost_cny IS NULL)) THEN sku END),0) FROM cost_base",params![range.from,range.to,rate],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).map_err(|e|e.to_string())?;
     let ad_spend = c
         .query_row(
             "SELECT COALESCE(SUM(spend),0) FROM ad_daily WHERE day BETWEEN ?1 AND ?2 AND sku=''",
@@ -6050,16 +6164,40 @@ fn business_report_blocking(range: DateRange, state: &AppState) -> Result<Busine
                 let operation_accrual = value_number(value.get("accruals_for_sale"));
                 let operation_commission = value_number(value.get("sale_commission"));
                 sales_returns += operation_accrual;
-                let item_skus = value
+                let mut item_skus = value
                     .get("items")
                     .and_then(|v| v.as_array())
                     .into_iter()
                     .flatten()
                     .filter_map(|item| {
-                        let sku = json_text(item.get("sku"));
+                        let sku = finance_identifier(item.get("sku"));
                         (!sku.is_empty()).then_some(sku)
                     })
                     .collect::<std::collections::BTreeSet<_>>();
+                if item_skus.is_empty() {
+                    for product in value
+                        .pointer("/accrual_raw/posting/products")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                    {
+                        let sku = finance_identifier(product.get("sku"));
+                        if !sku.is_empty() {
+                            item_skus.insert(sku);
+                        }
+                    }
+                    for group in value
+                        .pointer("/accrual_raw/item_fees/fees")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                    {
+                        let sku = finance_identifier(group.get("sku"));
+                        if !sku.is_empty() {
+                            item_skus.insert(sku);
+                        }
+                    }
+                }
                 if item_skus.len() == 1 {
                     exact_sku_operations += 1;
                 } else {
@@ -7827,27 +7965,96 @@ fn finance_timestamp(day: &str, end_of_day: bool) -> String {
     )
 }
 
+fn finance_identifier(value: Option<&serde_json::Value>) -> String {
+    value
+        .map(|value| match value {
+            serde_json::Value::String(text) => text.clone(),
+            serde_json::Value::Number(number) => number.to_string(),
+            _ => String::new(),
+        })
+        .unwrap_or_default()
+}
+
+fn finance_accrual_type_name(
+    type_id: i64,
+    type_names: &std::collections::HashMap<i64, String>,
+) -> String {
+    if let Some(name) = type_names.get(&type_id).filter(|name| !name.trim().is_empty()) {
+        return name.clone();
+    }
+    let fallback = match type_id {
+        1 => "Acquiring",
+        6 => "Cancellation",
+        10 => "Compensation",
+        12 => "CrossDock",
+        15 => "Disposal",
+        25 => "ItemCompensation",
+        29 => "LastMileCourier",
+        32 => "Logistic",
+        38 => "PackageCost",
+        39 => "PackingFee",
+        41 => "PayPerClick",
+        45 => "PickUpPointReturnAcceptance",
+        46 => "Placements",
+        48 => "PremiumCashbackIndividualPoints",
+        54 => "Promotion",
+        58 => "Replenishment",
+        59 => "ReturnFlowLogistic",
+        66 => "RfbsGlobalAgentFee",
+        67 => "RfbsGlobalDelivery",
+        74 => "StarsMembership",
+        76 => "StockInsurance",
+        77 => "SupplyInbound",
+        78 => "TemporaryPlacement",
+        79 => "TemporaryPlacementsAgent",
+        84 => "ItemPacking",
+        94 => "DefectFineShipmentDelayRate",
+        96 => "AcceleratedReviewCollection",
+        98 => "DeliveryToHandoverPlaceByOzon",
+        116 => "FirstCustomerReview",
+        122 => "RfbsGlobalIntermediaryService",
+        123 => "RfbsGlobalPlatformConnectionService",
+        _ => return format!("AccrualType{type_id}"),
+    };
+    fallback.to_string()
+}
+
 fn normalize_finance_accrual(
     day: &str,
     index: usize,
     accrual: &serde_json::Value,
     type_names: &std::collections::HashMap<i64, String>,
 ) -> serde_json::Value {
-    let type_id = accrual.get("type_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let top_level_type_id = accrual.get("type_id").and_then(|v| v.as_i64()).unwrap_or(0);
     let unit_number = json_text(accrual.get("unit_number"));
-    let operation_type = type_names
-        .get(&type_id)
-        .cloned()
-        .unwrap_or_else(|| format!("AccrualType{type_id}"));
     let products = accrual
         .pointer("/posting/products")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let items = products
+    let mut items = products
         .iter()
-        .map(|product| serde_json::json!({"sku": json_text(product.get("sku"))}))
+        .map(|product| {
+            serde_json::json!({
+                "sku": finance_identifier(product.get("sku")),
+                "quantity": product.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1)
+            })
+        })
         .collect::<Vec<_>>();
+    let item_fee_groups = accrual
+        .pointer("/item_fees/fees")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    items.extend(item_fee_groups.iter().filter_map(|group| {
+        let sku = finance_identifier(group.get("sku"));
+        (!sku.is_empty()).then(|| {
+            serde_json::json!({
+                "sku": sku,
+                "quantity": group.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1)
+            })
+        })
+    }));
     let accruals_for_sale = products
         .iter()
         .map(|product| json_f64(product.pointer("/commission/seller_price")).unwrap_or(0.0))
@@ -7861,10 +8068,14 @@ fn normalize_finance_accrual(
         .map(|product| json_f64(product.pointer("/delivery/total_accrued")).unwrap_or(0.0))
         .sum::<f64>();
     let mut services = Vec::new();
+    let mut fee_type_ids = std::collections::BTreeSet::new();
     let mut push_service = |fee: &serde_json::Value| {
         let fee_type = fee.get("type_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        if fee_type != 0 {
+            fee_type_ids.insert(fee_type);
+        }
         services.push(serde_json::json!({
-            "name": type_names.get(&fee_type).cloned().unwrap_or_else(|| format!("AccrualType{fee_type}")),
+            "name": finance_accrual_type_name(fee_type, type_names),
             "price": json_f64(fee.get("accrued")).unwrap_or(0.0)
         }));
     };
@@ -7878,12 +8089,7 @@ fn normalize_finance_accrual(
             push_service(fee);
         }
     }
-    for group in accrual
-        .pointer("/item_fees/fees")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-    {
+    for group in &item_fee_groups {
         for fee in group
             .get("fees")
             .and_then(|v| v.as_array())
@@ -7896,8 +8102,34 @@ fn normalize_finance_accrual(
     if let Some(fee) = accrual.get("non_item_fee").filter(|v| !v.is_null()) {
         push_service(fee);
     }
+    let type_id = if top_level_type_id != 0 {
+        top_level_type_id
+    } else if fee_type_ids.len() == 1 {
+        *fee_type_ids.iter().next().unwrap_or(&0)
+    } else {
+        0
+    };
+    let operation_type = if accruals_for_sale > 0.0 {
+        "OperationAgentDeliveredToCustomer".to_string()
+    } else if accruals_for_sale < 0.0 {
+        "OperationItemReturn".to_string()
+    } else if type_id != 0 {
+        finance_accrual_type_name(type_id, type_names)
+    } else {
+        let category = json_text(accrual.get("accrued_category"));
+        if category.is_empty() {
+            "AccrualType0".to_string()
+        } else {
+            format!("AccrualCategory{category}")
+        }
+    };
+    let accrual_id = finance_identifier(accrual.get("accrual_id"));
     serde_json::json!({
-        "operation_id": format!("accrual-{day}-{unit_number}-{type_id}-{index}"),
+        "operation_id": if accrual_id.is_empty() {
+            format!("accrual-{day}-{unit_number}-{type_id}-{index}")
+        } else {
+            format!("accrual-{accrual_id}")
+        },
         "operation_date": json_text(accrual.get("date")),
         "operation_type": operation_type,
         "operation_type_name": operation_type,
@@ -7915,6 +8147,97 @@ fn normalize_finance_accrual(
         "services": services,
         "accrual_raw": accrual
     })
+}
+
+fn repair_finance_accrual_attribution(
+    c: &mut Connection,
+    _range: &DateRange,
+) -> Result<usize, String> {
+    let repair_version: String = c
+        .query_row(
+            "SELECT value FROM settings WHERE key='finance_accrual_repair_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_default();
+    if repair_version == "2" {
+        return Ok(0);
+    }
+    let rows = {
+        let mut statement = c
+            .prepare(
+                "SELECT operation_id,operation_date,raw_json FROM finance_transactions \
+                 WHERE operation_type='AccrualType0' OR raw_json LIKE '%\"AccrualType%'",
+            )
+            .map_err(|error| error.to_string())?;
+        let mapped = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        let collected = mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        collected
+    };
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let empty_names = std::collections::HashMap::new();
+    let mut repaired = 0usize;
+    let transaction = c.transaction().map_err(|error| error.to_string())?;
+    for (index, (operation_id, operation_date, raw_json)) in rows.into_iter().enumerate() {
+        let Ok(stored) = serde_json::from_str::<serde_json::Value>(&raw_json) else {
+            continue;
+        };
+        let Some(accrual) = stored.get("accrual_raw") else {
+            continue;
+        };
+        let day = operation_date.chars().take(10).collect::<String>();
+        let normalized = normalize_finance_accrual(&day, index, accrual, &empty_names);
+        let skus = normalized
+            .get("items")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let sku = finance_identifier(item.get("sku"));
+                (!sku.is_empty()).then_some(sku)
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let sku = if skus.len() == 1 {
+            skus.into_iter().next().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        transaction.execute(
+            "UPDATE finance_transactions SET operation_type=?1,sku=?2,raw_json=?3 WHERE operation_id=?4",
+            params![
+                json_text(normalized.get("operation_type")),
+                sku,
+                normalized.to_string(),
+                operation_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        repaired += 1;
+    }
+    if repaired > 0 {
+        transaction.execute("DELETE FROM business_report_cache", [])
+            .map_err(|error| error.to_string())?;
+    }
+    transaction
+        .execute(
+            "INSERT INTO settings(key,value) VALUES('finance_accrual_repair_version','2') ON CONFLICT(key) DO UPDATE SET value='2'",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(repaired)
 }
 
 fn sync_finance_blocking(range: DateRange, force: bool, state: &AppState) -> Result<i64, String> {
@@ -8116,13 +8439,77 @@ fn auto_sync_state_path(data_dir: &Path) -> PathBuf {
 }
 
 fn read_auto_sync_state(data_dir: &Path) -> AutoSyncState {
-    fs::read_to_string(auto_sync_state_path(data_dir))
+    let mut state: AutoSyncState = fs::read_to_string(auto_sync_state_path(data_dir))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Startup synchronization must be an explicit opt-in. Older builds enabled
+    // it by default, so disable it once after this migration and persist the
+    // consent version. A later user save may enable it normally.
+    let needs_startup_consent_migration = state.startup_sync_consent_version != Some(1);
+    if needs_startup_consent_migration {
+        state.sync_on_startup = false;
+        state.startup_sync_consent_version = Some(1);
+    }
+    let recovered_interrupted_run = state.last_status == "running"
+        && !AUTO_SYNC_RUNNING.load(Ordering::SeqCst);
+    if recovered_interrupted_run {
+        state.last_status = "failed".into();
+        state.last_finished_at = chrono::Local::now().to_rfc3339();
+        state.last_message = "上次同步因软件关闭或重启而中断，请按需重新同步".into();
+    }
+    // Automatic jobs intentionally use a short, fixed window. Normalize older
+    // persisted settings so the UI cannot imply that a wider range will run.
+    state.lookback_days = AUTO_SYNC_LOOKBACK_DAYS;
+    if let Ok(registry) = read_registry(data_dir) {
+        state.available_shops = registry
+            .shops
+            .iter()
+            .map(|shop| AutoSyncShopOption {
+                shop_id: shop.id.clone(),
+                shop_name: shop.name.clone(),
+            })
+            .collect();
+        let valid_ids = state
+            .available_shops
+            .iter()
+            .map(|shop| shop.shop_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        state
+            .startup_shop_ids
+            .retain(|shop_id| valid_ids.contains(shop_id.as_str()));
+        state
+            .manual_shop_ids
+            .retain(|shop_id| valid_ids.contains(shop_id.as_str()));
+        if state.startup_shop_ids.is_empty() {
+            state.startup_shop_ids = state
+                .available_shops
+                .iter()
+                .map(|shop| shop.shop_id.clone())
+                .collect();
+        }
+        if state.manual_shop_ids.is_empty() {
+            state.manual_shop_ids = state
+                .available_shops
+                .iter()
+                .map(|shop| shop.shop_id.clone())
+                .collect();
+        }
+    }
+    if needs_startup_consent_migration || recovered_interrupted_run {
+        let _ = write_auto_sync_state(data_dir, &state);
+    }
+    state
 }
 
 fn write_auto_sync_state(data_dir: &Path, value: &AutoSyncState) -> Result<(), String> {
+    let _guard = AUTO_SYNC_STATE_LOCK
+        .lock()
+        .map_err(|_| "自动同步设置写入锁异常".to_string())?;
+    write_auto_sync_state_unlocked(data_dir, value)
+}
+
+fn write_auto_sync_state_unlocked(data_dir: &Path, value: &AutoSyncState) -> Result<(), String> {
     let path = auto_sync_state_path(data_dir);
     let temporary = path.with_extension("json.tmp");
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
@@ -8131,6 +8518,27 @@ fn write_auto_sync_state(data_dir: &Path, value: &AutoSyncState) -> Result<(), S
         fs::remove_file(&path).map_err(|e| e.to_string())?;
     }
     fs::rename(temporary, path).map_err(|e| e.to_string())
+}
+
+fn preserve_latest_auto_sync_settings_and_write(
+    data_dir: &Path,
+    state: &mut AutoSyncState,
+) -> Result<(), String> {
+    let _guard = AUTO_SYNC_STATE_LOCK
+        .lock()
+        .map_err(|_| "自动同步设置写入锁异常".to_string())?;
+    if let Ok(text) = fs::read_to_string(auto_sync_state_path(data_dir)) {
+        if let Ok(latest) = serde_json::from_str::<AutoSyncState>(&text) {
+            state.sync_on_startup = latest.sync_on_startup;
+            state.startup_sync_consent_version = latest.startup_sync_consent_version;
+            state.scheduled_enabled = latest.scheduled_enabled;
+            state.interval_minutes = latest.interval_minutes;
+            state.lookback_days = AUTO_SYNC_LOOKBACK_DAYS;
+            state.startup_shop_ids = latest.startup_shop_ids;
+            state.manual_shop_ids = latest.manual_shop_ids;
+        }
+    }
+    write_auto_sync_state_unlocked(data_dir, state)
 }
 
 fn sync_one_shop_all(range: DateRange, force: bool, state: &AppState) -> SyncAllResult {
@@ -8166,7 +8574,12 @@ impl Drop for AutoSyncRunningGuard {
     }
 }
 
-fn run_all_shops_sync(data_dir: &Path, force: bool) -> Result<AutoSyncState, String> {
+fn run_all_shops_sync(
+    data_dir: &Path,
+    force: bool,
+    selection_kind: &str,
+    requested_shop_ids: Vec<String>,
+) -> Result<AutoSyncState, String> {
     if AUTO_SYNC_RUNNING.swap(true, Ordering::SeqCst) {
         return Err("所有店铺数据同步已在运行，请勿重复启动".into());
     }
@@ -8181,12 +8594,27 @@ fn run_all_shops_sync(data_dir: &Path, force: bool) -> Result<AutoSyncState, Str
 
     let registry = read_registry(data_dir)?;
     let today = chrono::Local::now().date_naive();
-    let from = today - chrono::Duration::days(state.lookback_days.saturating_sub(1));
+    let from = today - chrono::Duration::days(AUTO_SYNC_LOOKBACK_DAYS - 1);
     let range = DateRange {
         from: from.format("%Y-%m-%d").to_string(),
         to: today.format("%Y-%m-%d").to_string(),
     };
-    for shop in registry.shops {
+    let selected_ids = match selection_kind {
+        "startup" => state.startup_shop_ids.iter().cloned().collect(),
+        "manual" => requested_shop_ids.into_iter().collect(),
+        _ => std::collections::HashSet::new(),
+    };
+    let selected_shops = registry
+        .shops
+        .into_iter()
+        .filter(|shop| {
+            selection_kind == "all" || selected_ids.contains(&shop.id)
+        })
+        .collect::<Vec<_>>();
+    if selected_shops.is_empty() {
+        return Err("请至少选择一家有效店铺进行同步".into());
+    }
+    for shop in selected_shops {
         let shop_state = AppState {
             data_dir: data_dir.to_path_buf(),
             active_shop_id: Mutex::new(shop.id.clone()),
@@ -8214,7 +8642,7 @@ fn run_all_shops_sync(data_dir: &Path, force: bool) -> Result<AutoSyncState, Str
             finance_rows: result.finance_rows,
         });
         // Keep the status file useful even when the process exits during a long multi-shop run.
-        write_auto_sync_state(data_dir, &state)?;
+        preserve_latest_auto_sync_settings_and_write(data_dir, &mut state)?;
     }
     let successes = state.shop_results.iter().filter(|row| row.status == "success").count();
     state.last_finished_at = chrono::Local::now().to_rfc3339();
@@ -8227,10 +8655,15 @@ fn run_all_shops_sync(data_dir: &Path, force: bool) -> Result<AutoSyncState, Str
     }
     .into();
     state.last_message = format!(
-        "全店同步完成：成功 {successes} 家，失败 {} 家；范围 {} 至 {}",
+        "{}同步完成：成功 {successes} 家，失败 {} 家；范围 {} 至 {}",
+        match selection_kind {
+            "startup" => "启动店铺",
+            "manual" => "手动选择店铺",
+            _ => "全店",
+        },
         state.shop_results.len().saturating_sub(successes), range.from, range.to
     );
-    write_auto_sync_state(data_dir, &state)?;
+    preserve_latest_auto_sync_settings_and_write(data_dir, &mut state)?;
     Ok(state)
 }
 
@@ -8262,11 +8695,12 @@ fn start_auto_sync_worker(data_dir: PathBuf) {
         let mut first_check = true;
         loop {
             let state = read_auto_sync_state(&data_dir);
-            let should_run = (first_check && state.sync_on_startup)
-                || auto_sync_is_due(&state, chrono::Utc::now());
+            let startup_run = first_check && state.sync_on_startup;
+            let should_run = startup_run || auto_sync_is_due(&state, chrono::Utc::now());
             first_check = false;
             if should_run {
-                let _ = run_all_shops_sync(&data_dir, false);
+                let kind = if startup_run { "startup" } else { "all" };
+                let _ = run_all_shops_sync(&data_dir, false, kind, Vec::new());
             }
             std::thread::sleep(std::time::Duration::from_secs(60));
         }
@@ -8286,24 +8720,54 @@ fn save_auto_sync_settings(
     if !(15..=1440).contains(&settings.interval_minutes) {
         return Err("自动同步间隔必须在 15 至 1440 分钟之间".into());
     }
-    if !(1..=90).contains(&settings.lookback_days) {
-        return Err("自动同步回溯天数必须在 1 至 90 天之间".into());
-    }
     let mut current = read_auto_sync_state(&state.data_dir);
     current.sync_on_startup = settings.sync_on_startup;
     current.scheduled_enabled = settings.scheduled_enabled;
     current.interval_minutes = settings.interval_minutes;
-    current.lookback_days = settings.lookback_days;
+    let available = current
+        .available_shops
+        .iter()
+        .map(|shop| shop.shop_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut selected = settings
+        .startup_shop_ids
+        .into_iter()
+        .filter(|shop_id| available.contains(shop_id.as_str()))
+        .collect::<Vec<_>>();
+    selected.sort();
+    selected.dedup();
+    if current.sync_on_startup && selected.is_empty() {
+        return Err("已开启启动同步，请至少选择一家店铺".into());
+    }
+    current.startup_shop_ids = selected;
+    let mut manual_selected = settings
+        .manual_shop_ids
+        .into_iter()
+        .filter(|shop_id| available.contains(shop_id.as_str()))
+        .collect::<Vec<_>>();
+    manual_selected.sort();
+    manual_selected.dedup();
+    if manual_selected.is_empty() {
+        return Err("手动同步请至少选择一家店铺".into());
+    }
+    current.manual_shop_ids = manual_selected;
+    current.lookback_days = AUTO_SYNC_LOOKBACK_DAYS;
     write_auto_sync_state(&state.data_dir, &current)?;
     Ok(current)
 }
 
 #[tauri::command]
-async fn sync_all_shops(force: bool, state: State<'_, AppState>) -> Result<AutoSyncState, String> {
+async fn sync_all_shops(
+    force: bool,
+    shop_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<AutoSyncState, String> {
     let data_dir = state.data_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || run_all_shops_sync(&data_dir, force))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        run_all_shops_sync(&data_dir, force, "manual", shop_ids)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -9481,6 +9945,372 @@ async fn supply_orders(state: State<'_, AppState>) -> Result<Vec<SupplyOrderRow>
         .map_err(|e| format!("读取供应单后台任务失败：{e}"))?
 }
 
+fn supply_json_i64(value: Option<&serde_json::Value>) -> i64 {
+    value
+        .and_then(|v| v.as_i64())
+        .or_else(|| value.and_then(|v| v.as_str()?.parse().ok()))
+        .unwrap_or(0)
+}
+
+fn supply_identifier(value: Option<&serde_json::Value>) -> String {
+    value.map(|v| match v {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Number(number) => number.to_string(),
+        _ => String::new(),
+    }).unwrap_or_default()
+}
+
+fn register_cargo_mark(
+    cargo: &serde_json::Value,
+    target: &mut std::collections::BTreeMap<String, Vec<String>>,
+) {
+    let bundle = supply_identifier(cargo.get("bundle_id"));
+    let barcode = supply_identifier(cargo.get("barcode"));
+    let cargo_id = supply_identifier(cargo.get("cargo_id"));
+    let mark = if !barcode.is_empty() { barcode } else { cargo_id };
+    if !bundle.is_empty() && !mark.is_empty() {
+        let marks = target.entry(bundle).or_default();
+        if !marks.contains(&mark) { marks.push(mark); }
+    }
+}
+
+#[cfg(test)]
+mod supply_item_tests {
+    use super::{register_cargo_mark, supply_identifier, write_supply_cargo_xlsx, SupplyOrderItemRow};
+    use std::collections::BTreeMap;
+    use std::io::Read;
+
+    #[test]
+    fn numeric_sku_and_cargo_id_are_preserved() {
+        let item = serde_json::json!({"sku": 2550136857_i64});
+        assert_eq!(supply_identifier(item.get("sku")), "2550136857");
+        let cargo = serde_json::json!({"bundle_id":"bundle-1","cargo_id":4070});
+        let mut marks = BTreeMap::new();
+        register_cargo_mark(&cargo, &mut marks);
+        assert_eq!(marks["bundle-1"], vec!["4070"]);
+    }
+
+    #[test]
+    fn printed_barcode_has_priority_over_internal_cargo_id() {
+        let cargo = serde_json::json!({"bundle_id":"bundle-1","cargo_id":4070,"barcode":"OZN-BOX-4070"});
+        let mut marks = BTreeMap::new();
+        register_cargo_mark(&cargo, &mut marks);
+        assert_eq!(marks["bundle-1"], vec!["OZN-BOX-4070"]);
+    }
+
+    #[test]
+    fn cargo_export_flattens_each_mark_and_keeps_identifiers_as_text() {
+        let path = std::env::temp_dir().join(format!("cargo-export-{}.xlsx", std::process::id()));
+        let rows = vec![SupplyOrderItemRow {
+            product_name: "测试商品".into(), sku: "02550136857".into(), offer_id: "GJYB001-YELLOW".into(),
+            cargo_marks: vec!["箱唛A".into(), "箱唛B".into()], quantity: 20,
+        }];
+        assert_eq!(write_supply_cargo_xlsx(&path, "TEST-1", &rows).unwrap(), 2);
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut xml = String::new();
+        archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut xml).unwrap();
+        assert!(xml.contains("GJYB001-YELLOW"));
+        assert!(xml.contains("02550136857"));
+        assert!(xml.contains("箱唛A") && xml.contains("箱唛B"));
+        assert!(xml.contains(r#"r="C4" t="inlineStr"#));
+        drop(archive);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn supply_bundle_items(c: &Connection, bundle_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let mut rows = Vec::new();
+    let mut last_id = String::new();
+    for _ in 0..50 {
+        let payload = seller_post(c, "/v1/supply-order/bundle", &serde_json::json!({
+            "bundle_ids":[bundle_id], "is_asc":true, "last_id":last_id,
+            "limit":100, "query":"", "sort_field":"UNSPECIFIED"
+        }))?;
+        let page = payload.get("items").or_else(|| payload.pointer("/result/items"))
+            .and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let next = json_text(payload.get("last_id").or_else(|| payload.pointer("/result/last_id")));
+        let has_next = payload.get("has_next").or_else(|| payload.pointer("/result/has_next"))
+            .and_then(|v| v.as_bool()).unwrap_or(false);
+        rows.extend(page.iter().cloned());
+        if page.is_empty() || !has_next || next.is_empty() || next == last_id { break; }
+        last_id = next;
+    }
+    Ok(rows)
+}
+
+fn supply_order_items_blocking(order_id: i64, refresh: bool, state: &AppState) -> Result<SupplyOrderItemsResult, String> {
+    if order_id <= 0 { return Err("供应单 ID 无效".into()); }
+    let set_progress = |status: &str, total: usize, completed: usize, stage: &str, message: &str| {
+        if let Ok(mut all) = SUPPLY_ITEM_PROGRESS.lock() {
+            all.insert(order_id, SupplyOrderItemsProgress {
+                status: status.into(), total, completed, stage: stage.into(), message: message.into(),
+            });
+        }
+    };
+    set_progress("running", 1, 0, "order", "正在读取供应单信息");
+    let c = db(state)?;
+    c.execute_batch("CREATE TABLE IF NOT EXISTS supply_order_item_cache(order_id INTEGER PRIMARY KEY,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e| e.to_string())?;
+    if !refresh {
+        if let Ok((payload, cached_at)) = c.query_row(
+            "SELECT payload,updated_at FROM supply_order_item_cache WHERE order_id=?1",
+            [order_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?)),
+        ) {
+            if let Ok(rows) = serde_json::from_str::<Vec<SupplyOrderItemRow>>(&payload) {
+                set_progress("cached", 1, 1, "cache", "已从当前店铺缓存读取");
+                return Ok(SupplyOrderItemsResult { rows, warning: String::new(), from_cache: true, cached_at });
+            }
+        }
+    }
+    let order_payload = seller_post(&c, "/v3/supply-order/get", &serde_json::json!({"order_ids":[order_id]}))?;
+    let order = order_payload.get("orders").and_then(|v| v.as_array()).and_then(|v| v.first())
+        .ok_or_else(|| format!("供应单 {order_id} 不存在或无权读取"))?;
+    let supplies = order.get("supplies").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let supply_ids: Vec<i64> = supplies.iter().map(|v| supply_json_i64(v.get("supply_id"))).filter(|v| *v > 0).collect();
+    let main_bundles: Vec<String> = supplies.iter().map(|v| supply_identifier(v.get("bundle_id"))).filter(|v| !v.is_empty()).collect();
+    let mut progress_total = 2 + main_bundles.len();
+    let mut progress_done = 1;
+    set_progress("running", progress_total, progress_done, "cargo", "正在读取箱唛与货位信息");
+
+    let mut cargo_by_bundle: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut warning = String::new();
+    if !supply_ids.is_empty() {
+        match seller_post(&c, "/v1/cargoes/supplies/get", &serde_json::json!({"supply_ids":supply_ids})) {
+            Ok(payload) => {
+                let cargo_supplies = payload.get("supplies_cargoes").or_else(|| payload.pointer("/result/supplies_cargoes"))
+                    .and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                for supply in cargo_supplies {
+                    for cargo in supply.get("cargoes_without_transport_cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
+                        register_cargo_mark(cargo, &mut cargo_by_bundle);
+                    }
+                    for transport in supply.get("transport_cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
+                        for cargo in transport.get("cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
+                            register_cargo_mark(cargo, &mut cargo_by_bundle);
+                        }
+                    }
+                }
+            }
+            Err(new_error) => match seller_post(&c, "/v1/cargoes/get", &serde_json::json!({"supply_ids":supply_ids})) {
+                Ok(payload) => {
+                    for supply in payload.get("supply").or_else(|| payload.pointer("/result/supply"))
+                        .and_then(|v| v.as_array()).into_iter().flatten() {
+                        for cargo in supply.get("cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
+                            register_cargo_mark(cargo, &mut cargo_by_bundle);
+                        }
+                    }
+                }
+                Err(old_error) => warning = format!("货品已读取，但箱唛读取失败：新版接口：{new_error}；兼容接口：{old_error}"),
+            },
+        }
+    }
+
+    let mut cargo_by_sku: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    progress_total += cargo_by_bundle.len();
+    progress_done += 1;
+    set_progress("running", progress_total, progress_done, "cargo_items", "正在关联箱唛与商品");
+    for (bundle, marks) in &cargo_by_bundle {
+        for item in supply_bundle_items(&c, bundle)? {
+            let sku = supply_identifier(item.get("sku"));
+            if !sku.is_empty() {
+                let target = cargo_by_sku.entry(sku).or_default();
+                for mark in marks { if !target.contains(mark) { target.push(mark.clone()); } }
+            }
+        }
+        progress_done += 1;
+        set_progress("running", progress_total, progress_done, "cargo_items", &format!("已关联 {progress_done}/{progress_total} 个步骤"));
+    }
+    let mut merged: std::collections::BTreeMap<String, SupplyOrderItemRow> = std::collections::BTreeMap::new();
+    for bundle in main_bundles {
+        set_progress("running", progress_total, progress_done, "products", "正在读取供应商品明细");
+        for item in supply_bundle_items(&c, &bundle)? {
+            let sku = supply_identifier(item.get("sku"));
+            let offer_id = {
+                let direct = supply_identifier(item.get("offer_id"));
+                if direct.is_empty() { supply_identifier(item.get("contractor_item_code")) } else { direct }
+            }.trim().to_string();
+            let key = if !sku.is_empty() { sku.clone() } else { offer_id.clone() };
+            if key.is_empty() { continue; }
+            let quantity = supply_json_i64(item.get("quantity")).max(supply_json_i64(item.get("quant")));
+            let row = merged.entry(key).or_insert_with(|| SupplyOrderItemRow {
+                product_name: json_text(item.get("name")), sku: sku.clone(), offer_id: offer_id.clone(),
+                cargo_marks: cargo_by_sku.get(&sku).cloned().unwrap_or_default(), quantity: 0,
+            });
+            row.quantity += quantity;
+            for mark in cargo_by_sku.get(&sku).into_iter().flatten() {
+                if !row.cargo_marks.contains(mark) { row.cargo_marks.push(mark.clone()); }
+            }
+        }
+        progress_done += 1;
+        set_progress("running", progress_total, progress_done, "products", &format!("已读取 {progress_done}/{progress_total} 个步骤"));
+    }
+    let mut rows: Vec<_> = merged.into_values().collect();
+    for row in &mut rows {
+        if let Ok((offer, name)) = c.query_row("SELECT offer_id,name FROM products WHERE sku=?1", [&row.sku], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?))) {
+            if row.offer_id.is_empty() { row.offer_id = offer; }
+            if row.product_name.is_empty() { row.product_name = name; }
+        }
+        row.cargo_marks.sort();
+    }
+    rows.sort_by(|a,b| a.offer_id.cmp(&b.offer_id).then(a.sku.cmp(&b.sku)));
+    let payload = serde_json::to_string(&rows).map_err(|e| e.to_string())?;
+    c.execute("INSERT INTO supply_order_item_cache(order_id,payload,updated_at) VALUES(?1,?2,CURRENT_TIMESTAMP) ON CONFLICT(order_id) DO UPDATE SET payload=excluded.payload,updated_at=CURRENT_TIMESTAMP", params![order_id,payload]).map_err(|e|e.to_string())?;
+    let cached_at = c.query_row("SELECT updated_at FROM supply_order_item_cache WHERE order_id=?1", [order_id], |row| row.get(0)).unwrap_or_default();
+    set_progress("success", progress_total, progress_total, "complete", &format!("读取完成，共 {} 个商品", rows.len()));
+    Ok(SupplyOrderItemsResult { rows, warning, from_cache: false, cached_at })
+}
+
+#[tauri::command]
+async fn supply_order_items(order_id: i64, refresh: bool, state: State<'_, AppState>) -> Result<SupplyOrderItemsResult, String> {
+    let owned = background_state(&state)?;
+    let result = tauri::async_runtime::spawn_blocking(move || supply_order_items_blocking(order_id, refresh, &owned))
+        .await.map_err(|e| format!("读取供应单货品后台任务失败：{e}"))?;
+    if let Err(error) = &result {
+        if let Ok(mut all) = SUPPLY_ITEM_PROGRESS.lock() {
+            all.insert(order_id, SupplyOrderItemsProgress { status:"failed".into(), total:1, completed:0, stage:"error".into(), message:error.clone() });
+        }
+    }
+    result
+}
+
+#[tauri::command]
+fn supply_order_items_progress(order_id: i64) -> SupplyOrderItemsProgress {
+    SUPPLY_ITEM_PROGRESS.lock().ok().and_then(|all| all.get(&order_id).cloned()).unwrap_or_default()
+}
+
+fn supply_export_xml(value: &str) -> String {
+    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn supply_export_cell(reference: &str, value: &str, style: u8) -> String {
+    format!(r#"<c r="{reference}" t="inlineStr" s="{style}"><is><t xml:space="preserve">{}</t></is></c>"#, supply_export_xml(value))
+}
+
+fn write_supply_cargo_xlsx(path: &Path, order_label: &str, rows: &[SupplyOrderItemRow]) -> Result<usize, String> {
+    let mut body = String::new();
+    let headers = ["物流箱唛", "物流箱号", "Ozon 货号", "Ozon SKU", "箱唛"];
+    let columns = ["A", "B", "C", "D", "E"];
+    let header_cells = headers.iter().enumerate().map(|(i, value)| supply_export_cell(&format!("{}3", columns[i]), value, 2)).collect::<String>();
+    body.push_str(&format!(r#"<row r="1" ht="28" customHeight="1">{}</row>"#, supply_export_cell("A1", &format!("Ozon 箱唛导出 · {order_label}"), 1)));
+    body.push_str(&format!(r#"<row r="2" ht="22" customHeight="1">{}</row>"#, supply_export_cell("A2", "前两列留空供物流商填写；每个箱唛单独一行。", 3)));
+    body.push_str(&format!(r#"<row r="3" ht="26" customHeight="1">{header_cells}</row>"#));
+    let mut output_rows = 0usize;
+    for item in rows {
+        let marks: Vec<&str> = if item.cargo_marks.is_empty() { vec![""] } else { item.cargo_marks.iter().map(String::as_str).collect() };
+        for mark in marks {
+            output_rows += 1;
+            let row = output_rows + 3;
+            let cells = [
+                supply_export_cell(&format!("A{row}"), "", 4),
+                supply_export_cell(&format!("B{row}"), "", 4),
+                supply_export_cell(&format!("C{row}"), &item.offer_id, 5),
+                supply_export_cell(&format!("D{row}"), &item.sku, 5),
+                supply_export_cell(&format!("E{row}"), mark, 5),
+            ].concat();
+            body.push_str(&format!(r#"<row r="{row}" ht="23" customHeight="1">{cells}</row>"#));
+        }
+    }
+    let last = (output_rows + 3).max(3);
+    let sheet = format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="2" width="20" customWidth="1"/><col min="3" max="4" width="25" customWidth="1"/><col min="5" max="5" width="34" customWidth="1"/></cols><sheetData>{body}</sheetData><autoFilter ref="A3:E{last}"/><mergeCells count="2"><mergeCell ref="A1:E1"/><mergeCell ref="A2:E2"/></mergeCells><pageMargins left="0.3" right="0.3" top="0.5" bottom="0.5" header="0.2" footer="0.2"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>"#);
+    let styles = r#"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font><sz val="10"/><name val="Microsoft YaHei"/></font><font><b/><sz val="16"/><color rgb="FF102A56"/><name val="Microsoft YaHei"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Microsoft YaHei"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF17365D"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEAF2F8"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFD9E2F3"/></left><right style="thin"><color rgb="FFD9E2F3"/></right><top style="thin"><color rgb="FFD9E2F3"/></top><bottom style="thin"><color rgb="FFD9E2F3"/></bottom></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0"/><xf numFmtId="0" fontId="2" fillId="2" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="0" fillId="4" borderId="0"/><xf numFmtId="0" fontId="0" fillId="3" borderId="1" applyAlignment="1"><alignment vertical="center"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" applyAlignment="1"><alignment vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#;
+    let mut zip = zip::ZipWriter::new(fs::File::create(path).map_err(|e| e.to_string())?);
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (name, data) in [
+        ("[Content_Types].xml", r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>"#),
+        ("_rels/.rels", r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#),
+        ("xl/workbook.xml", r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="箱唛明细" sheetId="1" r:id="rId1"/></sheets></workbook>"#),
+        ("xl/_rels/workbook.xml.rels", r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#),
+        ("xl/styles.xml", styles),
+        ("xl/worksheets/sheet1.xml", sheet.as_str()),
+    ] {
+        zip.start_file(name, options).map_err(|e| e.to_string())?;
+        zip.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(output_rows)
+}
+
+#[tauri::command]
+async fn export_supply_cargo_marks(order_id: i64, state: State<'_, AppState>) -> Result<String, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = supply_order_items_blocking(order_id, false, &owned)?;
+        if result.rows.is_empty() { return Err("该供应单没有可导出的货品".into()); }
+        let dir = owned.data_dir.parent().unwrap_or(&owned.data_dir).join("exports").join("supply-cargo-marks");
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join(format!("箱唛明细-供应单-{order_id}.xlsx"));
+        let count = write_supply_cargo_xlsx(&path, &order_id.to_string(), &result.rows)?;
+        open::that(&path).map_err(|e| format!("Excel 已生成，但打开失败：{e}"))?;
+        Ok(format!("已导出 {count} 行箱唛明细：{}", path.display()))
+    }).await.map_err(|e| format!("导出箱唛后台任务失败：{e}"))?
+}
+
+fn supply_cargo_ids(c: &Connection, order_id: i64) -> Result<Vec<(i64, Vec<i64>)>, String> {
+    let order_payload = seller_post(c, "/v3/supply-order/get", &serde_json::json!({"order_ids":[order_id]}))?;
+    let order = order_payload.get("orders").and_then(|v| v.as_array()).and_then(|v| v.first()).ok_or_else(|| format!("供应单 {order_id} 不存在或无权读取"))?;
+    let supply_ids: Vec<i64> = order.get("supplies").and_then(|v| v.as_array()).into_iter().flatten().map(|v| supply_json_i64(v.get("supply_id"))).filter(|v| *v > 0).collect();
+    if supply_ids.is_empty() { return Err("该供应单没有可下载箱唛的供应 ID".into()); }
+    let payload = seller_post(c, "/v1/cargoes/supplies/get", &serde_json::json!({"supply_ids":supply_ids}))?;
+    let mut grouped = Vec::new();
+    for supply in payload.get("supplies_cargoes").or_else(|| payload.pointer("/result/supplies_cargoes")).and_then(|v| v.as_array()).into_iter().flatten() {
+        let supply_id = supply_json_i64(supply.get("supply_id"));
+        let mut ids = Vec::new();
+        for cargo in supply.get("cargoes_without_transport_cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
+            let id = supply_json_i64(cargo.get("cargo_id")); if id > 0 && !ids.contains(&id) { ids.push(id); }
+        }
+        for transport in supply.get("transport_cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
+            for cargo in transport.get("cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
+                let id = supply_json_i64(cargo.get("cargo_id")); if id > 0 && !ids.contains(&id) { ids.push(id); }
+            }
+        }
+        if supply_id > 0 && !ids.is_empty() { grouped.push((supply_id, ids)); }
+    }
+    if grouped.is_empty() { Err("Ozon 尚未为该供应单生成可下载的箱唛".into()) } else { Ok(grouped) }
+}
+
+#[tauri::command]
+async fn download_supply_cargo_labels(order_id: i64, state: State<'_, AppState>) -> Result<String, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let c = db(&owned)?;
+        let grouped = supply_cargo_ids(&c, order_id)?;
+        let cargo_count: usize = grouped.iter().map(|(_, ids)| ids.len()).sum();
+        let mut operations = Vec::new();
+        for (supply_id, ids) in &grouped {
+            let cargoes = ids.iter().map(|cargo_id| serde_json::json!({"cargo_id":cargo_id})).collect::<Vec<_>>();
+            let payload = seller_post(&c, "/v1/cargoes-label/create", &serde_json::json!({"supply_id":supply_id,"cargoes":cargoes}))?;
+            let operation_id = supply_identifier(payload.get("operation_id").or_else(|| payload.pointer("/result/operation_id")));
+            if operation_id.is_empty() { return Err(format!("供应 {supply_id} 创建箱唛文件失败：Ozon 未返回 operation_id")); }
+            operations.push((*supply_id, operation_id));
+        }
+        let mut ready: std::collections::BTreeMap<i64, String> = std::collections::BTreeMap::new();
+        for _ in 0..60 {
+            for (supply_id, operation_id) in &operations {
+                if ready.contains_key(supply_id) { continue; }
+                let payload = seller_post(&c, "/v1/cargoes-label/get", &serde_json::json!({"operation_id":operation_id}))?;
+                let status = json_text(payload.get("status").or_else(|| payload.pointer("/result/status"))).to_ascii_uppercase();
+                if status == "FAILED" { return Err(format!("供应 {supply_id} 的箱唛文件生成失败")); }
+                let url = json_text(payload.get("file_url").or_else(|| payload.pointer("/result/file_url")));
+                if status == "SUCCESS" && !url.is_empty() { ready.insert(*supply_id, url); }
+            }
+            if ready.len() == operations.len() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if ready.len() != operations.len() { return Err(format!("Ozon 箱唛文件生成超时：已完成 {}/{} 个供应，请稍后重试", ready.len(), operations.len())); }
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let dir = owned.data_dir.parent().unwrap_or(&owned.data_dir).join("exports").join(format!("箱唛文件-供应单-{order_id}-{stamp}"));
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        for (supply_id, url) in ready {
+            if !url.starts_with("https://") { return Err(format!("供应 {supply_id} 返回了不安全的下载地址")); }
+            let response = ureq::get(&url).timeout(std::time::Duration::from_secs(30)).call().map_err(|e| format!("供应 {supply_id} 下载失败：{e}"))?;
+            let mut bytes = Vec::new();
+            response.into_reader().take(50 * 1024 * 1024).read_to_end(&mut bytes).map_err(|e| format!("供应 {supply_id} 读取文件失败：{e}"))?;
+            if !bytes.starts_with(b"%PDF-") { return Err(format!("供应 {supply_id} 返回的文件不是有效 PDF")); }
+            fs::write(dir.join(format!("Ozon箱唛-供应-{supply_id}.pdf")), bytes).map_err(|e| e.to_string())?;
+        }
+        open::that(&dir).map_err(|e| format!("箱唛已下载，但打开文件夹失败：{e}"))?;
+        Ok(format!("已下载 {} 个 PDF，共 {cargo_count} 个箱唛：{}", operations.len(), dir.display()))
+    }).await.map_err(|e| format!("下载箱唛后台任务失败：{e}"))?
+}
+
 fn supply_timeslots_blocking(
     order_id: i64,
     date_from: String,
@@ -10252,15 +11082,90 @@ mod cross_border_display_tests {
 
 #[cfg(test)]
 mod auto_sync_tests {
-    use super::{auto_sync_is_due, AutoSyncState};
+    use super::{
+        auto_sync_is_due, preserve_latest_auto_sync_settings_and_write,
+        read_auto_sync_state, write_auto_sync_state, AutoSyncState,
+    };
 
     #[test]
-    fn defaults_enable_startup_without_enabling_schedule() {
+    fn defaults_disable_startup_and_schedule_until_configured() {
         let state = AutoSyncState::default();
-        assert!(state.sync_on_startup);
+        assert!(!state.sync_on_startup);
         assert!(!state.scheduled_enabled);
         assert_eq!(state.interval_minutes, 60);
-        assert_eq!(state.lookback_days, 30);
+        assert_eq!(state.lookback_days, 7);
+    }
+
+    #[test]
+    fn legacy_startup_sync_is_disabled_once_until_user_opts_in_again() {
+        let dir = std::env::temp_dir().join(format!(
+            "ozon-auto-sync-consent-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saved = AutoSyncState::default();
+        saved.sync_on_startup = true;
+        saved.startup_sync_consent_version = None;
+        std::fs::write(
+            dir.join("auto-sync.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        let migrated = read_auto_sync_state(&dir);
+        assert!(!migrated.sync_on_startup);
+        assert_eq!(migrated.startup_sync_consent_version, Some(1));
+
+        let mut opted_in = migrated;
+        opted_in.sync_on_startup = true;
+        super::write_auto_sync_state(&dir, &opted_in).unwrap();
+        assert!(read_auto_sync_state(&dir).sync_on_startup);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stale_sync_status_cannot_overwrite_newly_saved_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "ozon-auto-sync-race-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saved = AutoSyncState::default();
+        saved.startup_sync_consent_version = Some(1);
+        saved.sync_on_startup = true;
+        saved.startup_shop_ids = vec!["shop-a".into()];
+        saved.manual_shop_ids = vec!["shop-b".into()];
+        write_auto_sync_state(&dir, &saved).unwrap();
+
+        let mut stale_worker = AutoSyncState::default();
+        stale_worker.startup_sync_consent_version = Some(1);
+        stale_worker.last_status = "success".into();
+        preserve_latest_auto_sync_settings_and_write(&dir, &mut stale_worker).unwrap();
+        let result = read_auto_sync_state(&dir);
+        assert!(result.sync_on_startup);
+        assert_eq!(result.startup_shop_ids, vec!["shop-a"]);
+        assert_eq!(result.manual_shop_ids, vec!["shop-b"]);
+        assert_eq!(result.last_status, "success");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn interrupted_run_is_not_left_permanently_running() {
+        let dir = std::env::temp_dir().join(format!(
+            "ozon-auto-sync-interrupted-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saved = AutoSyncState::default();
+        saved.startup_sync_consent_version = Some(1);
+        saved.last_status = "running".into();
+        write_auto_sync_state(&dir, &saved).unwrap();
+        let result = read_auto_sync_state(&dir);
+        assert_eq!(result.last_status, "failed");
+        assert!(result.last_message.contains("中断"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -10283,6 +11188,50 @@ mod auto_sync_tests {
         state.last_status = "running".into();
         state.last_started_at = (now - chrono::Duration::minutes(61)).to_rfc3339();
         assert!(auto_sync_is_due(&state, now));
+    }
+
+    #[test]
+    fn older_saved_lookback_is_normalized_to_seven_days() {
+        let dir = std::env::temp_dir().join(format!(
+            "ozon-auto-sync-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut saved = AutoSyncState::default();
+        saved.lookback_days = 90;
+        std::fs::write(
+            dir.join("auto-sync.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_auto_sync_state(&dir).lookback_days, 7);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_settings_select_all_registered_startup_shops() {
+        let dir = std::env::temp_dir().join(format!(
+            "ozon-auto-sync-shops-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shops.json"),
+            r#"{"active_shop_id":"a","shops":[{"id":"a","name":"A 店","kind":"local","database_file":"a.db"},{"id":"b","name":"B 店","kind":"cross_border","database_file":"b.db"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("auto-sync.json"),
+            serde_json::to_vec(&AutoSyncState::default()).unwrap(),
+        )
+        .unwrap();
+        let state = read_auto_sync_state(&dir);
+        assert_eq!(state.available_shops.len(), 2);
+        assert_eq!(state.startup_shop_ids, vec!["a", "b"]);
+        assert_eq!(state.manual_shop_ids, vec!["a", "b"]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -10382,6 +11331,10 @@ pub fn run() {
             prune_cache,
             missing_cost_rows,
             supply_orders,
+            supply_order_items,
+            supply_order_items_progress,
+            export_supply_cargo_marks,
+            download_supply_cargo_labels,
             supply_cluster_plans,
             save_supply_cluster_plan,
             supply_timeslots,

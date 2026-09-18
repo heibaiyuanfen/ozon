@@ -430,11 +430,18 @@ export interface AutoSyncShopResult {
   performanceRows: number | null;
   financeRows: number | null;
 }
+export interface AutoSyncShopOption {
+  shopId: string;
+  shopName: string;
+}
 export interface AutoSyncState {
   syncOnStartup: boolean;
   scheduledEnabled: boolean;
   intervalMinutes: number;
   lookbackDays: number;
+  startupShopIds: string[];
+  manualShopIds: string[];
+  availableShops: AutoSyncShopOption[];
   lastStartedAt: string;
   lastFinishedAt: string;
   lastStatus: string;
@@ -445,7 +452,8 @@ export interface AutoSyncSettingsInput {
   syncOnStartup: boolean;
   scheduledEnabled: boolean;
   intervalMinutes: number;
-  lookbackDays: number;
+  startupShopIds: string[];
+  manualShopIds: string[];
 }
 export interface BusinessReport {
   revenue: number;
@@ -868,6 +876,26 @@ export interface SupplyOrder {
   storageWarehouses: string;
   supplyStates: string;
   suppliesCount: number;
+}
+export interface SupplyOrderItem {
+  productName: string;
+  sku: string;
+  offerId: string;
+  cargoMarks: string[];
+  quantity: number;
+}
+export interface SupplyOrderItemsResult {
+  rows: SupplyOrderItem[];
+  warning: string;
+  fromCache: boolean;
+  cachedAt: string;
+}
+export interface SupplyOrderItemsProgress {
+  status: string;
+  total: number;
+  completed: number;
+  stage: string;
+  message: string;
 }
 export interface SupplyTimeslot {
   from: string;
