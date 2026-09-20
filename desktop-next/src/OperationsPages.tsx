@@ -2,6 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import "./analytics.css";
 import "./listing.css";
 import { displayTime } from "./time";
+import { ozonClusterZh } from "./ozon-clusters";
+import {
+  officialCrossdockEstimate,
+  officialLogisticsTariff,
+  OZON_LOGISTICS_TARIFF_META,
+} from "./ozon-tariffs";
 import * as echarts from "./charts";
 import {
   AlertTriangle,
@@ -29,6 +35,11 @@ import {
   bookSupplyTimeslot,
   supplyClusterPlans,
   saveSupplyClusterPlan,
+  searchSupplyDropoffs,
+  createSupplyWorkflowDrafts,
+  supplyWorkflowDraftStatus,
+  supplyWorkflowDraftTimeslots,
+  createSupplyFromWorkflowDraft,
   businessReport,
   crossBorderReport,
   calculateListingPrice,
@@ -157,6 +168,9 @@ import type {
   SupplyOrderItemsProgress,
   SupplyClusterPlan,
   SupplyTimeslot,
+  SupplyDropoffOption,
+  SupplyDraftCreated,
+  SupplyDraftStatus,
   SyncLog,
   AutoSyncState,
   WarehouseMapping,
@@ -3949,8 +3963,34 @@ export function SupplyPage() {
     [planQuery, setPlanQuery] = useState(""),
     [targetDays, setTargetDays] = useState(30),
     [planDrafts, setPlanDrafts] = useState<Record<string, string>>({}),
-    [chosenPlan, setChosenPlan] = useState<SupplyClusterPlan | null>(null),
-    [supplyMode, setSupplyMode] = useState<"CROSSDOCK" | "DIRECT">("CROSSDOCK"),
+    [costSku, setCostSku] = useState(""),
+    [sellingPriceRub, setSellingPriceRub] = useState(""),
+    [showCostCalculator, setShowCostCalculator] = useState(false),
+    [workflowMode, setWorkflowMode] = useState<"DIRECT" | "CROSSDOCK">("DIRECT"),
+    [workflowCart, setWorkflowCart] = useState<Record<string, SupplyClusterPlan>>({}),
+    [savedWorkflowDrafts, setSavedWorkflowDrafts] = useState<Array<{
+      id: string;
+      name: string;
+      savedAt: string;
+      mode: "DIRECT" | "CROSSDOCK";
+      plans: SupplyClusterPlan[];
+      quantities: Record<string, string>;
+      crossdockAddress: string;
+      selectedDropoffId: number | null;
+    }>>([]),
+    [directAddress] = useState("莫斯科（Ozon 系统分配目的仓）"),
+    [crossdockAddress, setCrossdockAddress] = useState(""),
+    [dropoffOptions, setDropoffOptions] = useState<SupplyDropoffOption[]>([]),
+    [selectedDropoffId, setSelectedDropoffId] = useState<number | null>(null),
+    [createdDrafts, setCreatedDrafts] = useState<SupplyDraftCreated[]>([]),
+    [draftStatuses, setDraftStatuses] = useState<SupplyDraftStatus[]>([]),
+    [draftSlots, setDraftSlots] = useState<Record<number, SupplyTimeslot[]>>({}),
+    [draftSlotMessages, setDraftSlotMessages] = useState<Record<number, string>>({}),
+    [monitorEnabled, setMonitorEnabled] = useState(false),
+    [monitorMinutes, setMonitorMinutes] = useState<30 | 60>(30),
+    [monitorTarget, setMonitorTarget] = useState(""),
+    [monitorStatus, setMonitorStatus] = useState("尚未开启时段监控"),
+    [lastMonitorAt, setLastMonitorAt] = useState(""),
     [selected, setSelected] = useState<SupplyOrder | null>(null),
     [itemOrder, setItemOrder] = useState<SupplyOrder | null>(null),
     [orderItems, setOrderItems] = useState<SupplyOrderItem[]>([]),
@@ -3996,6 +4036,218 @@ export function SupplyPage() {
       mounted.current = false;
     };
   }, []);
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem("ozon-supply-cost-calculator-v1") || "{}") as { sku?: string; price?: string };
+      if (saved.sku) setCostSku(saved.sku);
+      if (saved.price) setSellingPriceRub(saved.price);
+    } catch { /* 损坏的本地测算配置不影响约仓 */ }
+  }, []);
+  useEffect(() => {
+    try {
+      const library = JSON.parse(window.localStorage.getItem("ozon-supply-workflow-drafts-v2") || "[]") as typeof savedWorkflowDrafts;
+      if (Array.isArray(library)) setSavedWorkflowDrafts(library);
+      const raw = window.localStorage.getItem("ozon-supply-workflow-draft-v1");
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { mode?: "DIRECT" | "CROSSDOCK"; plans?: SupplyClusterPlan[]; quantities?: Record<string, string>; monitorMinutes?: 30 | 60; monitorTarget?: string; crossdockAddress?: string; selectedDropoffId?: number | null };
+      if (saved.mode) setWorkflowMode(saved.mode);
+      if (saved.plans) setWorkflowCart(Object.fromEntries(saved.plans.map((plan) => [planKey(plan), plan])));
+      if (saved.quantities) setPlanDrafts(saved.quantities);
+      if (saved.crossdockAddress) setCrossdockAddress(saved.crossdockAddress);
+      if (saved.selectedDropoffId) setSelectedDropoffId(saved.selectedDropoffId);
+      if (saved.monitorMinutes === 30 || saved.monitorMinutes === 60) setMonitorMinutes(saved.monitorMinutes);
+      if (saved.monitorTarget) setMonitorTarget(saved.monitorTarget);
+    } catch { /* 损坏的草稿不应阻塞约仓页面 */ }
+  }, []);
+  const planKey = (plan: SupplyClusterPlan) => `${plan.sku}|${plan.macrolocalClusterId}`;
+  const isMoscowPlan = (plan: SupplyClusterPlan) => /莫斯科|Москва/i.test(plan.clusterName);
+  const visibleWorkflowPlans = plans.filter((plan) => workflowMode === "DIRECT" ? isMoscowPlan(plan) : true);
+  const selectedWorkflowPlans = Object.values(workflowCart).filter((plan) => workflowMode === "DIRECT" ? isMoscowPlan(plan) : true);
+  const selectedWorkflowQuantity = selectedWorkflowPlans.reduce((sum, plan) => sum + Math.max(0, Number(planDrafts[planKey(plan)] ?? plan.plannedQty) || 0), 0);
+  const selectedWorkflowClusters = new Set(selectedWorkflowPlans.map((plan) => plan.clusterName)).size;
+  const costProducts = [...new Map((selectedWorkflowPlans.length ? selectedWorkflowPlans : visibleWorkflowPlans).map((plan) => [plan.sku, plan])).values()];
+  const effectiveCostSku = costProducts.some((plan) => plan.sku === costSku) ? costSku : (costProducts[0]?.sku ?? "");
+  const costProduct = plans.find((plan) => plan.sku === effectiveCostSku) ?? null;
+  const costClusterPlans = visibleWorkflowPlans.filter((plan) => plan.sku === effectiveCostSku);
+  const priceValue = Math.max(0, Number(sellingPriceRub) || 0);
+  const priceBand: "under300" | "over300" = priceValue > 300 ? "over300" : "under300";
+  useEffect(() => {
+    window.localStorage.setItem("ozon-supply-cost-calculator-v1", JSON.stringify({ sku: effectiveCostSku, price: sellingPriceRub, savedAt: new Date().toISOString() }));
+  }, [effectiveCostSku, sellingPriceRub]);
+  const selectedDropoff = dropoffOptions.find((option) => option.warehouseId === selectedDropoffId) ?? null;
+  const persistMonitorChoice = (target: string, minutes: 30 | 60) => {
+    try {
+      const key = "ozon-supply-workflow-draft-v1";
+      const saved = JSON.parse(window.localStorage.getItem(key) || "{}") as Record<string, unknown>;
+      window.localStorage.setItem(key, JSON.stringify({ ...saved, monitorTarget: target, monitorMinutes: minutes }));
+    } catch { /* 监控偏好保存失败不应阻塞查询 */ }
+  };
+  const draftWarehouseSelections = (draft: SupplyDraftStatus) => {
+    const byCluster = new Map<string, { macrolocalClusterId: string; storageWarehouseId: number }>();
+    draft.destinations.forEach((destination) => {
+      if (!byCluster.has(destination.macrolocalClusterId)) {
+        byCluster.set(destination.macrolocalClusterId, {
+          macrolocalClusterId: destination.macrolocalClusterId,
+          storageWarehouseId: destination.storageWarehouseId,
+        });
+      }
+    });
+    return [...byCluster.values()];
+  };
+  const saveWorkflowDraft = () => {
+    if (!selectedWorkflowPlans.length) { setError("请先选择至少一个产品并填写数量"); return; }
+    const invalid = selectedWorkflowPlans.some((plan) => !Number.isInteger(Number(planDrafts[planKey(plan)] ?? plan.plannedQty)) || Number(planDrafts[planKey(plan)] ?? plan.plannedQty) <= 0);
+    if (invalid) { setError("已选产品的数量必须是大于 0 的整数"); return; }
+    if (workflowMode === "CROSSDOCK" && !crossdockAddress.trim()) { setError("越库必须先选择或填写集中配送地址"); return; }
+    const savedAt = new Date().toISOString();
+    const draft = {
+      id: `${Date.now()}`,
+      name: `${workflowMode === "DIRECT" ? "直送" : "多集群越库"} · ${new Set(selectedWorkflowPlans.map((plan) => plan.sku)).size} 个 SKU · ${selectedWorkflowQuantity} 件`,
+      savedAt,
+      mode: workflowMode,
+      plans: selectedWorkflowPlans,
+      quantities: Object.fromEntries(selectedWorkflowPlans.map((plan) => [planKey(plan), String(planDrafts[planKey(plan)] ?? plan.plannedQty)])),
+      crossdockAddress,
+      selectedDropoffId,
+    };
+    const nextDrafts = [draft, ...savedWorkflowDrafts].slice(0, 20);
+    setSavedWorkflowDrafts(nextDrafts);
+    window.localStorage.setItem("ozon-supply-workflow-drafts-v2", JSON.stringify(nextDrafts));
+    window.localStorage.setItem("ozon-supply-workflow-draft-v1", JSON.stringify({ ...draft, monitorMinutes, monitorTarget }));
+    setMonitorStatus(`${draft.name}，已保存到草稿箱`);
+    setError("");
+  };
+  const restoreWorkflowDraft = (draft: typeof savedWorkflowDrafts[number]) => {
+    setWorkflowMode(draft.mode);
+    setWorkflowCart(Object.fromEntries(draft.plans.map((plan) => [planKey(plan), plan])));
+    setPlanDrafts((old) => ({ ...old, ...draft.quantities }));
+    setCrossdockAddress(draft.crossdockAddress || "");
+    setSelectedDropoffId(draft.selectedDropoffId ?? null);
+    setMonitorStatus(`已恢复：${draft.name}`);
+    setError("");
+  };
+  const removeWorkflowDraft = (draftId: string) => {
+    const next = savedWorkflowDrafts.filter((draft) => draft.id !== draftId);
+    setSavedWorkflowDrafts(next);
+    window.localStorage.setItem("ozon-supply-workflow-drafts-v2", JSON.stringify(next));
+  };
+  const searchDropoffs = async () => {
+    if (crossdockAddress.trim().length < 4) { setError("请输入至少 4 个字符搜索 Ozon 越库发货点"); return; }
+    setBusy(true); setError("");
+    try { setDropoffOptions(await searchSupplyDropoffs(crossdockAddress)); }
+    catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  };
+  const createRemoteDrafts = async () => {
+    if (!selectedWorkflowPlans.length) { setError("请先选择产品和数量"); return; }
+    if (workflowMode === "CROSSDOCK" && !selectedDropoffId) { setError("请先联网搜索并选择 Ozon 越库发货点"); return; }
+    const grouped = new Map<string, Array<{ sku: string; quantity: number }>>();
+    for (const plan of selectedWorkflowPlans) {
+      const quantity = Number(planDrafts[planKey(plan)] ?? plan.plannedQty);
+      if (!Number.isInteger(quantity) || quantity <= 0) { setError(`SKU ${plan.sku} 的数量必须是大于 0 的整数`); return; }
+      const items = grouped.get(plan.macrolocalClusterId) ?? [];
+      items.push({ sku: plan.sku, quantity }); grouped.set(plan.macrolocalClusterId, items);
+    }
+    const confirmation = window.prompt(workflowMode === "CROSSDOCK"
+      ? `即将在 Ozon 创建 1 个多集群越库草稿，包含 ${grouped.size} 个集群、${selectedWorkflowPlans.length} 行商品、共 ${selectedWorkflowQuantity} 件。写请求不会自动重试。\n请输入“确认创建草稿”继续：`
+      : `即将在 Ozon 创建 ${grouped.size} 个直送草稿。写请求不会自动重试。\n请输入“确认创建草稿”继续：`);
+    if (confirmation !== "确认创建草稿") return;
+    setBusy(true); setError("");
+    try {
+      const next = await createSupplyWorkflowDrafts(workflowMode, [...grouped].map(([macrolocalClusterId, items]) => ({ macrolocalClusterId, items })), selectedDropoffId, selectedDropoff?.warehouseType ?? null, confirmation);
+      setCreatedDrafts(next); saveWorkflowDraft();
+      if (workflowMode === "CROSSDOCK" && next.length === 1) { const target = `draft:${next[0].draftId}`; setMonitorTarget(target); persistMonitorChoice(target, monitorMinutes); }
+      setMonitorStatus(workflowMode === "CROSSDOCK" ? `Ozon 已创建 1 个多集群越库草稿（${grouped.size} 个集群）。请等待平台校验并分配内部转运路由。` : `Ozon 已创建 ${next.length} 个直送草稿。请等待平台校验并分配接收仓。`);
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  };
+  const refreshDraftStatuses = async () => {
+    if (!createdDrafts.length) return;
+    setBusy(true); setError("");
+    try { setDraftStatuses(await supplyWorkflowDraftStatus(createdDrafts.map((draft) => draft.draftId))); }
+    catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  };
+  const queryDraftSlots = async (draft: SupplyDraftStatus) => {
+    const destinations = draftWarehouseSelections(draft);
+    if (!destinations.length) { setError(`草稿 ${draft.draftId} 尚未返回可用配送路线，请稍后刷新校验结果`); return; }
+    const supplyType = destinations.length > 1 ? "MULTI_CLUSTER" : workflowMode;
+    setBusy(true); setError(""); setDraftSlotMessages((old) => ({ ...old, [draft.draftId]: `正在查询 ${destinations.length} 个集群的可预约时段…` }));
+    try {
+      const next = await supplyWorkflowDraftTimeslots(draft.draftId, supplyType, destinations, from, to);
+      setDraftSlots((old) => ({ ...old, [draft.draftId]: next }));
+      setDraftSlotMessages((old) => ({ ...old, [draft.draftId]: next.length ? `找到 ${next.length} 个可预约时段` : `${from} 至 ${to} 暂无可预约时段` }));
+    }
+    catch (e) { setError(String(e)); setDraftSlotMessages((old) => ({ ...old, [draft.draftId]: `查询失败：${String(e)}` })); }
+    finally { setBusy(false); }
+  };
+  const finalizeDraft = async (draft: SupplyDraftStatus, slot: SupplyTimeslot) => {
+    const destinations = draftWarehouseSelections(draft); if (!destinations.length) return;
+    const supplyType = destinations.length > 1 ? "MULTI_CLUSTER" : workflowMode;
+    const confirmation = window.prompt(`将草稿 ${draft.draftId} 的 ${destinations.length} 个集群统一预约到 ${slot.from}—${slot.to}。\n请输入“确认约仓”继续：`);
+    if (confirmation !== "确认约仓") return;
+    setBusy(true); setError("");
+    try { window.alert(await createSupplyFromWorkflowDraft(draft.draftId, supplyType, destinations, slot.from, slot.to, confirmation)); await load(); }
+    catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  };
+  const queryWorkflowSlots = async (silent = false) => {
+    const expected = workflowMode === "DIRECT" ? "直送" : "越库";
+    if (silent && !monitorTarget) { setMonitorStatus("请选择一份草稿或供应单后再开启自动监控"); return false; }
+    const readyDrafts = draftStatuses.filter((draft) => draft.destinations.length > 0 && (!silent || monitorTarget === `draft:${draft.draftId}`));
+    if (readyDrafts.length) {
+      try {
+        const results = await Promise.all(readyDrafts.map(async (draft) => {
+          const destinations = draftWarehouseSelections(draft);
+          const supplyType = destinations.length > 1 ? "MULTI_CLUSTER" : workflowMode;
+          return { draft, slots: await supplyWorkflowDraftTimeslots(draft.draftId, supplyType, destinations, from, to) };
+        }));
+        const nextSlots: Record<number, SupplyTimeslot[]> = {};
+        results.forEach(({ draft, slots }) => { nextSlots[draft.draftId] = slots; });
+        setDraftSlots(nextSlots); setLastMonitorAt(new Date().toLocaleString("zh-CN", { hour12: false }));
+        const available = results.find((result) => result.slots.length > 0);
+        if (available) {
+          setMonitorStatus(`草稿 ${available.draft.draftId} 发现 ${available.slots.length} 个可预约时段`);
+          if (silent && "Notification" in window && Notification.permission === "granted") new Notification("Ozon 越库草稿发现可用时段", { body: `草稿 ${available.draft.draftId} 有 ${available.slots.length} 个时段，请打开约仓计划确认。` });
+          return true;
+        }
+        setMonitorStatus(`草稿 ${readyDrafts[0]?.draftId} 当前没有可预约时段`);
+        return false;
+      } catch (e) { setMonitorStatus(`草稿时段检查失败：${String(e)}`); return false; }
+    }
+    if (draftStatuses.length && (!silent || monitorTarget.startsWith("draft:"))) {
+      const blocked = silent ? draftStatuses.find((draft) => monitorTarget === `draft:${draft.draftId}`) : draftStatuses[0];
+      setMonitorStatus(blocked
+        ? `草稿 ${blocked.draftId} 尚无内部转运路由，无法查询集中配送地址的时段：${blocked.message || "请重新读取草稿校验结果"}`
+        : "所选草稿不存在，请重新选择监控对象");
+      return false;
+    }
+    const targets = rows.filter((row) => row.supplyType === expected && (!silent || monitorTarget === `order:${row.orderId}`));
+    if (!targets.length) {
+      setMonitorStatus(silent ? "所选监控对象当前不存在或尚未完成校验，请重新选择" : `${expected}暂无已生成的活动供应单；请先完成 Ozon 草稿校验并生成供应单。`);
+      return false;
+    }
+    try {
+      const results = await Promise.all(targets.map(async (row) => ({ row, slots: await supplyTimeslots(row.orderId, from, to) })));
+      const available = results.find((result) => result.slots.length > 0);
+      setLastMonitorAt(new Date().toLocaleString("zh-CN", { hour12: false }));
+      if (available) {
+        setSelected(available.row); setSlots(available.slots); setSupplyView("orders");
+        setMonitorStatus(`发现 ${available.slots.length} 个可预约时段：${available.row.orderNumber || available.row.orderId}`);
+        if (silent && "Notification" in window && Notification.permission === "granted") new Notification("Ozon 约仓发现可用时段", { body: `${expected}供应单 ${available.row.orderNumber || available.row.orderId} 有 ${available.slots.length} 个时段可预约。` });
+        return true;
+      }
+      setMonitorStatus(silent ? `供应单 ${targets[0].orderNumber || targets[0].orderId} 当前没有可预约时段` : `已检查 ${targets.length} 个${expected}供应单，当前没有可预约时段`);
+      return false;
+    } catch (e) { setMonitorStatus(`时段检查失败：${String(e)}`); return false; }
+  };
+  useEffect(() => {
+    if (!monitorEnabled || workflowMode !== "CROSSDOCK") return;
+    if ("Notification" in window && Notification.permission === "default") void Notification.requestPermission();
+    void queryWorkflowSlots(true);
+    const timer = window.setInterval(() => void queryWorkflowSlots(true), monitorMinutes * 60000);
+    return () => window.clearInterval(timer);
+  }, [monitorEnabled, monitorMinutes, monitorTarget, workflowMode, rows.length, draftStatuses.length, from, to]);
   const findSlots = async (row: SupplyOrder) => {
     setSelected(row);
     setBusy(true);
@@ -4107,13 +4359,55 @@ export function SupplyPage() {
         <div className="supply-command-summary">
           <span><small>库存计划</small><b>{plans.length}</b><em>条候选集群</em></span>
           <span><small>活动供应单</small><b>{rows.length}</b><em>可查询与预约</em></span>
-          <span><small>当前选择</small><b>{chosenPlan ? chosenPlan.plannedQty : "—"}</b><em>{chosenPlan ? `${chosenPlan.offerId || chosenPlan.sku} · ${chosenPlan.clusterName}` : "尚未选择计划"}</em></span>
+          <span><small>当前选择</small><b>{selectedWorkflowClusters || "—"}</b><em>{selectedWorkflowPlans.length ? `${selectedWorkflowPlans.length} 行商品 · ${selectedWorkflowQuantity} 件` : "尚未选择计划"}</em></span>
         </div>
         <div className="supply-view-switch" role="tablist" aria-label="约仓工作区">
           <button className={supplyView === "plan" ? "active" : ""} onClick={() => setSupplyView("plan")}><PackageSearch size={16} /><span>计划生成<small>按库存集群确定数量</small></span></button>
           <button className={supplyView === "orders" ? "active" : ""} onClick={() => setSupplyView("orders")}><CalendarDays size={16} /><span>供应单预约<small>查时段、货品与箱唛</small></span></button>
         </div>
       </section>
+      {supplyView === "plan" && <section className="card supply-workflow-hub">
+        <div className="supply-mode-tabs" role="tablist" aria-label="约仓模式">
+          <button className={workflowMode === "DIRECT" ? "active" : ""} onClick={() => { setWorkflowMode("DIRECT"); setMonitorEnabled(false); }}>
+            <MapPin size={19}/><span><b>模块一 · 直送</b><small>仅莫斯科地址 · 选择产品数量 · 查询送仓时间</small></span>
+          </button>
+          <button className={workflowMode === "CROSSDOCK" ? "active" : ""} onClick={() => setWorkflowMode("CROSSDOCK")}>
+            <Truck size={19}/><span><b>模块二 · 越库</b><small>按集群配货 · 集中配送 · 草稿与自动查时段</small></span>
+          </button>
+        </div>
+        <div className="supply-workflow-summary">
+          <span><small>配送模式</small><b>{workflowMode === "DIRECT" ? "莫斯科直送" : "多集群越库"}</b></span>
+          <span><small>已选商品行</small><b>{selectedWorkflowPlans.length}</b></span>
+          <span><small>配送集群</small><b>{selectedWorkflowClusters}</b></span>
+          <span><small>合计数量</small><b>{selectedWorkflowQuantity}</b></span>
+        </div>
+        <div className="supply-address-row">
+          {workflowMode === "DIRECT" ? <label>直送地址<select value={directAddress} disabled><option>{directAddress}</option></select><small>直送仅允许选择莫斯科，由 Ozon 草稿返回具体目的仓。</small></label>
+            : <><label>集中配送地址（实际送货及预约地址）<div className="supply-dropoff-search"><input value={crossdockAddress} onChange={(e) => { setCrossdockAddress(e.target.value); setSelectedDropoffId(null); }} placeholder="输入城市、街道或仓库名称"/><button className="outline-button" disabled={busy} onClick={() => void searchDropoffs()}>联网搜索</button></div><small>必须从 Ozon 返回的越库配送点中选择；所有集群统一送到这里，预约时间也以这里为准。</small></label>
+              {!!dropoffOptions.length && <div className="supply-dropoff-options">{dropoffOptions.map((option) => <button key={option.warehouseId} className={selectedDropoffId === option.warehouseId ? "active" : ""} onClick={() => { setSelectedDropoffId(option.warehouseId); setCrossdockAddress(`${option.name} · ${option.address}`); }}><b>{option.name || `发货点 ${option.warehouseId}`}</b><small>{option.address}</small></button>)}</div>}</>}
+        </div>
+        <div className="supply-workflow-actions">
+          <button className="outline-button" onClick={saveWorkflowDraft}><Save size={15}/>保存草稿</button>
+          <button className="outline-button" disabled={busy || !selectedWorkflowPlans.length} onClick={() => void createRemoteDrafts()}><Plus size={15}/>{busy ? "提交中" : "创建 Ozon 草稿"}</button>
+          <button className="dark-button" disabled={busy} onClick={() => void queryWorkflowSlots(false)}><Search size={15}/>统一查询配送时间</button>
+          {workflowMode === "CROSSDOCK" && <>
+            <label>监控对象<select value={monitorTarget} onChange={(e) => { const target = e.target.value; setMonitorTarget(target); persistMonitorChoice(target, monitorMinutes); setMonitorEnabled(false); setMonitorStatus(target ? "已选择监控对象，开启后仅检查这一份" : "请选择一份草稿或供应单"); }}><option value="">请选择一份</option>{draftStatuses.map((draft) => <option key={`draft-${draft.draftId}`} value={`draft:${draft.draftId}`}>草稿 {draft.draftId} · {draft.status || "校验中"}</option>)}{rows.filter((row) => row.supplyType === "越库").map((row) => <option key={`order-${row.orderId}`} value={`order:${row.orderId}`}>供应单 {row.orderNumber || row.orderId}</option>)}</select></label>
+            <label>自动检查<select value={monitorMinutes} onChange={(e) => { const minutes = Number(e.target.value) as 30 | 60; setMonitorMinutes(minutes); persistMonitorChoice(monitorTarget, minutes); }}><option value={30}>每 30 分钟</option><option value={60}>每 1 小时</option></select></label>
+            <label className="supply-monitor-check"><input type="checkbox" checked={monitorEnabled} onChange={(e) => { if (e.target.checked && !monitorTarget) { setError("请先选择要监控的草稿或供应单"); return; } setError(""); setMonitorEnabled(e.target.checked); }}/>仅监控所选对象并提醒</label>
+          </>}
+        </div>
+        <div className={`supply-monitor-state ${monitorEnabled ? "active" : ""}`}><Clock3 size={16}/><span>{monitorStatus}{lastMonitorAt ? ` · 最近检查 ${lastMonitorAt}` : ""}</span></div>
+        {!!createdDrafts.length && <><div className="supply-created-drafts">{createdDrafts.map((draft) => <span key={draft.draftId}><b>草稿 {draft.draftId}</b><small>包含集群 {draft.macrolocalClusterId}{draft.status ? ` · ${draft.status}` : ""}</small></span>)}</div><button className="outline-button supply-draft-refresh" disabled={busy} onClick={() => void refreshDraftStatuses()}><RefreshCw size={14}/>读取草稿校验与平台路由</button></>}
+        {!!draftStatuses.length && <div className="supply-draft-statuses">{draftStatuses.map((draft) => <article key={draft.draftId}>
+          <header><div><b>草稿 {draft.draftId}</b><small>{draft.status || "校验中"}{draft.message ? ` · ${draft.message}` : ""}</small></div><button className="outline-button" disabled={busy || !draft.destinations.length} title={!draft.destinations.length ? "Ozon 尚未返回可用配送路线" : ""} onClick={() => void queryDraftSlots(draft)}>{draft.destinations.length ? "查询集中配送时段" : "等待配送路线"}</button></header>
+          <div className="supply-draft-diagnostics"><span>集群 {draft.clusterCount}</span><span>可用路线 {draft.destinations.length}</span>{!!draft.clustersWithoutWarehouses.length && <span className="warning">未返回路线集群 {draft.clustersWithoutWarehouses.length}</span>}</div>
+          {!!draft.clustersWithoutWarehouses.length && <div className="supply-monitor-state"><AlertTriangle size={14}/><span>以下集群尚未获得 Ozon 内部转运路由：{draft.clustersWithoutWarehouses.join("、")}</span></div>}
+          {!!draft.errorReasons.length && <div className="error-banner"><AlertTriangle size={14}/><span>Ozon：{draft.errorReasons.join("；")}</span></div>}
+          {draft.destinations.map((destination) => <p key={`${destination.macrolocalClusterId}-${destination.storageWarehouseId}`}><MapPin size={13}/><span>{destination.name || (destination.storageWarehouseId === 0 ? "统一发运（Ozon 自动分配）" : `平台分配仓 ${destination.storageWarehouseId}`)}<small>{destination.address ? `${destination.address} · ` : ""}{destination.storageWarehouseId === 0 ? "无需指定内部目的仓" : "Ozon 内部转运"} · 集群 {destination.macrolocalClusterId}</small></span></p>)}
+          {draftSlotMessages[draft.draftId] && <div className="supply-monitor-state"><Clock3 size={14}/><span>{draftSlotMessages[draft.draftId]}</span></div>}
+          {(draftSlots[draft.draftId] ?? []).map((slot) => <button className="supply-draft-slot" key={slot.from} disabled={busy} onClick={() => void finalizeDraft(draft, slot)}><span>{slot.from}—{slot.to}</span><b>确认约仓</b></button>)}
+        </article>)}</div>}
+      </section>}
       <div className="supply-layout">
         {supplyView === "plan" && <section className="card table-card supply-plan-card">
           <div className="card-title">
@@ -4121,18 +4415,65 @@ export function SupplyPage() {
             <span>库存管理中保存的配送量会在这里直接作为计划数量</span>
           </div>
           <div className="inventory-toolbar">
-            <input value={planQuery} onChange={(e) => setPlanQuery(e.target.value)} placeholder="搜索 SKU、货号、商品或集群" />
+            <input value={planQuery} onChange={(e) => setPlanQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void loadPlans(); }} placeholder="搜索当前店铺全部产品：SKU、货号、商品名称" />
             <label>目标天数 <input type="number" min="1" max="365" value={targetDays} onChange={(e) => setTargetDays(Math.max(1, Number(e.target.value) || 1))} /></label>
-            <button className="outline-button" onClick={() => void loadPlans()}>读取集群计划</button>
+            <button className="outline-button" onClick={() => void loadPlans()}>{planQuery.trim() ? "搜索产品并制定计划" : "读取库存建议计划"}</button>
           </div>
+          <div className="supply-draft-shelf">
+            <div><b>已保存草稿</b><small>{savedWorkflowDrafts.length ? "点击恢复选品、集群和数量" : "保存后会出现在这里"}</small></div>
+            <div className="supply-draft-list">{savedWorkflowDrafts.map((draft) => <span key={draft.id}><button onClick={() => restoreWorkflowDraft(draft)} title={new Date(draft.savedAt).toLocaleString("zh-CN")}>{draft.name}</button><button className="supply-draft-remove" onClick={() => removeWorkflowDraft(draft.id)} aria-label={`删除${draft.name}`}>×</button></span>)}</div>
+          </div>
+          {!!costProduct && <button type="button" className="supply-cost-toggle" onClick={() => setShowCostCalculator((value) => !value)}><b>{showCostCalculator ? "收起" : "展开"}官方配送成本测算</b><small>{showCostCalculator ? "收起明细，保持计划列表紧凑" : "按产品体积、价格档查看各集群费用"}</small><span>{showCostCalculator ? "⌃" : "⌄"}</span></button>}
+          {showCostCalculator && !!costProduct && <section className="supply-cost-calculator">
+            <header>
+              <div><b>莫斯科 → 各集群官方配送成本</b><small>基础配送自动读取 Ozon 官方费率表；无需手工录入。越库按官方体积规则估算，申请创建后以 Ozon 锁定金额为准。</small></div>
+              <div className="supply-cost-controls">
+                <label>测算产品<select value={effectiveCostSku} onChange={(e) => setCostSku(e.target.value)}>{costProducts.map((plan) => <option key={plan.sku} value={plan.sku}>{plan.offerId || plan.sku} · SKU {plan.sku}</option>)}</select></label>
+                <label>售价 ₽<input type="number" min="0" step="0.01" value={sellingPriceRub} onChange={(e) => setSellingPriceRub(e.target.value)} placeholder="例如 299"/></label>
+              </div>
+            </header>
+            <div className="supply-volume-summary">
+              <span><small>包装尺寸</small><b>{costProduct.lengthCm && costProduct.widthCm && costProduct.heightCm ? `${costProduct.lengthCm} × ${costProduct.widthCm} × ${costProduct.heightCm} cm` : "商品成本中未填写"}</b></span>
+              <span><small>单件体积</small><b>{costProduct.volumeLiters ? `${costProduct.volumeLiters.toFixed(3)} L` : "无法计算"}</b><em>长 × 宽 × 高 ÷ 1000</em></span>
+              <span><small>当前价格档</small><b>{priceValue ? (priceBand === "under300" ? "≤ 300 ₽" : "＞ 300 ₽") : "请填写售价"}</b></span>
+              <span><small>官方费率版本</small><b>{OZON_LOGISTICS_TARIFF_META.effectiveFrom}</b><em>起点：莫斯科、莫斯科州及远东地区</em></span>
+            </div>
+            <div className="supply-cost-table-wrap"><table className="supply-cost-table">
+              <thead><tr><th>目的集群</th><th>约仓数量</th><th>本次总体积</th><th>基础配送 ≤300 ₽<small>每售出 1 件</small></th><th>基础配送 ＞300 ₽<small>每售出 1 件</small></th><th>当前基础配送</th><th>越库计费体积</th><th>越库费用预估</th><th>判断依据</th></tr></thead>
+              <tbody>{costClusterPlans.map((plan) => {
+                const key = planKey(plan);
+                const qty = Math.max(0, Number(planDrafts[planKey(plan)] ?? plan.plannedQty) || 0);
+                const volume = plan.volumeLiters ?? 0, totalLiters = volume * qty;
+                const tariff = officialLogisticsTariff(plan.clusterName, volume);
+                const base = tariff?.[priceBand] ?? null;
+                const crossdock = volume > 0 && qty > 0 ? officialCrossdockEstimate(totalLiters, "warehouse") : null;
+                return <tr key={key}>
+                  <td><b>{ozonClusterZh(plan.clusterName)}</b><small>{plan.macrolocalClusterId}</small></td><td>{qty}</td><td>{volume > 0 ? `${totalLiters.toFixed(2)} L` : "缺尺寸"}</td>
+                  <td>{tariff ? <b>{tariff.under300.toFixed(2)} ₽/件</b> : <span className="cost-missing">无匹配</span>}</td>
+                  <td>{tariff ? <b>{tariff.over300.toFixed(2)} ₽/件</b> : <span className="cost-missing">无匹配</span>}</td>
+                  <td>{priceValue && base !== null ? <b>{base.toFixed(2)} ₽/件</b> : <span className="cost-missing">填写售价</span>}</td>
+                  <td>{crossdock ? <><b>{crossdock.billedLiters} L</b><small>{totalLiters.toFixed(2)} L 向上取整</small></> : "—"}</td>
+                  <td>{crossdock ? <><b>约 {crossdock.total.toFixed(2)} ₽</b><small>仓/SC 处理 0 + 通用路线 1.5 ₽/L</small></> : <span className="cost-missing">先填写数量/尺寸</span>}</td>
+                  <td>{tariff ? <><b>{tariff.isFallback ? "官方通用费率" : "官方路线精确值"}</b><small>{tariff.destination ?? "未识别目的集群"}</small></> : "—"}</td>
+                </tr>;
+              })}</tbody>
+            </table></div>
+            <p className="supply-tariff-note"><AlertTriangle size={14}/> 基础配送来自 Ozon 官方 2026-08-28 Excel，并按单件体积自动命中对应区间。越库费由“交货点处理 + 路线运输”组成：仓库/分拣中心处理费当前为 0 ₽/L；平台在创建申请时按实际路线锁价。表中 1.5 ₽/L 是 Ozon 对无法识别费率区域规定的官方通用路线价，因此只显示为预估，不冒充目的路线精确价。</p>
+            <a className="supply-tariff-source" href={OZON_LOGISTICS_TARIFF_META.sourceUrl} target="_blank" rel="noreferrer">查看 Ozon 官方基础配送费 Excel</a>
+          </section>}
+          {!!selectedWorkflowPlans.length && <div className="supply-selection-bar">
+            <div><b>配货篮 · {selectedWorkflowPlans.length} 行商品 / {selectedWorkflowClusters} 个集群</b><small>切换搜索不会清空已选商品；提交越库草稿时会合并为一个多商品请求。</small></div>
+            <div className="supply-selection-chips">{selectedWorkflowPlans.map((plan) => <span key={planKey(plan)}>{plan.offerId || plan.sku} · {ozonClusterZh(plan.clusterName)} · {planDrafts[planKey(plan)] ?? plan.plannedQty} 件</span>)}</div>
+          </div>}
           <table>
             <thead><tr><th>SKU / 商品</th><th>配送集群</th><th>可售 / 在途 / 已申请</th><th>日均销量</th><th>建议量</th><th>约仓数量</th><th>操作</th></tr></thead>
-            <tbody>{plans.map((plan) => {
+            <tbody>{visibleWorkflowPlans.map((plan) => {
               const key = `${plan.sku}|${plan.macrolocalClusterId}`;
               const draft = planDrafts[key] ?? String(plan.plannedQty);
-              return <tr key={key} className={chosenPlan && `${chosenPlan.sku}|${chosenPlan.macrolocalClusterId}` === key ? "row-selected" : ""}>
-                <td><b>{plan.offerId || plan.sku}</b><small>{plan.productName} · SKU {plan.sku}</small></td>
-                <td><b>{plan.clusterName}</b><small>{plan.macrolocalClusterId}</small></td>
+              const selectedInCart = !!workflowCart[key];
+              return <tr key={key} className={selectedInCart ? "row-selected" : ""}>
+                <td><label className="supply-product-check"><input type="checkbox" checked={selectedInCart} onChange={(e) => setWorkflowCart((old) => { const next = { ...old }; if (e.target.checked) next[key] = plan; else delete next[key]; return next; })}/><span><b>{plan.offerId || plan.sku}{plan.manualPlan && <em className="manual-plan-badge">新品手工计划</em>}</b><small>{plan.productName} · SKU {plan.sku}</small></span></label></td>
+                <td><b>{ozonClusterZh(plan.clusterName)}</b><small>{plan.macrolocalClusterId}</small></td>
                 <td>{plan.availableStock} / {plan.transitStock} / {plan.requestedStock}</td>
                 <td>{plan.dailySales.toFixed(1)}</td><td>{plan.recommendedQty}</td>
                 <td><input type="number" min="0" value={draft} onChange={(e) => setPlanDrafts((old) => ({ ...old, [key]: e.target.value }))} /></td>
@@ -4140,22 +4481,18 @@ export function SupplyPage() {
                   const quantity = Number(draft);
                   if (!Number.isInteger(quantity) || quantity < 0) { setError("约仓数量必须是大于或等于 0 的整数"); return; }
                   await saveSupplyClusterPlan(plan.sku, plan.macrolocalClusterId, quantity, targetDays);
-                  const saved = { ...plan, plannedQty: quantity, targetDays, planSaved: true };
-                  setChosenPlan(saved); await loadPlans();
-                }}>{plan.planSaved ? "保存并选择" : "采用并选择"}</button></td>
+                  setWorkflowCart((old) => ({ ...old, [key]: plan })); await loadPlans();
+                }}>{selectedInCart ? "保存数量" : "保存并加入"}</button></td>
               </tr>;
             })}</tbody>
           </table>
-          {!plans.length && <div className="empty">库存同步后，可按 SKU 与配送集群选择约仓数量。</div>}
-          {chosenPlan && <div className="migration-note">
+          {!visibleWorkflowPlans.length && <div className="empty">{workflowMode === "DIRECT" ? "没有可用于莫斯科直送的库存计划，请先同步库存或保存莫斯科集群配送量。" : "库存同步后，可按 SKU 与配送集群选择约仓数量。"}</div>}
+          {!!selectedWorkflowPlans.length && <div className="migration-note">
             <Truck />
-            <div><h3>已选：{chosenPlan.offerId || chosenPlan.sku} → {chosenPlan.clusterName}，{chosenPlan.plannedQty} 件</h3>
-              <p>{supplyMode === "CROSSDOCK" ? "越库 CROSSDOCK：必须选择 Ozon 发货点，货物先送往越库点，再由平台转运到目的仓。" : "直送 DIRECT：直接送达系统计算出的目的仓，不选择越库发货点。"}</p>
+            <div><h3>已选 {selectedWorkflowClusters} 个集群、{selectedWorkflowPlans.length} 行商品，共 {selectedWorkflowQuantity} 件</h3>
+              <p>{workflowMode === "CROSSDOCK" ? `这些集群将合并为同一个 Ozon 多集群越库草稿：${[...new Set(selectedWorkflowPlans.map((plan) => ozonClusterZh(plan.clusterName)))].join("、")}` : "直送 DIRECT：直接送达系统计算出的莫斯科目的仓。"}</p>
             </div>
-            <div className="sales-period-switch" role="group" aria-label="约仓模式">
-              <button className={supplyMode === "CROSSDOCK" ? "active" : ""} onClick={() => setSupplyMode("CROSSDOCK")}>越库</button>
-              <button className={supplyMode === "DIRECT" ? "active" : ""} onClick={() => setSupplyMode("DIRECT")}>直送</button>
-            </div>
+            <button className="outline-button" onClick={() => setWorkflowCart({})}>清空选择</button>
           </div>}
         </section>}
         {supplyView === "orders" && <>

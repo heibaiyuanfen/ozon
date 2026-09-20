@@ -901,6 +901,41 @@ export interface SupplyTimeslot {
   from: string;
   to: string;
 }
+export interface SupplyDropoffOption {
+  warehouseId: number;
+  warehouseType: string;
+  name: string;
+  address: string;
+}
+export interface SupplyDraftGroupInput {
+  macrolocalClusterId: string;
+  items: Array<{ sku: string; quantity: number }>;
+}
+export interface SupplyClusterWarehouseInput {
+  macrolocalClusterId: string;
+  storageWarehouseId: number;
+}
+export interface SupplyDraftCreated {
+  draftId: number;
+  macrolocalClusterId: string;
+  status: string;
+  message: string;
+}
+export interface SupplyDraftDestination {
+  macrolocalClusterId: string;
+  storageWarehouseId: number;
+  name: string;
+  address: string;
+}
+export interface SupplyDraftStatus {
+  draftId: number;
+  status: string;
+  message: string;
+  destinations: SupplyDraftDestination[];
+  clusterCount: number;
+  clustersWithoutWarehouses: string[];
+  errorReasons: string[];
+}
 export interface SupplyClusterPlan {
   sku: string;
   offerId: string;
@@ -915,6 +950,11 @@ export interface SupplyClusterPlan {
   plannedQty: number;
   targetDays: number;
   planSaved: boolean;
+  manualPlan: boolean;
+  lengthCm?: number | null;
+  widthCm?: number | null;
+  heightCm?: number | null;
+  volumeLiters?: number | null;
 }
 export interface SyncLog {
   id: number;

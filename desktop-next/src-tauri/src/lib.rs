@@ -41,8 +41,9 @@ static COMPETITOR_TASK_STOPS: LazyLock<Mutex<HashSet<i64>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static COMPETITOR_COLLECTION_PROGRESS: LazyLock<Mutex<CompetitorCollectionProgress>> =
     LazyLock::new(|| Mutex::new(CompetitorCollectionProgress::default()));
-static SUPPLY_ITEM_PROGRESS: LazyLock<Mutex<std::collections::BTreeMap<i64, SupplyOrderItemsProgress>>> =
-    LazyLock::new(|| Mutex::new(std::collections::BTreeMap::new()));
+static SUPPLY_ITEM_PROGRESS: LazyLock<
+    Mutex<std::collections::BTreeMap<i64, SupplyOrderItemsProgress>>,
+> = LazyLock::new(|| Mutex::new(std::collections::BTreeMap::new()));
 
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -790,6 +791,59 @@ struct SupplyTimeslot {
     from: String,
     to: String,
 }
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SupplyDraftItemInput {
+    sku: String,
+    quantity: i64,
+}
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SupplyDraftGroupInput {
+    macrolocal_cluster_id: String,
+    items: Vec<SupplyDraftItemInput>,
+}
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SupplyClusterWarehouseInput {
+    macrolocal_cluster_id: String,
+    storage_warehouse_id: i64,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyDropoffOption {
+    warehouse_id: i64,
+    warehouse_type: String,
+    name: String,
+    address: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyDraftCreated {
+    draft_id: i64,
+    macrolocal_cluster_id: String,
+    status: String,
+    message: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyDraftDestination {
+    macrolocal_cluster_id: String,
+    storage_warehouse_id: i64,
+    name: String,
+    address: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyDraftStatusRow {
+    draft_id: i64,
+    status: String,
+    message: String,
+    destinations: Vec<SupplyDraftDestination>,
+    cluster_count: usize,
+    clusters_without_warehouses: Vec<String>,
+    error_reasons: Vec<String>,
+}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SupplyClusterPlanRow {
@@ -806,6 +860,11 @@ struct SupplyClusterPlanRow {
     planned_qty: i64,
     target_days: i64,
     plan_saved: bool,
+    manual_plan: bool,
+    length_cm: Option<f64>,
+    width_cm: Option<f64>,
+    height_cm: Option<f64>,
+    volume_liters: Option<f64>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1481,11 +1540,24 @@ mod seller_api_error_tests {
         connection.execute("INSERT INTO finance_transactions VALUES('legacy','2026-09-01','AccrualType0','',?1)",params![raw.to_string()]).unwrap();
         let count = repair_finance_accrual_attribution(
             &mut connection,
-            &DateRange { from: "2026-09-01".into(), to: "2026-09-30".into() },
-        ).unwrap();
-        let repaired: (String, String) = connection.query_row("SELECT operation_type,sku FROM finance_transactions WHERE operation_id='legacy'",[],|row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            &DateRange {
+                from: "2026-09-01".into(),
+                to: "2026-09-30".into(),
+            },
+        )
+        .unwrap();
+        let repaired: (String, String) = connection
+            .query_row(
+                "SELECT operation_type,sku FROM finance_transactions WHERE operation_id='legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(count, 1);
-        assert_eq!(repaired, ("OperationAgentDeliveredToCustomer".into(), "7001".into()));
+        assert_eq!(
+            repaired,
+            ("OperationAgentDeliveredToCustomer".into(), "7001".into())
+        );
     }
 }
 
@@ -7979,7 +8051,10 @@ fn finance_accrual_type_name(
     type_id: i64,
     type_names: &std::collections::HashMap<i64, String>,
 ) -> String {
-    if let Some(name) = type_names.get(&type_id).filter(|name| !name.trim().is_empty()) {
+    if let Some(name) = type_names
+        .get(&type_id)
+        .filter(|name| !name.trim().is_empty())
+    {
         return name.clone();
     }
     let fallback = match type_id {
@@ -8227,7 +8302,8 @@ fn repair_finance_accrual_attribution(
         repaired += 1;
     }
     if repaired > 0 {
-        transaction.execute("DELETE FROM business_report_cache", [])
+        transaction
+            .execute("DELETE FROM business_report_cache", [])
             .map_err(|error| error.to_string())?;
     }
     transaction
@@ -8451,8 +8527,8 @@ fn read_auto_sync_state(data_dir: &Path) -> AutoSyncState {
         state.sync_on_startup = false;
         state.startup_sync_consent_version = Some(1);
     }
-    let recovered_interrupted_run = state.last_status == "running"
-        && !AUTO_SYNC_RUNNING.load(Ordering::SeqCst);
+    let recovered_interrupted_run =
+        state.last_status == "running" && !AUTO_SYNC_RUNNING.load(Ordering::SeqCst);
     if recovered_interrupted_run {
         state.last_status = "failed".into();
         state.last_finished_at = chrono::Local::now().to_rfc3339();
@@ -8607,9 +8683,7 @@ fn run_all_shops_sync(
     let selected_shops = registry
         .shops
         .into_iter()
-        .filter(|shop| {
-            selection_kind == "all" || selected_ids.contains(&shop.id)
-        })
+        .filter(|shop| selection_kind == "all" || selected_ids.contains(&shop.id))
         .collect::<Vec<_>>();
     if selected_shops.is_empty() {
         return Err("请至少选择一家有效店铺进行同步".into());
@@ -8622,8 +8696,10 @@ fn run_all_shops_sync(
         let result = sync_one_shop_all(range.clone(), force, &shop_state);
         let errors = [
             (!result.seller_error.is_empty()).then(|| format!("Seller：{}", result.seller_error)),
-            (!result.performance_error.is_empty()).then(|| format!("Performance：{}", result.performance_error)),
-            (!result.finance_error.is_empty()).then(|| format!("Finance：{}", result.finance_error)),
+            (!result.performance_error.is_empty())
+                .then(|| format!("Performance：{}", result.performance_error)),
+            (!result.finance_error.is_empty())
+                .then(|| format!("Finance：{}", result.finance_error)),
         ]
         .into_iter()
         .flatten()
@@ -8631,7 +8707,12 @@ fn run_all_shops_sync(
         state.shop_results.push(AutoSyncShopResult {
             shop_id: shop.id,
             shop_name: shop.name,
-            status: if errors.is_empty() { "success" } else { "failed" }.into(),
+            status: if errors.is_empty() {
+                "success"
+            } else {
+                "failed"
+            }
+            .into(),
             message: if errors.is_empty() {
                 "Seller、Performance、Finance 同步完成".into()
             } else {
@@ -8644,7 +8725,11 @@ fn run_all_shops_sync(
         // Keep the status file useful even when the process exits during a long multi-shop run.
         preserve_latest_auto_sync_settings_and_write(data_dir, &mut state)?;
     }
-    let successes = state.shop_results.iter().filter(|row| row.status == "success").count();
+    let successes = state
+        .shop_results
+        .iter()
+        .filter(|row| row.status == "success")
+        .count();
     state.last_finished_at = chrono::Local::now().to_rfc3339();
     state.last_status = if successes == state.shop_results.len() {
         "success"
@@ -8661,7 +8746,9 @@ fn run_all_shops_sync(
             "manual" => "手动选择店铺",
             _ => "全店",
         },
-        state.shop_results.len().saturating_sub(successes), range.from, range.to
+        state.shop_results.len().saturating_sub(successes),
+        range.from,
+        range.to
     );
     preserve_latest_auto_sync_settings_and_write(data_dir, &mut state)?;
     Ok(state)
@@ -9522,7 +9609,12 @@ fn supply_cluster_plans(
     let target_days = target_days.clamp(1, 365);
     let pattern = format!("%{}%", query.trim());
     let c = db(&state)?;
-    let mut stmt = c.prepare("WITH stock AS(SELECT sku,MAX(offer_id) offer_id,MAX(product_name) product_name,macrolocal_cluster_id,MAX(cluster_name) cluster_name,SUM(available_stock) available_stock,SUM(transit_stock) transit_stock,SUM(requested_stock) requested_stock,MAX(ads_cluster) daily_sales FROM inventory_stock WHERE macrolocal_cluster_id<>'' GROUP BY sku,macrolocal_cluster_id) SELECT s.sku,s.offer_id,s.product_name,s.macrolocal_cluster_id,COALESCE(NULLIF(s.cluster_name,''),'未命名集群'),s.available_stock,s.transit_stock,s.requested_stock,COALESCE(s.daily_sales,0),rp.planned_qty FROM stock s LEFT JOIN replenishment_plan rp ON rp.sku=s.sku AND rp.macrolocal_cluster_id=s.macrolocal_cluster_id WHERE ?1='%%' OR s.sku LIKE ?1 OR s.offer_id LIKE ?1 OR s.product_name LIKE ?1 OR s.cluster_name LIKE ?1 ORDER BY s.offer_id,s.daily_sales DESC,s.cluster_name LIMIT 1000").map_err(|e| e.to_string())?;
+    let sql = if query.trim().is_empty() {
+        "WITH stock AS(SELECT sku,MAX(offer_id) offer_id,MAX(product_name) product_name,macrolocal_cluster_id,MAX(cluster_name) cluster_name,SUM(available_stock) available_stock,SUM(transit_stock) transit_stock,SUM(requested_stock) requested_stock,MAX(ads_cluster) daily_sales FROM inventory_stock WHERE macrolocal_cluster_id<>'' GROUP BY sku,macrolocal_cluster_id) SELECT s.sku,s.offer_id,s.product_name,s.macrolocal_cluster_id,COALESCE(NULLIF(s.cluster_name,''),'未命名集群'),s.available_stock,s.transit_stock,s.requested_stock,COALESCE(s.daily_sales,0),rp.planned_qty,0 manual_plan,pc.length_cm,pc.width_cm,pc.height_cm,CASE WHEN pc.length_cm>0 AND pc.width_cm>0 AND pc.height_cm>0 THEN pc.length_cm*pc.width_cm*pc.height_cm/1000.0 END volume_liters FROM stock s LEFT JOIN replenishment_plan rp ON rp.sku=s.sku AND rp.macrolocal_cluster_id=s.macrolocal_cluster_id LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE ?1='%%' ORDER BY s.offer_id,s.daily_sales DESC,s.cluster_name LIMIT 1000"
+    } else {
+        "WITH stock AS(SELECT sku,MAX(offer_id) offer_id,MAX(product_name) product_name,macrolocal_cluster_id,MAX(cluster_name) cluster_name,SUM(available_stock) available_stock,SUM(transit_stock) transit_stock,SUM(requested_stock) requested_stock,MAX(ads_cluster) daily_sales FROM inventory_stock WHERE macrolocal_cluster_id<>'' GROUP BY sku,macrolocal_cluster_id), clusters AS(SELECT macrolocal_cluster_id,COALESCE(NULLIF(MAX(cluster_name),''),'未命名集群') cluster_name FROM inventory_stock WHERE macrolocal_cluster_id<>'' GROUP BY macrolocal_cluster_id), candidates AS(SELECT s.sku,s.offer_id,s.product_name,s.macrolocal_cluster_id,COALESCE(NULLIF(s.cluster_name,''),'未命名集群') cluster_name,s.available_stock,s.transit_stock,s.requested_stock,COALESCE(s.daily_sales,0) daily_sales,0 manual_plan FROM stock s WHERE s.sku LIKE ?1 OR s.offer_id LIKE ?1 OR s.product_name LIKE ?1 OR s.cluster_name LIKE ?1 UNION ALL SELECT p.sku,p.offer_id,p.name,c.macrolocal_cluster_id,c.cluster_name,0,0,0,0,1 FROM products p CROSS JOIN clusters c WHERE (p.sku LIKE ?1 OR p.offer_id LIKE ?1 OR p.name LIKE ?1) AND NOT EXISTS(SELECT 1 FROM stock s WHERE s.sku=p.sku AND s.macrolocal_cluster_id=c.macrolocal_cluster_id)) SELECT x.sku,x.offer_id,x.product_name,x.macrolocal_cluster_id,x.cluster_name,x.available_stock,x.transit_stock,x.requested_stock,x.daily_sales,rp.planned_qty,x.manual_plan,pc.length_cm,pc.width_cm,pc.height_cm,CASE WHEN pc.length_cm>0 AND pc.width_cm>0 AND pc.height_cm>0 THEN pc.length_cm*pc.width_cm*pc.height_cm/1000.0 END volume_liters FROM candidates x LEFT JOIN replenishment_plan rp ON rp.sku=x.sku AND rp.macrolocal_cluster_id=x.macrolocal_cluster_id LEFT JOIN product_costs pc ON pc.sku=x.sku ORDER BY x.manual_plan,x.offer_id,x.daily_sales DESC,x.cluster_name LIMIT 1000"
+    };
+    let mut stmt = c.prepare(sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([pattern], |row| {
             let available = row.get::<_, i64>(5)?;
@@ -9530,6 +9622,7 @@ fn supply_cluster_plans(
             let requested = row.get::<_, i64>(7)?;
             let daily = row.get::<_, f64>(8)?;
             let saved = row.get::<_, Option<i64>>(9)?;
+            let manual_plan = row.get::<_, i64>(10)? != 0;
             let recommended =
                 ((daily * target_days as f64).ceil() as i64 - available - transit - requested)
                     .max(0);
@@ -9547,6 +9640,11 @@ fn supply_cluster_plans(
                 planned_qty: saved.unwrap_or(recommended),
                 target_days,
                 plan_saved: saved.is_some(),
+                manual_plan,
+                length_cm: row.get(11)?,
+                width_cm: row.get(12)?,
+                height_cm: row.get(13)?,
+                volume_liters: row.get(14)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -9813,6 +9911,87 @@ fn add_unique_sku_candidate(
         .or_insert_with(|| Some(sku.to_string()));
 }
 
+fn multi_cluster_dropoff_warehouse_type(_listed_type: Option<&str>) -> &'static str {
+    // `/v1/warehouse/fbo/list` and `/v1/draft/multi-cluster/create` expose
+    // different enums. The multi-cluster draft API expects DELIVERY_POINT for
+    // the physical drop-off point, even though the resulting supply is routed
+    // through Ozon's cross-dock network.
+    "DELIVERY_POINT"
+}
+
+#[cfg(test)]
+mod supply_draft_tests {
+    use super::{collect_draft_destinations, collect_supply_timeslots, draft_status_diagnostics, multi_cluster_dropoff_warehouse_type};
+
+    #[test]
+    fn warehouse_list_default_enum_is_not_forwarded_to_draft_creation() {
+        assert_eq!(multi_cluster_dropoff_warehouse_type(Some("0")), "DELIVERY_POINT");
+        assert_eq!(multi_cluster_dropoff_warehouse_type(None), "DELIVERY_POINT");
+    }
+
+    #[test]
+    fn parses_v2_nested_cluster_warehouses() {
+        let payload = serde_json::json!({"clusters":[{"macrolocal_cluster_id":4042,"warehouses":[{"storage_warehouse":{"warehouse_id":987,"name":"Samara","address":"Address"}}]}]});
+        let mut destinations = Vec::new();
+        collect_draft_destinations(&payload, "", &mut destinations);
+        assert_eq!(destinations.len(), 1);
+        assert_eq!(destinations[0].macrolocal_cluster_id, "4042");
+        assert_eq!(destinations[0].storage_warehouse_id, 987);
+    }
+
+    #[test]
+    fn parses_compatible_cluster_id_and_supply_warehouse_shape() {
+        let payload = serde_json::json!({"clusters":[{"cluster_id":4036,"warehouses":[{"supply_warehouse":{"warehouse_id":654,"name":"Moscow","address":"Address"}}]}]});
+        let mut destinations = Vec::new();
+        collect_draft_destinations(&payload, "", &mut destinations);
+        assert_eq!(destinations.len(), 1);
+        assert_eq!(destinations[0].macrolocal_cluster_id, "4036");
+        assert_eq!(destinations[0].storage_warehouse_id, 654);
+        assert_eq!(destinations[0].name, "Moscow");
+    }
+
+    #[test]
+    fn parses_multi_cluster_auto_routing_without_storage_warehouse() {
+        let payload = serde_json::json!({"clusters":[
+            {"macrolocal_cluster_id":4007,"supply_type":"MULTI_CLUSTER","warehouses":[{
+                "availability_status":{"state":"FULL_AVAILABLE","invalid_reason":"UNSPECIFIED"},
+                "storage_warehouse":null
+            }]},
+            {"macrolocal_cluster_id":4042,"supply_type":"MULTI_CLUSTER","warehouses":[{
+                "availability_status":{"state":"FULL_AVAILABLE","invalid_reason":"UNSPECIFIED"},
+                "storage_warehouse":null
+            }]}
+        ]});
+        let mut destinations = Vec::new();
+        collect_draft_destinations(&payload, "", &mut destinations);
+        assert_eq!(destinations.len(), 2);
+        assert!(destinations.iter().all(|row| row.storage_warehouse_id == 0));
+        assert!(destinations.iter().all(|row| row.name == "统一发运（Ozon 自动分配）"));
+    }
+
+    #[test]
+    fn parses_v2_nested_timeslot_days() {
+        let payload = serde_json::json!({"result":{"drop_off_warehouse_timeslots":{"days":[{"timeslots":[{"from_in_timezone":"2026-09-21T10:00:00+03:00","to_in_timezone":"2026-09-21T11:00:00+03:00"}]}]}}});
+        let mut slots = Vec::new();
+        collect_supply_timeslots(&payload, &mut slots);
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].from, "2026-09-21T10:00:00+03:00");
+    }
+
+    #[test]
+    fn explains_clusters_without_destination_warehouses() {
+        let payload = serde_json::json!({"clusters":[
+            {"cluster_name":"Samara","macrolocal_cluster_id":4042,"warehouses":[]},
+            {"cluster_name":"Moscow","macrolocal_cluster_id":4036,"warehouses":[{"storage_warehouse":{"warehouse_id":1}}]}
+        ],"errors":[{"error_reasons":["INVALID_STORAGE_WAREHOUSE"]}]});
+        let (count, missing, reasons) = draft_status_diagnostics(&payload);
+        assert_eq!(count, 2);
+        assert_eq!(missing, vec!["Samara（4042）"]);
+        assert_eq!(reasons, vec!["INVALID_STORAGE_WAREHOUSE"]);
+    }
+
+}
+
 fn supply_quantities_for_status(status: &str, quantity: i64) -> (i64, i64, i64, i64) {
     match status.trim() {
         "未送仓" => (quantity, 0, 0, 0),
@@ -9839,6 +10018,362 @@ fn save_supply_cluster_plan(
     }
     db(&state)?.execute("INSERT INTO replenishment_plan(sku,macrolocal_cluster_id,planned_qty,target_days,updated_at) VALUES(?1,?2,?3,?4,CURRENT_TIMESTAMP) ON CONFLICT(sku,macrolocal_cluster_id) DO UPDATE SET planned_qty=excluded.planned_qty,target_days=excluded.target_days,updated_at=CURRENT_TIMESTAMP", params![sku.trim(),macrolocal_cluster_id.trim(),planned_qty,target_days]).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn seller_post_once(
+    c: &Connection,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let client_id = setting(c, "seller_client_id");
+    let api_key = secret_setting(c, "seller_api_key")?;
+    if client_id.is_empty() || api_key.is_empty() {
+        return Err("请先在连接设置中配置 Seller Client ID 和 API Key".into());
+    }
+    let response = ureq::post(&format!("https://api-seller.ozon.ru{path}"))
+        .set("Client-Id", &client_id)
+        .set("Api-Key", &api_key)
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json")
+        .set("User-Agent", "OzonERPDesktop/0.1")
+        .timeout(std::time::Duration::from_secs(45))
+        .send_string(&body.to_string());
+    let raw = match response {
+        Ok(value) => value.into_string().map_err(|e| e.to_string())?,
+        Err(ureq::Error::Status(status, value)) => {
+            let detail = seller_error_detail(&value.into_string().unwrap_or_default());
+            return Err(format!("Ozon Seller API 写入接口 {path} 失败（HTTP {status}）。系统没有自动重试，请先到 Ozon 后台核对。{detail}"));
+        }
+        Err(error) => return Err(format!("Ozon Seller API 写入接口 {path} 网络响应不明确：{error}。系统没有重试，请先到 Ozon 后台核对是否已创建。")),
+    };
+    serde_json::from_str(&raw).map_err(|e| format!("Ozon Seller API {path} 返回无法解析：{e}"))
+}
+
+#[tauri::command]
+async fn search_supply_dropoffs(
+    search: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SupplyDropoffOption>, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if search.trim().chars().count() < 4 { return Err("越库发货点搜索词至少需要 4 个字符".into()); }
+        let c = db(&owned)?;
+        let payload = seller_post(&c, "/v1/warehouse/fbo/list", &serde_json::json!({"filter_by_supply_type":["CREATE_TYPE_CROSSDOCK"],"search":search.trim()}))?;
+        Ok(payload.get("search").and_then(|v| v.as_array()).into_iter().flatten().filter_map(|row| {
+            let warehouse_id = supply_json_i64(row.get("warehouse_id"));
+            if warehouse_id <= 0 { return None; }
+            Some(SupplyDropoffOption {
+                warehouse_id,
+                // The multi-cluster draft API expects DELIVERY_POINT for this
+                // physical drop-off point. Do not forward the list API enum.
+                warehouse_type: "DELIVERY_POINT".into(),
+                name: json_text(row.get("name")),
+                address: json_text(row.get("address")),
+            })
+        }).collect())
+    }).await.map_err(|e| format!("搜索越库发货点后台任务失败：{e}"))?
+}
+
+#[tauri::command]
+async fn create_supply_workflow_drafts(
+    mode: String,
+    groups: Vec<SupplyDraftGroupInput>,
+    dropoff_warehouse_id: Option<i64>,
+    dropoff_warehouse_type: Option<String>,
+    confirmation: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SupplyDraftCreated>, String> {
+    let normalized = mode.trim().to_ascii_uppercase();
+    if normalized != "DIRECT" && normalized != "CROSSDOCK" {
+        return Err("约仓模式必须是 DIRECT 或 CROSSDOCK".into());
+    }
+    if confirmation != "确认创建草稿" {
+        return Err("必须输入“确认创建草稿”后才能写入 Ozon".into());
+    }
+    if groups.is_empty() {
+        return Err("没有可创建的集群商品".into());
+    }
+    if normalized == "CROSSDOCK" && groups.len() > 20 {
+        return Err("Ozon 单个多集群越库草稿最多支持 20 个集群，请拆分后再提交".into());
+    }
+    if normalized == "CROSSDOCK" && dropoff_warehouse_id.unwrap_or(0) <= 0 {
+        return Err("越库必须选择有效的 Ozon 发货点".into());
+    }
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let c = db(&owned)?;
+        let mut cluster_infos = Vec::new();
+        let mut cluster_ids = Vec::new();
+        for group in &groups {
+            let cluster_id = group.macrolocal_cluster_id.trim().parse::<i64>().map_err(|_| format!("集群 ID 无效：{}", group.macrolocal_cluster_id))?;
+            let items = group.items.iter().map(|item| {
+                let sku = item.sku.trim().parse::<i64>().map_err(|_| format!("SKU 必须是 Ozon 数字 SKU：{}", item.sku))?;
+                if item.quantity <= 0 { return Err(format!("SKU {} 的数量必须大于 0", item.sku)); }
+                Ok(serde_json::json!({"sku":sku,"quantity":item.quantity}))
+            }).collect::<Result<Vec<_>,String>>()?;
+            cluster_infos.push(serde_json::json!({"items":items,"macrolocal_cluster_id":cluster_id}));
+            cluster_ids.push(group.macrolocal_cluster_id.clone());
+        }
+        if normalized == "CROSSDOCK" {
+            // Never forward the warehouse-list enum (often `0`) into the draft API.
+            // `/v1/draft/multi-cluster/create` expects the draft warehouse enum.
+            let warehouse_type = multi_cluster_dropoff_warehouse_type(dropoff_warehouse_type.as_deref());
+            let body = serde_json::json!({
+                "clusters_info": cluster_infos,
+                "deletion_sku_mode":"PARTIAL",
+                "delivery_info":{
+                    "type":"DROPOFF",
+                    "drop_off_warehouse":{"warehouse_id":dropoff_warehouse_id.unwrap_or(0),"warehouse_type":warehouse_type}
+                }
+            });
+            let payload = seller_post_once(&c, "/v1/draft/multi-cluster/create", &body)?;
+            let draft_id = supply_json_i64(payload.get("draft_id").or_else(|| payload.pointer("/result/draft_id")));
+            if draft_id <= 0 { return Err("多集群越库草稿已提交，但 Ozon 未返回 draft_id；请先到后台核对，系统不会重复提交".into()); }
+            return Ok(vec![SupplyDraftCreated { draft_id, macrolocal_cluster_id: cluster_ids.join(", "), status: json_text(payload.get("status")), message: json_text(payload.get("message")) }]);
+        }
+        let mut created = Vec::new();
+        for (group, cluster_info) in groups.into_iter().zip(cluster_infos.into_iter()) {
+            let body = serde_json::json!({"cluster_info":cluster_info,"deletion_sku_mode":"PARTIAL"});
+            let path = "/v1/draft/direct/create";
+            let payload = seller_post_once(&c, path, &body)?;
+            let draft_id = supply_json_i64(payload.get("draft_id").or_else(|| payload.pointer("/result/draft_id")));
+            if draft_id <= 0 { return Err(format!("集群 {} 的草稿已提交，但 Ozon 未返回 draft_id；请先到后台核对，系统不会重复提交", group.macrolocal_cluster_id)); }
+            created.push(SupplyDraftCreated { draft_id, macrolocal_cluster_id: group.macrolocal_cluster_id, status: json_text(payload.get("status")), message: json_text(payload.get("message")) });
+        }
+        Ok(created)
+    }).await.map_err(|e| format!("创建 Ozon 草稿后台任务失败：{e}"))?
+}
+
+fn collect_draft_destinations(
+    value: &serde_json::Value,
+    inherited_cluster: &str,
+    output: &mut Vec<SupplyDraftDestination>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            // Ozon currently returns `macrolocal_cluster_id` from the v2 shape,
+            // but some multi-cluster calculations still use the compatible
+            // `cluster_id` + `supply_warehouse` shape. Preserve either id while
+            // recursively entering the nested warehouse object.
+            let cluster = supply_identifier(
+                map.get("macrolocal_cluster_id")
+                    .or_else(|| map.get("cluster_id")),
+            )
+            .trim()
+            .to_string();
+            let cluster = if cluster.is_empty() {
+                inherited_cluster
+            } else {
+                &cluster
+            };
+            let warehouse_id = supply_json_i64(map.get("storage_warehouse_id").or_else(|| {
+                (!inherited_cluster.is_empty()).then(|| map.get("warehouse_id")).flatten()
+            }));
+            // In Ozon's current MULTI_CLUSTER unified-shipping response, a
+            // FULL_AVAILABLE route intentionally has `storage_warehouse:null`.
+            // The timeslot API expects that accepted route to be sent as
+            // storage_warehouse_id=0, which means "Ozon chooses the internal
+            // destination" rather than "route missing".
+            let auto_routed = !cluster.is_empty()
+                && map.get("storage_warehouse").is_some_and(serde_json::Value::is_null)
+                && map
+                    .get("availability_status")
+                    .and_then(|value| value.get("state"))
+                    .and_then(|value| value.as_str())
+                    == Some("FULL_AVAILABLE");
+            if warehouse_id > 0 || auto_routed {
+                let mut name = json_text(map.get("name").or_else(|| map.get("warehouse_name")));
+                if auto_routed && name.is_empty() {
+                    name = "统一发运（Ozon 自动分配）".into();
+                }
+                let address =
+                    json_text(map.get("address").or_else(|| map.get("warehouse_address")));
+                if !output.iter().any(|row| {
+                    row.storage_warehouse_id == warehouse_id && row.macrolocal_cluster_id == cluster
+                }) {
+                    output.push(SupplyDraftDestination {
+                        macrolocal_cluster_id: cluster.to_string(),
+                        storage_warehouse_id: warehouse_id,
+                        name,
+                        address,
+                    });
+                }
+            }
+            for child in map.values() {
+                collect_draft_destinations(child, cluster, output);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_draft_destinations(child, inherited_cluster, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_supply_timeslots(value: &serde_json::Value, output: &mut Vec<SupplyTimeslot>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let from = json_text(map.get("from").or_else(|| map.get("from_in_timezone")));
+            let to = json_text(map.get("to").or_else(|| map.get("to_in_timezone")));
+            if !from.is_empty() && !to.is_empty() && !output.iter().any(|slot| slot.from == from && slot.to == to) {
+                output.push(SupplyTimeslot { from, to });
+            }
+            for child in map.values() { collect_supply_timeslots(child, output); }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values { collect_supply_timeslots(child, output); }
+        }
+        _ => {}
+    }
+}
+
+fn draft_status_diagnostics(payload: &serde_json::Value) -> (usize, Vec<String>, Vec<String>) {
+    let clusters = payload.get("clusters")
+        .or_else(|| payload.pointer("/result/clusters"))
+        .and_then(|value| value.as_array());
+    let mut without_warehouses = Vec::new();
+    if let Some(clusters) = clusters {
+        for cluster in clusters {
+            let warehouses = cluster.get("warehouses").and_then(|value| value.as_array());
+            if warehouses.map(|rows| rows.is_empty()).unwrap_or(true) {
+                let name = json_text(cluster.get("cluster_name"));
+                let id = supply_identifier(cluster.get("macrolocal_cluster_id").or_else(|| cluster.get("cluster_id")));
+                without_warehouses.push(if name.is_empty() { format!("集群 {id}") } else if id.is_empty() { name } else { format!("{name}（{id}）") });
+            }
+        }
+    }
+    let mut reasons = Vec::new();
+    let errors = payload.get("errors").or_else(|| payload.pointer("/result/errors")).and_then(|value| value.as_array());
+    for error in errors.into_iter().flatten() {
+        let message = json_text(error.get("message").or_else(|| error.get("error_message")));
+        if !message.is_empty() && message != "UNSPECIFIED" && !reasons.contains(&message) { reasons.push(message); }
+        for reason in error.get("error_reasons").and_then(|value| value.as_array()).into_iter().flatten() {
+            let value = json_text(Some(reason));
+            if !value.is_empty() && value != "UNSPECIFIED" && !reasons.contains(&value) { reasons.push(value); }
+        }
+    }
+    (clusters.map(Vec::len).unwrap_or(0), without_warehouses, reasons)
+}
+
+#[tauri::command]
+async fn supply_workflow_draft_status(
+    draft_ids: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<SupplyDraftStatusRow>, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let c = db(&owned)?;
+        let mut rows = Vec::new();
+        for draft_id in draft_ids.into_iter().filter(|id| *id > 0) {
+            let payload = seller_post(
+                &c,
+                "/v2/draft/create/info",
+                &serde_json::json!({"draft_id":draft_id}),
+            )?;
+            let status = json_text(
+                payload
+                    .get("status")
+                    .or_else(|| payload.pointer("/result/status")),
+            );
+            let message = json_text(
+                payload
+                    .get("message")
+                    .or_else(|| payload.pointer("/result/message")),
+            );
+            let mut destinations = Vec::new();
+            collect_draft_destinations(&payload, "", &mut destinations);
+            let (cluster_count, clusters_without_warehouses, error_reasons) = draft_status_diagnostics(&payload);
+            let message = if message.is_empty() && destinations.is_empty() {
+                if !error_reasons.is_empty() {
+                    format!("Ozon 未返回平台分配仓：{}", error_reasons.join("；"))
+                } else if cluster_count > 0 {
+                    format!("Ozon 已校验 {cluster_count} 个集群，但没有返回内部转运路由，暂时无法查询集中配送地址的时段")
+                } else {
+                    "Ozon 草稿响应未返回集群与内部转运路由，暂时无法查询集中配送地址的时段".into()
+                }
+            } else { message };
+            rows.push(SupplyDraftStatusRow {
+                draft_id,
+                status,
+                message,
+                destinations,
+                cluster_count,
+                clusters_without_warehouses,
+                error_reasons,
+            });
+        }
+        Ok(rows)
+    })
+    .await
+    .map_err(|e| format!("读取草稿校验结果后台任务失败：{e}"))?
+}
+
+#[tauri::command]
+async fn supply_workflow_draft_timeslots(
+    draft_id: i64,
+    mode: String,
+    selected_cluster_warehouses: Vec<SupplyClusterWarehouseInput>,
+    date_from: String,
+    date_to: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SupplyTimeslot>, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if selected_cluster_warehouses.is_empty() { return Err("草稿尚未返回平台分配仓（Ozon 内部转运路由）".into()); }
+        let normalized_mode = mode.trim().to_ascii_uppercase();
+        let destinations = selected_cluster_warehouses.into_iter().map(|row| {
+            let cluster_id = row.macrolocal_cluster_id.parse::<i64>().map_err(|_| "草稿集群 ID 无效".to_string())?;
+            if row.storage_warehouse_id < 0 || (row.storage_warehouse_id == 0 && normalized_mode != "MULTI_CLUSTER") { return Err("草稿平台分配仓 ID 无效".into()); }
+            Ok(serde_json::json!({"macrolocal_cluster_id":cluster_id,"storage_warehouse_id":row.storage_warehouse_id}))
+        }).collect::<Result<Vec<_>, String>>()?;
+        let c = db(&owned)?;
+        let payload = seller_post(&c, "/v2/draft/timeslot/info", &serde_json::json!({
+            "date_from":date_from,"date_to":date_to,"draft_id":draft_id,"supply_type":normalized_mode,
+            "selected_cluster_warehouses":destinations
+        }))?;
+        let error_reason = json_text(payload.get("error_reason"));
+        if !error_reason.is_empty() && error_reason != "UNSPECIFIED" {
+            return Err(format!("Ozon 未返回可预约时段：{error_reason}"));
+        }
+        let mut slots = Vec::new();
+        collect_supply_timeslots(&payload, &mut slots);
+        Ok(slots)
+    }).await.map_err(|e| format!("查询草稿时段后台任务失败：{e}"))?
+}
+
+#[tauri::command]
+async fn create_supply_from_workflow_draft(
+    draft_id: i64,
+    mode: String,
+    selected_cluster_warehouses: Vec<SupplyClusterWarehouseInput>,
+    timeslot_from: String,
+    timeslot_to: String,
+    confirmation: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if confirmation != "确认约仓" {
+        return Err("必须输入“确认约仓”后才能创建真实供应单".into());
+    }
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if selected_cluster_warehouses.is_empty() { return Err("草稿尚未返回平台分配仓（Ozon 内部转运路由）".into()); }
+        let normalized_mode = mode.trim().to_ascii_uppercase();
+        let destinations = selected_cluster_warehouses.into_iter().map(|row| {
+            let cluster_id = row.macrolocal_cluster_id.parse::<i64>().map_err(|_| "草稿集群 ID 无效".to_string())?;
+            if row.storage_warehouse_id < 0 || (row.storage_warehouse_id == 0 && normalized_mode != "MULTI_CLUSTER") { return Err("草稿平台分配仓 ID 无效".into()); }
+            Ok(serde_json::json!({"macrolocal_cluster_id":cluster_id,"storage_warehouse_id":row.storage_warehouse_id}))
+        }).collect::<Result<Vec<_>, String>>()?;
+        let c = db(&owned)?;
+        let payload = seller_post_once(&c, "/v2/draft/supply/create", &serde_json::json!({
+            "draft_id":draft_id,"supply_type":normalized_mode,
+            "selected_cluster_warehouses":destinations,
+            "timeslot":{"from_in_timezone":timeslot_from,"to_in_timezone":timeslot_to}
+        }))?;
+        let operation = supply_identifier(payload.get("operation_id").or_else(|| payload.pointer("/result/operation_id")));
+        Ok(if operation.is_empty() { format!("Ozon 已接受草稿 {draft_id} 的约仓请求，请刷新供应单确认结果") } else { format!("Ozon 已接受约仓请求，操作 ID：{operation}") })
+    }).await.map_err(|e| format!("草稿创建供应单后台任务失败：{e}"))?
 }
 
 fn supply_orders_blocking(state: &AppState) -> Result<Vec<SupplyOrderRow>, String> {
@@ -9953,11 +10488,13 @@ fn supply_json_i64(value: Option<&serde_json::Value>) -> i64 {
 }
 
 fn supply_identifier(value: Option<&serde_json::Value>) -> String {
-    value.map(|v| match v {
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Number(number) => number.to_string(),
-        _ => String::new(),
-    }).unwrap_or_default()
+    value
+        .map(|v| match v {
+            serde_json::Value::String(text) => text.clone(),
+            serde_json::Value::Number(number) => number.to_string(),
+            _ => String::new(),
+        })
+        .unwrap_or_default()
 }
 
 fn register_cargo_mark(
@@ -9967,16 +10504,24 @@ fn register_cargo_mark(
     let bundle = supply_identifier(cargo.get("bundle_id"));
     let barcode = supply_identifier(cargo.get("barcode"));
     let cargo_id = supply_identifier(cargo.get("cargo_id"));
-    let mark = if !barcode.is_empty() { barcode } else { cargo_id };
+    let mark = if !barcode.is_empty() {
+        barcode
+    } else {
+        cargo_id
+    };
     if !bundle.is_empty() && !mark.is_empty() {
         let marks = target.entry(bundle).or_default();
-        if !marks.contains(&mark) { marks.push(mark); }
+        if !marks.contains(&mark) {
+            marks.push(mark);
+        }
     }
 }
 
 #[cfg(test)]
 mod supply_item_tests {
-    use super::{register_cargo_mark, supply_identifier, write_supply_cargo_xlsx, SupplyOrderItemRow};
+    use super::{
+        register_cargo_mark, supply_identifier, write_supply_cargo_xlsx, SupplyOrderItemRow,
+    };
     use std::collections::BTreeMap;
     use std::io::Read;
 
@@ -9992,7 +10537,8 @@ mod supply_item_tests {
 
     #[test]
     fn printed_barcode_has_priority_over_internal_cargo_id() {
-        let cargo = serde_json::json!({"bundle_id":"bundle-1","cargo_id":4070,"barcode":"OZN-BOX-4070"});
+        let cargo =
+            serde_json::json!({"bundle_id":"bundle-1","cargo_id":4070,"barcode":"OZN-BOX-4070"});
         let mut marks = BTreeMap::new();
         register_cargo_mark(&cargo, &mut marks);
         assert_eq!(marks["bundle-1"], vec!["OZN-BOX-4070"]);
@@ -10002,13 +10548,20 @@ mod supply_item_tests {
     fn cargo_export_flattens_each_mark_and_keeps_identifiers_as_text() {
         let path = std::env::temp_dir().join(format!("cargo-export-{}.xlsx", std::process::id()));
         let rows = vec![SupplyOrderItemRow {
-            product_name: "测试商品".into(), sku: "02550136857".into(), offer_id: "GJYB001-YELLOW".into(),
-            cargo_marks: vec!["箱唛A".into(), "箱唛B".into()], quantity: 20,
+            product_name: "测试商品".into(),
+            sku: "02550136857".into(),
+            offer_id: "GJYB001-YELLOW".into(),
+            cargo_marks: vec!["箱唛A".into(), "箱唛B".into()],
+            quantity: 20,
         }];
         assert_eq!(write_supply_cargo_xlsx(&path, "TEST-1", &rows).unwrap(), 2);
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
         let mut xml = String::new();
-        archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut xml).unwrap();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
         assert!(xml.contains("GJYB001-YELLOW"));
         assert!(xml.contains("02550136857"));
         assert!(xml.contains("箱唛A") && xml.contains("箱唛B"));
@@ -10022,150 +10575,345 @@ fn supply_bundle_items(c: &Connection, bundle_id: &str) -> Result<Vec<serde_json
     let mut rows = Vec::new();
     let mut last_id = String::new();
     for _ in 0..50 {
-        let payload = seller_post(c, "/v1/supply-order/bundle", &serde_json::json!({
-            "bundle_ids":[bundle_id], "is_asc":true, "last_id":last_id,
-            "limit":100, "query":"", "sort_field":"UNSPECIFIED"
-        }))?;
-        let page = payload.get("items").or_else(|| payload.pointer("/result/items"))
-            .and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let next = json_text(payload.get("last_id").or_else(|| payload.pointer("/result/last_id")));
-        let has_next = payload.get("has_next").or_else(|| payload.pointer("/result/has_next"))
-            .and_then(|v| v.as_bool()).unwrap_or(false);
+        let payload = seller_post(
+            c,
+            "/v1/supply-order/bundle",
+            &serde_json::json!({
+                "bundle_ids":[bundle_id], "is_asc":true, "last_id":last_id,
+                "limit":100, "query":"", "sort_field":"UNSPECIFIED"
+            }),
+        )?;
+        let page = payload
+            .get("items")
+            .or_else(|| payload.pointer("/result/items"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let next = json_text(
+            payload
+                .get("last_id")
+                .or_else(|| payload.pointer("/result/last_id")),
+        );
+        let has_next = payload
+            .get("has_next")
+            .or_else(|| payload.pointer("/result/has_next"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         rows.extend(page.iter().cloned());
-        if page.is_empty() || !has_next || next.is_empty() || next == last_id { break; }
+        if page.is_empty() || !has_next || next.is_empty() || next == last_id {
+            break;
+        }
         last_id = next;
     }
     Ok(rows)
 }
 
-fn supply_order_items_blocking(order_id: i64, refresh: bool, state: &AppState) -> Result<SupplyOrderItemsResult, String> {
-    if order_id <= 0 { return Err("供应单 ID 无效".into()); }
-    let set_progress = |status: &str, total: usize, completed: usize, stage: &str, message: &str| {
-        if let Ok(mut all) = SUPPLY_ITEM_PROGRESS.lock() {
-            all.insert(order_id, SupplyOrderItemsProgress {
-                status: status.into(), total, completed, stage: stage.into(), message: message.into(),
-            });
-        }
-    };
+fn supply_order_items_blocking(
+    order_id: i64,
+    refresh: bool,
+    state: &AppState,
+) -> Result<SupplyOrderItemsResult, String> {
+    if order_id <= 0 {
+        return Err("供应单 ID 无效".into());
+    }
+    let set_progress =
+        |status: &str, total: usize, completed: usize, stage: &str, message: &str| {
+            if let Ok(mut all) = SUPPLY_ITEM_PROGRESS.lock() {
+                all.insert(
+                    order_id,
+                    SupplyOrderItemsProgress {
+                        status: status.into(),
+                        total,
+                        completed,
+                        stage: stage.into(),
+                        message: message.into(),
+                    },
+                );
+            }
+        };
     set_progress("running", 1, 0, "order", "正在读取供应单信息");
     let c = db(state)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS supply_order_item_cache(order_id INTEGER PRIMARY KEY,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e| e.to_string())?;
     if !refresh {
         if let Ok((payload, cached_at)) = c.query_row(
             "SELECT payload,updated_at FROM supply_order_item_cache WHERE order_id=?1",
-            [order_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?)),
+            [order_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         ) {
             if let Ok(rows) = serde_json::from_str::<Vec<SupplyOrderItemRow>>(&payload) {
                 set_progress("cached", 1, 1, "cache", "已从当前店铺缓存读取");
-                return Ok(SupplyOrderItemsResult { rows, warning: String::new(), from_cache: true, cached_at });
+                return Ok(SupplyOrderItemsResult {
+                    rows,
+                    warning: String::new(),
+                    from_cache: true,
+                    cached_at,
+                });
             }
         }
     }
-    let order_payload = seller_post(&c, "/v3/supply-order/get", &serde_json::json!({"order_ids":[order_id]}))?;
-    let order = order_payload.get("orders").and_then(|v| v.as_array()).and_then(|v| v.first())
+    let order_payload = seller_post(
+        &c,
+        "/v3/supply-order/get",
+        &serde_json::json!({"order_ids":[order_id]}),
+    )?;
+    let order = order_payload
+        .get("orders")
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first())
         .ok_or_else(|| format!("供应单 {order_id} 不存在或无权读取"))?;
-    let supplies = order.get("supplies").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let supply_ids: Vec<i64> = supplies.iter().map(|v| supply_json_i64(v.get("supply_id"))).filter(|v| *v > 0).collect();
-    let main_bundles: Vec<String> = supplies.iter().map(|v| supply_identifier(v.get("bundle_id"))).filter(|v| !v.is_empty()).collect();
+    let supplies = order
+        .get("supplies")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let supply_ids: Vec<i64> = supplies
+        .iter()
+        .map(|v| supply_json_i64(v.get("supply_id")))
+        .filter(|v| *v > 0)
+        .collect();
+    let main_bundles: Vec<String> = supplies
+        .iter()
+        .map(|v| supply_identifier(v.get("bundle_id")))
+        .filter(|v| !v.is_empty())
+        .collect();
     let mut progress_total = 2 + main_bundles.len();
     let mut progress_done = 1;
-    set_progress("running", progress_total, progress_done, "cargo", "正在读取箱唛与货位信息");
+    set_progress(
+        "running",
+        progress_total,
+        progress_done,
+        "cargo",
+        "正在读取箱唛与货位信息",
+    );
 
-    let mut cargo_by_bundle: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut cargo_by_bundle: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     let mut warning = String::new();
     if !supply_ids.is_empty() {
-        match seller_post(&c, "/v1/cargoes/supplies/get", &serde_json::json!({"supply_ids":supply_ids})) {
+        match seller_post(
+            &c,
+            "/v1/cargoes/supplies/get",
+            &serde_json::json!({"supply_ids":supply_ids}),
+        ) {
             Ok(payload) => {
-                let cargo_supplies = payload.get("supplies_cargoes").or_else(|| payload.pointer("/result/supplies_cargoes"))
-                    .and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let cargo_supplies = payload
+                    .get("supplies_cargoes")
+                    .or_else(|| payload.pointer("/result/supplies_cargoes"))
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 for supply in cargo_supplies {
-                    for cargo in supply.get("cargoes_without_transport_cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
+                    for cargo in supply
+                        .get("cargoes_without_transport_cargoes")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                    {
                         register_cargo_mark(cargo, &mut cargo_by_bundle);
                     }
-                    for transport in supply.get("transport_cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
-                        for cargo in transport.get("cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
+                    for transport in supply
+                        .get("transport_cargoes")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                    {
+                        for cargo in transport
+                            .get("cargoes")
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
                             register_cargo_mark(cargo, &mut cargo_by_bundle);
                         }
                     }
                 }
             }
-            Err(new_error) => match seller_post(&c, "/v1/cargoes/get", &serde_json::json!({"supply_ids":supply_ids})) {
-                Ok(payload) => {
-                    for supply in payload.get("supply").or_else(|| payload.pointer("/result/supply"))
-                        .and_then(|v| v.as_array()).into_iter().flatten() {
-                        for cargo in supply.get("cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
-                            register_cargo_mark(cargo, &mut cargo_by_bundle);
+            Err(new_error) => {
+                match seller_post(
+                    &c,
+                    "/v1/cargoes/get",
+                    &serde_json::json!({"supply_ids":supply_ids}),
+                ) {
+                    Ok(payload) => {
+                        for supply in payload
+                            .get("supply")
+                            .or_else(|| payload.pointer("/result/supply"))
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
+                            for cargo in supply
+                                .get("cargoes")
+                                .and_then(|v| v.as_array())
+                                .into_iter()
+                                .flatten()
+                            {
+                                register_cargo_mark(cargo, &mut cargo_by_bundle);
+                            }
                         }
                     }
+                    Err(old_error) => {
+                        warning = format!(
+                        "货品已读取，但箱唛读取失败：新版接口：{new_error}；兼容接口：{old_error}"
+                    )
+                    }
                 }
-                Err(old_error) => warning = format!("货品已读取，但箱唛读取失败：新版接口：{new_error}；兼容接口：{old_error}"),
-            },
+            }
         }
     }
 
-    let mut cargo_by_sku: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut cargo_by_sku: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     progress_total += cargo_by_bundle.len();
     progress_done += 1;
-    set_progress("running", progress_total, progress_done, "cargo_items", "正在关联箱唛与商品");
+    set_progress(
+        "running",
+        progress_total,
+        progress_done,
+        "cargo_items",
+        "正在关联箱唛与商品",
+    );
     for (bundle, marks) in &cargo_by_bundle {
         for item in supply_bundle_items(&c, bundle)? {
             let sku = supply_identifier(item.get("sku"));
             if !sku.is_empty() {
                 let target = cargo_by_sku.entry(sku).or_default();
-                for mark in marks { if !target.contains(mark) { target.push(mark.clone()); } }
+                for mark in marks {
+                    if !target.contains(mark) {
+                        target.push(mark.clone());
+                    }
+                }
             }
         }
         progress_done += 1;
-        set_progress("running", progress_total, progress_done, "cargo_items", &format!("已关联 {progress_done}/{progress_total} 个步骤"));
+        set_progress(
+            "running",
+            progress_total,
+            progress_done,
+            "cargo_items",
+            &format!("已关联 {progress_done}/{progress_total} 个步骤"),
+        );
     }
-    let mut merged: std::collections::BTreeMap<String, SupplyOrderItemRow> = std::collections::BTreeMap::new();
+    let mut merged: std::collections::BTreeMap<String, SupplyOrderItemRow> =
+        std::collections::BTreeMap::new();
     for bundle in main_bundles {
-        set_progress("running", progress_total, progress_done, "products", "正在读取供应商品明细");
+        set_progress(
+            "running",
+            progress_total,
+            progress_done,
+            "products",
+            "正在读取供应商品明细",
+        );
         for item in supply_bundle_items(&c, &bundle)? {
             let sku = supply_identifier(item.get("sku"));
             let offer_id = {
                 let direct = supply_identifier(item.get("offer_id"));
-                if direct.is_empty() { supply_identifier(item.get("contractor_item_code")) } else { direct }
-            }.trim().to_string();
-            let key = if !sku.is_empty() { sku.clone() } else { offer_id.clone() };
-            if key.is_empty() { continue; }
-            let quantity = supply_json_i64(item.get("quantity")).max(supply_json_i64(item.get("quant")));
+                if direct.is_empty() {
+                    supply_identifier(item.get("contractor_item_code"))
+                } else {
+                    direct
+                }
+            }
+            .trim()
+            .to_string();
+            let key = if !sku.is_empty() {
+                sku.clone()
+            } else {
+                offer_id.clone()
+            };
+            if key.is_empty() {
+                continue;
+            }
+            let quantity =
+                supply_json_i64(item.get("quantity")).max(supply_json_i64(item.get("quant")));
             let row = merged.entry(key).or_insert_with(|| SupplyOrderItemRow {
-                product_name: json_text(item.get("name")), sku: sku.clone(), offer_id: offer_id.clone(),
-                cargo_marks: cargo_by_sku.get(&sku).cloned().unwrap_or_default(), quantity: 0,
+                product_name: json_text(item.get("name")),
+                sku: sku.clone(),
+                offer_id: offer_id.clone(),
+                cargo_marks: cargo_by_sku.get(&sku).cloned().unwrap_or_default(),
+                quantity: 0,
             });
             row.quantity += quantity;
             for mark in cargo_by_sku.get(&sku).into_iter().flatten() {
-                if !row.cargo_marks.contains(mark) { row.cargo_marks.push(mark.clone()); }
+                if !row.cargo_marks.contains(mark) {
+                    row.cargo_marks.push(mark.clone());
+                }
             }
         }
         progress_done += 1;
-        set_progress("running", progress_total, progress_done, "products", &format!("已读取 {progress_done}/{progress_total} 个步骤"));
+        set_progress(
+            "running",
+            progress_total,
+            progress_done,
+            "products",
+            &format!("已读取 {progress_done}/{progress_total} 个步骤"),
+        );
     }
     let mut rows: Vec<_> = merged.into_values().collect();
     for row in &mut rows {
-        if let Ok((offer, name)) = c.query_row("SELECT offer_id,name FROM products WHERE sku=?1", [&row.sku], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?))) {
-            if row.offer_id.is_empty() { row.offer_id = offer; }
-            if row.product_name.is_empty() { row.product_name = name; }
+        if let Ok((offer, name)) = c.query_row(
+            "SELECT offer_id,name FROM products WHERE sku=?1",
+            [&row.sku],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ) {
+            if row.offer_id.is_empty() {
+                row.offer_id = offer;
+            }
+            if row.product_name.is_empty() {
+                row.product_name = name;
+            }
         }
         row.cargo_marks.sort();
     }
-    rows.sort_by(|a,b| a.offer_id.cmp(&b.offer_id).then(a.sku.cmp(&b.sku)));
+    rows.sort_by(|a, b| a.offer_id.cmp(&b.offer_id).then(a.sku.cmp(&b.sku)));
     let payload = serde_json::to_string(&rows).map_err(|e| e.to_string())?;
     c.execute("INSERT INTO supply_order_item_cache(order_id,payload,updated_at) VALUES(?1,?2,CURRENT_TIMESTAMP) ON CONFLICT(order_id) DO UPDATE SET payload=excluded.payload,updated_at=CURRENT_TIMESTAMP", params![order_id,payload]).map_err(|e|e.to_string())?;
-    let cached_at = c.query_row("SELECT updated_at FROM supply_order_item_cache WHERE order_id=?1", [order_id], |row| row.get(0)).unwrap_or_default();
-    set_progress("success", progress_total, progress_total, "complete", &format!("读取完成，共 {} 个商品", rows.len()));
-    Ok(SupplyOrderItemsResult { rows, warning, from_cache: false, cached_at })
+    let cached_at = c
+        .query_row(
+            "SELECT updated_at FROM supply_order_item_cache WHERE order_id=?1",
+            [order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_default();
+    set_progress(
+        "success",
+        progress_total,
+        progress_total,
+        "complete",
+        &format!("读取完成，共 {} 个商品", rows.len()),
+    );
+    Ok(SupplyOrderItemsResult {
+        rows,
+        warning,
+        from_cache: false,
+        cached_at,
+    })
 }
 
 #[tauri::command]
-async fn supply_order_items(order_id: i64, refresh: bool, state: State<'_, AppState>) -> Result<SupplyOrderItemsResult, String> {
+async fn supply_order_items(
+    order_id: i64,
+    refresh: bool,
+    state: State<'_, AppState>,
+) -> Result<SupplyOrderItemsResult, String> {
     let owned = background_state(&state)?;
-    let result = tauri::async_runtime::spawn_blocking(move || supply_order_items_blocking(order_id, refresh, &owned))
-        .await.map_err(|e| format!("读取供应单货品后台任务失败：{e}"))?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        supply_order_items_blocking(order_id, refresh, &owned)
+    })
+    .await
+    .map_err(|e| format!("读取供应单货品后台任务失败：{e}"))?;
     if let Err(error) = &result {
         if let Ok(mut all) = SUPPLY_ITEM_PROGRESS.lock() {
-            all.insert(order_id, SupplyOrderItemsProgress { status:"failed".into(), total:1, completed:0, stage:"error".into(), message:error.clone() });
+            all.insert(
+                order_id,
+                SupplyOrderItemsProgress {
+                    status: "failed".into(),
+                    total: 1,
+                    completed: 0,
+                    stage: "error".into(),
+                    message: error.clone(),
+                },
+            );
         }
     }
     result
@@ -10173,28 +10921,59 @@ async fn supply_order_items(order_id: i64, refresh: bool, state: State<'_, AppSt
 
 #[tauri::command]
 fn supply_order_items_progress(order_id: i64) -> SupplyOrderItemsProgress {
-    SUPPLY_ITEM_PROGRESS.lock().ok().and_then(|all| all.get(&order_id).cloned()).unwrap_or_default()
+    SUPPLY_ITEM_PROGRESS
+        .lock()
+        .ok()
+        .and_then(|all| all.get(&order_id).cloned())
+        .unwrap_or_default()
 }
 
 fn supply_export_xml(value: &str) -> String {
-    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn supply_export_cell(reference: &str, value: &str, style: u8) -> String {
-    format!(r#"<c r="{reference}" t="inlineStr" s="{style}"><is><t xml:space="preserve">{}</t></is></c>"#, supply_export_xml(value))
+    format!(
+        r#"<c r="{reference}" t="inlineStr" s="{style}"><is><t xml:space="preserve">{}</t></is></c>"#,
+        supply_export_xml(value)
+    )
 }
 
-fn write_supply_cargo_xlsx(path: &Path, order_label: &str, rows: &[SupplyOrderItemRow]) -> Result<usize, String> {
+fn write_supply_cargo_xlsx(
+    path: &Path,
+    order_label: &str,
+    rows: &[SupplyOrderItemRow],
+) -> Result<usize, String> {
     let mut body = String::new();
     let headers = ["物流箱唛", "物流箱号", "Ozon 货号", "Ozon SKU", "箱唛"];
     let columns = ["A", "B", "C", "D", "E"];
-    let header_cells = headers.iter().enumerate().map(|(i, value)| supply_export_cell(&format!("{}3", columns[i]), value, 2)).collect::<String>();
-    body.push_str(&format!(r#"<row r="1" ht="28" customHeight="1">{}</row>"#, supply_export_cell("A1", &format!("Ozon 箱唛导出 · {order_label}"), 1)));
-    body.push_str(&format!(r#"<row r="2" ht="22" customHeight="1">{}</row>"#, supply_export_cell("A2", "前两列留空供物流商填写；每个箱唛单独一行。", 3)));
-    body.push_str(&format!(r#"<row r="3" ht="26" customHeight="1">{header_cells}</row>"#));
+    let header_cells = headers
+        .iter()
+        .enumerate()
+        .map(|(i, value)| supply_export_cell(&format!("{}3", columns[i]), value, 2))
+        .collect::<String>();
+    body.push_str(&format!(
+        r#"<row r="1" ht="28" customHeight="1">{}</row>"#,
+        supply_export_cell("A1", &format!("Ozon 箱唛导出 · {order_label}"), 1)
+    ));
+    body.push_str(&format!(
+        r#"<row r="2" ht="22" customHeight="1">{}</row>"#,
+        supply_export_cell("A2", "前两列留空供物流商填写；每个箱唛单独一行。", 3)
+    ));
+    body.push_str(&format!(
+        r#"<row r="3" ht="26" customHeight="1">{header_cells}</row>"#
+    ));
     let mut output_rows = 0usize;
     for item in rows {
-        let marks: Vec<&str> = if item.cargo_marks.is_empty() { vec![""] } else { item.cargo_marks.iter().map(String::as_str).collect() };
+        let marks: Vec<&str> = if item.cargo_marks.is_empty() {
+            vec![""]
+        } else {
+            item.cargo_marks.iter().map(String::as_str).collect()
+        };
         for mark in marks {
             output_rows += 1;
             let row = output_rows + 3;
@@ -10204,20 +10983,38 @@ fn write_supply_cargo_xlsx(path: &Path, order_label: &str, rows: &[SupplyOrderIt
                 supply_export_cell(&format!("C{row}"), &item.offer_id, 5),
                 supply_export_cell(&format!("D{row}"), &item.sku, 5),
                 supply_export_cell(&format!("E{row}"), mark, 5),
-            ].concat();
-            body.push_str(&format!(r#"<row r="{row}" ht="23" customHeight="1">{cells}</row>"#));
+            ]
+            .concat();
+            body.push_str(&format!(
+                r#"<row r="{row}" ht="23" customHeight="1">{cells}</row>"#
+            ));
         }
     }
     let last = (output_rows + 3).max(3);
-    let sheet = format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="2" width="20" customWidth="1"/><col min="3" max="4" width="25" customWidth="1"/><col min="5" max="5" width="34" customWidth="1"/></cols><sheetData>{body}</sheetData><autoFilter ref="A3:E{last}"/><mergeCells count="2"><mergeCell ref="A1:E1"/><mergeCell ref="A2:E2"/></mergeCells><pageMargins left="0.3" right="0.3" top="0.5" bottom="0.5" header="0.2" footer="0.2"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>"#);
+    let sheet = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="2" width="20" customWidth="1"/><col min="3" max="4" width="25" customWidth="1"/><col min="5" max="5" width="34" customWidth="1"/></cols><sheetData>{body}</sheetData><autoFilter ref="A3:E{last}"/><mergeCells count="2"><mergeCell ref="A1:E1"/><mergeCell ref="A2:E2"/></mergeCells><pageMargins left="0.3" right="0.3" top="0.5" bottom="0.5" header="0.2" footer="0.2"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>"#
+    );
     let styles = r#"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font><sz val="10"/><name val="Microsoft YaHei"/></font><font><b/><sz val="16"/><color rgb="FF102A56"/><name val="Microsoft YaHei"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Microsoft YaHei"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF17365D"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEAF2F8"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFD9E2F3"/></left><right style="thin"><color rgb="FFD9E2F3"/></right><top style="thin"><color rgb="FFD9E2F3"/></top><bottom style="thin"><color rgb="FFD9E2F3"/></bottom></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0"/><xf numFmtId="0" fontId="2" fillId="2" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="0" fillId="4" borderId="0"/><xf numFmtId="0" fontId="0" fillId="3" borderId="1" applyAlignment="1"><alignment vertical="center"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" applyAlignment="1"><alignment vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#;
     let mut zip = zip::ZipWriter::new(fs::File::create(path).map_err(|e| e.to_string())?);
-    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
     for (name, data) in [
-        ("[Content_Types].xml", r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>"#),
-        ("_rels/.rels", r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#),
-        ("xl/workbook.xml", r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="箱唛明细" sheetId="1" r:id="rId1"/></sheets></workbook>"#),
-        ("xl/_rels/workbook.xml.rels", r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#),
+        (
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/workbook.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="箱唛明细" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#,
+        ),
         ("xl/styles.xml", styles),
         ("xl/worksheets/sheet1.xml", sheet.as_str()),
     ] {
@@ -10229,45 +11026,114 @@ fn write_supply_cargo_xlsx(path: &Path, order_label: &str, rows: &[SupplyOrderIt
 }
 
 #[tauri::command]
-async fn export_supply_cargo_marks(order_id: i64, state: State<'_, AppState>) -> Result<String, String> {
+async fn export_supply_cargo_marks(
+    order_id: i64,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let owned = background_state(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
         let result = supply_order_items_blocking(order_id, false, &owned)?;
-        if result.rows.is_empty() { return Err("该供应单没有可导出的货品".into()); }
-        let dir = owned.data_dir.parent().unwrap_or(&owned.data_dir).join("exports").join("supply-cargo-marks");
+        if result.rows.is_empty() {
+            return Err("该供应单没有可导出的货品".into());
+        }
+        let dir = owned
+            .data_dir
+            .parent()
+            .unwrap_or(&owned.data_dir)
+            .join("exports")
+            .join("supply-cargo-marks");
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join(format!("箱唛明细-供应单-{order_id}.xlsx"));
         let count = write_supply_cargo_xlsx(&path, &order_id.to_string(), &result.rows)?;
         open::that(&path).map_err(|e| format!("Excel 已生成，但打开失败：{e}"))?;
         Ok(format!("已导出 {count} 行箱唛明细：{}", path.display()))
-    }).await.map_err(|e| format!("导出箱唛后台任务失败：{e}"))?
+    })
+    .await
+    .map_err(|e| format!("导出箱唛后台任务失败：{e}"))?
 }
 
 fn supply_cargo_ids(c: &Connection, order_id: i64) -> Result<Vec<(i64, Vec<i64>)>, String> {
-    let order_payload = seller_post(c, "/v3/supply-order/get", &serde_json::json!({"order_ids":[order_id]}))?;
-    let order = order_payload.get("orders").and_then(|v| v.as_array()).and_then(|v| v.first()).ok_or_else(|| format!("供应单 {order_id} 不存在或无权读取"))?;
-    let supply_ids: Vec<i64> = order.get("supplies").and_then(|v| v.as_array()).into_iter().flatten().map(|v| supply_json_i64(v.get("supply_id"))).filter(|v| *v > 0).collect();
-    if supply_ids.is_empty() { return Err("该供应单没有可下载箱唛的供应 ID".into()); }
-    let payload = seller_post(c, "/v1/cargoes/supplies/get", &serde_json::json!({"supply_ids":supply_ids}))?;
+    let order_payload = seller_post(
+        c,
+        "/v3/supply-order/get",
+        &serde_json::json!({"order_ids":[order_id]}),
+    )?;
+    let order = order_payload
+        .get("orders")
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first())
+        .ok_or_else(|| format!("供应单 {order_id} 不存在或无权读取"))?;
+    let supply_ids: Vec<i64> = order
+        .get("supplies")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .map(|v| supply_json_i64(v.get("supply_id")))
+        .filter(|v| *v > 0)
+        .collect();
+    if supply_ids.is_empty() {
+        return Err("该供应单没有可下载箱唛的供应 ID".into());
+    }
+    let payload = seller_post(
+        c,
+        "/v1/cargoes/supplies/get",
+        &serde_json::json!({"supply_ids":supply_ids}),
+    )?;
     let mut grouped = Vec::new();
-    for supply in payload.get("supplies_cargoes").or_else(|| payload.pointer("/result/supplies_cargoes")).and_then(|v| v.as_array()).into_iter().flatten() {
+    for supply in payload
+        .get("supplies_cargoes")
+        .or_else(|| payload.pointer("/result/supplies_cargoes"))
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
         let supply_id = supply_json_i64(supply.get("supply_id"));
         let mut ids = Vec::new();
-        for cargo in supply.get("cargoes_without_transport_cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
-            let id = supply_json_i64(cargo.get("cargo_id")); if id > 0 && !ids.contains(&id) { ids.push(id); }
-        }
-        for transport in supply.get("transport_cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
-            for cargo in transport.get("cargoes").and_then(|v| v.as_array()).into_iter().flatten() {
-                let id = supply_json_i64(cargo.get("cargo_id")); if id > 0 && !ids.contains(&id) { ids.push(id); }
+        for cargo in supply
+            .get("cargoes_without_transport_cargoes")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let id = supply_json_i64(cargo.get("cargo_id"));
+            if id > 0 && !ids.contains(&id) {
+                ids.push(id);
             }
         }
-        if supply_id > 0 && !ids.is_empty() { grouped.push((supply_id, ids)); }
+        for transport in supply
+            .get("transport_cargoes")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            for cargo in transport
+                .get("cargoes")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let id = supply_json_i64(cargo.get("cargo_id"));
+                if id > 0 && !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        if supply_id > 0 && !ids.is_empty() {
+            grouped.push((supply_id, ids));
+        }
     }
-    if grouped.is_empty() { Err("Ozon 尚未为该供应单生成可下载的箱唛".into()) } else { Ok(grouped) }
+    if grouped.is_empty() {
+        Err("Ozon 尚未为该供应单生成可下载的箱唛".into())
+    } else {
+        Ok(grouped)
+    }
 }
 
 #[tauri::command]
-async fn download_supply_cargo_labels(order_id: i64, state: State<'_, AppState>) -> Result<String, String> {
+async fn download_supply_cargo_labels(
+    order_id: i64,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let owned = background_state(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
         let c = db(&owned)?;
@@ -10275,40 +11141,105 @@ async fn download_supply_cargo_labels(order_id: i64, state: State<'_, AppState>)
         let cargo_count: usize = grouped.iter().map(|(_, ids)| ids.len()).sum();
         let mut operations = Vec::new();
         for (supply_id, ids) in &grouped {
-            let cargoes = ids.iter().map(|cargo_id| serde_json::json!({"cargo_id":cargo_id})).collect::<Vec<_>>();
-            let payload = seller_post(&c, "/v1/cargoes-label/create", &serde_json::json!({"supply_id":supply_id,"cargoes":cargoes}))?;
-            let operation_id = supply_identifier(payload.get("operation_id").or_else(|| payload.pointer("/result/operation_id")));
-            if operation_id.is_empty() { return Err(format!("供应 {supply_id} 创建箱唛文件失败：Ozon 未返回 operation_id")); }
+            let cargoes = ids
+                .iter()
+                .map(|cargo_id| serde_json::json!({"cargo_id":cargo_id}))
+                .collect::<Vec<_>>();
+            let payload = seller_post(
+                &c,
+                "/v1/cargoes-label/create",
+                &serde_json::json!({"supply_id":supply_id,"cargoes":cargoes}),
+            )?;
+            let operation_id = supply_identifier(
+                payload
+                    .get("operation_id")
+                    .or_else(|| payload.pointer("/result/operation_id")),
+            );
+            if operation_id.is_empty() {
+                return Err(format!(
+                    "供应 {supply_id} 创建箱唛文件失败：Ozon 未返回 operation_id"
+                ));
+            }
             operations.push((*supply_id, operation_id));
         }
         let mut ready: std::collections::BTreeMap<i64, String> = std::collections::BTreeMap::new();
         for _ in 0..60 {
             for (supply_id, operation_id) in &operations {
-                if ready.contains_key(supply_id) { continue; }
-                let payload = seller_post(&c, "/v1/cargoes-label/get", &serde_json::json!({"operation_id":operation_id}))?;
-                let status = json_text(payload.get("status").or_else(|| payload.pointer("/result/status"))).to_ascii_uppercase();
-                if status == "FAILED" { return Err(format!("供应 {supply_id} 的箱唛文件生成失败")); }
-                let url = json_text(payload.get("file_url").or_else(|| payload.pointer("/result/file_url")));
-                if status == "SUCCESS" && !url.is_empty() { ready.insert(*supply_id, url); }
+                if ready.contains_key(supply_id) {
+                    continue;
+                }
+                let payload = seller_post(
+                    &c,
+                    "/v1/cargoes-label/get",
+                    &serde_json::json!({"operation_id":operation_id}),
+                )?;
+                let status = json_text(
+                    payload
+                        .get("status")
+                        .or_else(|| payload.pointer("/result/status")),
+                )
+                .to_ascii_uppercase();
+                if status == "FAILED" {
+                    return Err(format!("供应 {supply_id} 的箱唛文件生成失败"));
+                }
+                let url = json_text(
+                    payload
+                        .get("file_url")
+                        .or_else(|| payload.pointer("/result/file_url")),
+                );
+                if status == "SUCCESS" && !url.is_empty() {
+                    ready.insert(*supply_id, url);
+                }
             }
-            if ready.len() == operations.len() { break; }
+            if ready.len() == operations.len() {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
-        if ready.len() != operations.len() { return Err(format!("Ozon 箱唛文件生成超时：已完成 {}/{} 个供应，请稍后重试", ready.len(), operations.len())); }
+        if ready.len() != operations.len() {
+            return Err(format!(
+                "Ozon 箱唛文件生成超时：已完成 {}/{} 个供应，请稍后重试",
+                ready.len(),
+                operations.len()
+            ));
+        }
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let dir = owned.data_dir.parent().unwrap_or(&owned.data_dir).join("exports").join(format!("箱唛文件-供应单-{order_id}-{stamp}"));
+        let dir = owned
+            .data_dir
+            .parent()
+            .unwrap_or(&owned.data_dir)
+            .join("exports")
+            .join(format!("箱唛文件-供应单-{order_id}-{stamp}"));
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         for (supply_id, url) in ready {
-            if !url.starts_with("https://") { return Err(format!("供应 {supply_id} 返回了不安全的下载地址")); }
-            let response = ureq::get(&url).timeout(std::time::Duration::from_secs(30)).call().map_err(|e| format!("供应 {supply_id} 下载失败：{e}"))?;
+            if !url.starts_with("https://") {
+                return Err(format!("供应 {supply_id} 返回了不安全的下载地址"));
+            }
+            let response = ureq::get(&url)
+                .timeout(std::time::Duration::from_secs(30))
+                .call()
+                .map_err(|e| format!("供应 {supply_id} 下载失败：{e}"))?;
             let mut bytes = Vec::new();
-            response.into_reader().take(50 * 1024 * 1024).read_to_end(&mut bytes).map_err(|e| format!("供应 {supply_id} 读取文件失败：{e}"))?;
-            if !bytes.starts_with(b"%PDF-") { return Err(format!("供应 {supply_id} 返回的文件不是有效 PDF")); }
-            fs::write(dir.join(format!("Ozon箱唛-供应-{supply_id}.pdf")), bytes).map_err(|e| e.to_string())?;
+            response
+                .into_reader()
+                .take(50 * 1024 * 1024)
+                .read_to_end(&mut bytes)
+                .map_err(|e| format!("供应 {supply_id} 读取文件失败：{e}"))?;
+            if !bytes.starts_with(b"%PDF-") {
+                return Err(format!("供应 {supply_id} 返回的文件不是有效 PDF"));
+            }
+            fs::write(dir.join(format!("Ozon箱唛-供应-{supply_id}.pdf")), bytes)
+                .map_err(|e| e.to_string())?;
         }
         open::that(&dir).map_err(|e| format!("箱唛已下载，但打开文件夹失败：{e}"))?;
-        Ok(format!("已下载 {} 个 PDF，共 {cargo_count} 个箱唛：{}", operations.len(), dir.display()))
-    }).await.map_err(|e| format!("下载箱唛后台任务失败：{e}"))?
+        Ok(format!(
+            "已下载 {} 个 PDF，共 {cargo_count} 个箱唛：{}",
+            operations.len(),
+            dir.display()
+        ))
+    })
+    .await
+    .map_err(|e| format!("下载箱唛后台任务失败：{e}"))?
 }
 
 fn supply_timeslots_blocking(
@@ -11083,8 +12014,8 @@ mod cross_border_display_tests {
 #[cfg(test)]
 mod auto_sync_tests {
     use super::{
-        auto_sync_is_due, preserve_latest_auto_sync_settings_and_write,
-        read_auto_sync_state, write_auto_sync_state, AutoSyncState,
+        auto_sync_is_due, preserve_latest_auto_sync_settings_and_write, read_auto_sync_state,
+        write_auto_sync_state, AutoSyncState,
     };
 
     #[test]
@@ -11337,6 +12268,11 @@ pub fn run() {
             download_supply_cargo_labels,
             supply_cluster_plans,
             save_supply_cluster_plan,
+            search_supply_dropoffs,
+            create_supply_workflow_drafts,
+            supply_workflow_draft_status,
+            supply_workflow_draft_timeslots,
+            create_supply_from_workflow_draft,
             supply_timeslots,
             book_supply_timeslot,
             sync_logs,

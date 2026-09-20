@@ -42,6 +42,11 @@ import type {
   SupplyOrderItemsProgress,
   SupplyClusterPlan,
   SupplyTimeslot,
+  SupplyDropoffOption,
+  SupplyDraftGroupInput,
+  SupplyClusterWarehouseInput,
+  SupplyDraftCreated,
+  SupplyDraftStatus,
   SyncLog,
   SyncAllResult,
   AutoSyncState,
@@ -500,6 +505,21 @@ export async function supplyClusterPlans(targetDays: number, query: string): Pro
 }
 export async function saveSupplyClusterPlan(sku: string, macrolocalClusterId: string, plannedQty: number, targetDays: number): Promise<void> {
   await invoke("save_supply_cluster_plan", { sku, macrolocalClusterId, plannedQty, targetDays });
+}
+export async function searchSupplyDropoffs(search: string): Promise<SupplyDropoffOption[]> {
+  return isTauri() ? invoke("search_supply_dropoffs", { search }) : [];
+}
+export async function createSupplyWorkflowDrafts(mode: "DIRECT" | "CROSSDOCK", groups: SupplyDraftGroupInput[], dropoffWarehouseId: number | null, dropoffWarehouseType: string | null, confirmation: string): Promise<SupplyDraftCreated[]> {
+  return invoke("create_supply_workflow_drafts", { mode, groups, dropoffWarehouseId, dropoffWarehouseType, confirmation });
+}
+export async function supplyWorkflowDraftStatus(draftIds: number[]): Promise<SupplyDraftStatus[]> {
+  return isTauri() ? invoke("supply_workflow_draft_status", { draftIds }) : [];
+}
+export async function supplyWorkflowDraftTimeslots(draftId: number, mode: "DIRECT" | "CROSSDOCK" | "MULTI_CLUSTER", selectedClusterWarehouses: SupplyClusterWarehouseInput[], dateFrom: string, dateTo: string): Promise<SupplyTimeslot[]> {
+  return isTauri() ? invoke("supply_workflow_draft_timeslots", { draftId, mode, selectedClusterWarehouses, dateFrom, dateTo }) : [];
+}
+export async function createSupplyFromWorkflowDraft(draftId: number, mode: "DIRECT" | "CROSSDOCK" | "MULTI_CLUSTER", selectedClusterWarehouses: SupplyClusterWarehouseInput[], timeslotFrom: string, timeslotTo: string, confirmation: string): Promise<string> {
+  return invoke("create_supply_from_workflow_draft", { draftId, mode, selectedClusterWarehouses, timeslotFrom, timeslotTo, confirmation });
 }
 export async function supplyTimeslots(
   orderId: number,
