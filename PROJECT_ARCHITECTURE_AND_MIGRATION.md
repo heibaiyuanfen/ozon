@@ -1615,3 +1615,26 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 新增本地草稿架：保存时记录模式、集中配送地址、选中产品/集群/数量和时间，可在页面直接恢复或删除；兼容旧版草稿数据。
 - 官方配送成本测算改为可折叠面板，默认收起，展开后仍保留体积、价格档、基础配送和越库费用的可审计明细。
 - 验证：`pnpm build`、`cargo check --locked`、`cargo test --locked supply_draft_tests`（6 项通过）；正式构建使用 `desktop-next/scripts/build-tauri-release.cmd`。Release 与根目录启动器均为 32,248,832 bytes，SHA-256 `9791919A6F6EBD9CECF4292CD8530538BFAF02E47B41B49A9B6126150293ECBC`；正式版已启动且进程处于 Responding 状态。
+## 2026-09-18：Ozon 商品条形码获取与缓存
+
+- 商品中心新增“获取产品条形码”操作，按当前店铺已缓存的货号分批调用 Seller `/v3/product/info/list`，读取接口返回的 `barcodes`/`barcode`，不再以 `offer_id`、SKU 或商品 ID 伪装条码。
+- `products` 表新增 `barcodes_json`，旧店铺数据库启动时自动迁移；一个商品可保存多个条码，结果去空、排序并去重。
+- 商品列表新增“产品条形码”列，展示首个条码及额外条码数量；没有条码时明确显示“条码缺失”，搜索框也支持按条码查询。
+- 条码任务返回请求商品数、命中商品数、有条码商品数、保存条码总数及 Ozon 返回无条码商品数。常规 Seller 商品详情同步同时刷新条码缓存，减少重复手工操作。
+- 解析兼容字符串、数值和对象形式的条码值；测试明确保证不会把货号或 Ozon SKU 当作条码。
+
+### 测试与发布
+
+- `cargo check --manifest-path desktop-next/src-tauri/Cargo.toml --locked`：通过。
+- `cargo test --manifest-path desktop-next/src-tauri/Cargo.toml product_barcode_tests --locked`：2 项通过。
+- `pnpm build`：通过；既有大型图表 chunk 超过 500 kB 的 Vite 提示仍存在，不阻断构建。
+- `desktop-next/scripts/build-tauri-release.cmd`：正式 Release 构建通过。
+- Release 与根目录 `ozon-analytics-next.exe` 均为 `32,024,576` 字节，修改时间均为 `2026-09-18 21:41:00`，SHA-256 均为 `D0034EBE628D0AF3477A3C4F986A037260F87EA919A4C0E85CD6DE4F75A37ABE`。
+- 根目录正式 EXE 已启动并保持响应，确认没有出现 `localhost` 拒绝连接。当前会话没有可用的原生窗口自动点击能力，因此未完成商品中心按钮的截图级可见验收；真实条码数量还取决于当前店铺 Seller Token 的商品读取权限及 Ozon 是否为相应商品返回条码。
+
+## 2026-09-20：同步远端最新版并合入商品条形码功能
+
+- 本地 `main` 已同步远端提交 `e14f814`，并在其上重新合入商品条形码获取、数据库缓存、列表展示与条码搜索能力。
+- 远端源码引用但未提交的 `ozon-logistics-tariffs-2026-08-28.json` 已通过仓库脚本从官方工作簿确定性生成并纳入版本控制，避免全新检出后前端构建失败。
+- 验证：`cargo check --locked`、`cargo test --locked product_barcode_tests`（2 项通过）及 `pnpm build` 均通过；Vite 仍有既有的部分 chunk 超过 500 kB 提示，不阻断构建。
+- 使用 `desktop-next/scripts/build-tauri-release.cmd` 完成正式 Release 构建并覆盖根目录启动器。Release 与根目录 `ozon-analytics-next.exe` 均为 `32,378,880` 字节，修改时间 `2026-09-20 20:16:34`，SHA-256 均为 `9B2E49B41C52DAFF141E12F2D7A1F6AE8A00ACB8D92105A6186B2EF09574393F`。

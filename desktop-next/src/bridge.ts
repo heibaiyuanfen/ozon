@@ -201,6 +201,7 @@ export async function products(
     sku: String(2526402232 + i),
     offerId: `GJYB${String(i + 1).padStart(4, "0")}`,
     productId: "",
+    barcodes: i % 3 ? [`460000000${String(i).padStart(3, "0")}`] : [],
     name: ["多功能旅行收纳包", "双层相机保护包", "轻便户外腰包"][i % 3],
     revenue: 1280 - i * 37,
     orderedUnits: 24 - (i % 8),
@@ -231,6 +232,9 @@ export async function matchProductCosts(
 export async function exportProductCosts(): Promise<string> {
   if (isTauri()) return invoke("export_product_costs");
   return "preview/product_costs.csv";
+}
+export async function syncProductBarcodes(): Promise<import("./types").ProductBarcodeSyncResult> {
+  return invoke("sync_product_barcodes");
 }
 
 export async function inventory(

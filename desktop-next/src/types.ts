@@ -225,6 +225,7 @@ export interface ProductRow {
   sku: string;
   offerId: string;
   productId: string;
+  barcodes: string[];
   name: string;
   revenue: number;
   orderedUnits: number;
@@ -239,6 +240,14 @@ export interface ProductRow {
   weightKg: number | null;
   note: string;
   updatedAt: string;
+}
+
+export interface ProductBarcodeSyncResult {
+  requested: number;
+  productsFound: number;
+  productsWithBarcodes: number;
+  barcodesSaved: number;
+  productsMissingBarcodes: number;
 }
 
 export interface ProductCostInput {

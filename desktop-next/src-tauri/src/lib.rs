@@ -342,6 +342,7 @@ struct ProductRow {
     sku: String,
     offer_id: String,
     product_id: String,
+    barcodes: Vec<String>,
     name: String,
     revenue: f64,
     ordered_units: i64,
@@ -356,6 +357,15 @@ struct ProductRow {
     weight_kg: Option<f64>,
     note: String,
     updated_at: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductBarcodeSyncResult {
+    requested: usize,
+    products_found: usize,
+    products_with_barcodes: usize,
+    barcodes_saved: usize,
+    products_missing_barcodes: usize,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1218,6 +1228,22 @@ fn initialize_extensions(c: &Connection) -> Result<(), String> {
     if !has_image {
         c.execute(
             "ALTER TABLE products ADD COLUMN image_url TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+            .map_err(|e| e.to_string())?;
+    }
+    let has_barcodes = c
+        .prepare("PRAGMA table_info(products)")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|name| name == "barcodes_json");
+    if !has_barcodes {
+        c.execute(
+            "ALTER TABLE products ADD COLUMN barcodes_json TEXT NOT NULL DEFAULT '[]'",
             [],
         )
         .map_err(|e| e.to_string())?;
@@ -2805,13 +2831,13 @@ fn products(
     let cross_border = active_shop_kind(&state)? == "cross_border";
     let rate = rub_per_cny_for(&state, &c)?;
     let needle = format!("%{}%", query.trim());
-    let mut stmt = c.prepare("SELECT p.sku,p.offer_id,p.product_id,p.name,
+    let mut stmt = c.prepare("SELECT p.sku,p.offer_id,p.product_id,p.name,p.barcodes_json,
         COALESCE(SUM(s.revenue),0),COALESCE(SUM(s.ordered_units),0),COALESCE(SUM(s.delivered_units),0),
         CASE WHEN EXISTS(SELECT 1 FROM return_events re WHERE re.day BETWEEN ?1 AND ?2) THEN COALESCE((SELECT SUM(re.quantity) FROM return_events re WHERE re.sku=p.sku AND re.day BETWEEN ?1 AND ?2),0) ELSE COALESCE(SUM(s.returns),0) END,CASE WHEN EXISTS(SELECT 1 FROM cancellation_events ce WHERE ce.day BETWEEN ?1 AND ?2) THEN COALESCE((SELECT SUM(ce.quantity) FROM cancellation_events ce WHERE ce.sku=p.sku AND ce.day BETWEEN ?1 AND ?2),0) ELSE COALESCE(SUM(s.cancellations),0) END,
         COALESCE(pc.unit_cost_cny,pc.unit_cost),COALESCE(pc.first_mile_cost_cny,pc.first_mile_cost),pc.length_cm,pc.width_cm,pc.height_cm,pc.weight_kg,COALESCE(pc.note,''),p.updated_at
         FROM products p LEFT JOIN sales_daily s ON s.sku=p.sku AND s.day BETWEEN ?1 AND ?2
         LEFT JOIN product_costs pc ON pc.sku=p.sku
-        WHERE (?3='%%' OR p.sku LIKE ?3 OR p.offer_id LIKE ?3 OR p.name LIKE ?3)
+        WHERE (?3='%%' OR p.sku LIKE ?3 OR p.offer_id LIKE ?3 OR p.name LIKE ?3 OR p.barcodes_json LIKE ?3)
         GROUP BY p.sku ORDER BY COALESCE(SUM(s.revenue),0) DESC,p.offer_id LIMIT 2000").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map(params![range.from, range.to, needle], |r| {
@@ -2820,26 +2846,28 @@ fn products(
                 offer_id: r.get(1)?,
                 product_id: r.get(2)?,
                 name: r.get(3)?,
+                barcodes: serde_json::from_str(&r.get::<_, String>(4)?)
+                    .unwrap_or_default(),
                 revenue: {
-                    let value: f64 = r.get(4)?;
+                    let value: f64 = r.get(5)?;
                     if cross_border {
                         value / rate
                     } else {
                         value
                     }
                 },
-                ordered_units: r.get(5)?,
-                delivered_units: r.get(6)?,
-                returns: r.get(7)?,
-                cancellations: r.get(8)?,
-                unit_cost: r.get(9)?,
-                first_mile_cost: r.get(10)?,
-                length_cm: r.get(11)?,
-                width_cm: r.get(12)?,
-                height_cm: r.get(13)?,
-                weight_kg: r.get(14)?,
-                note: r.get(15)?,
-                updated_at: r.get(16)?,
+                ordered_units: r.get(6)?,
+                delivered_units: r.get(7)?,
+                returns: r.get(8)?,
+                cancellations: r.get(9)?,
+                unit_cost: r.get(10)?,
+                first_mile_cost: r.get(11)?,
+                length_cm: r.get(12)?,
+                width_cm: r.get(13)?,
+                height_cm: r.get(14)?,
+                weight_kg: r.get(15)?,
+                note: r.get(16)?,
+                updated_at: r.get(17)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -7450,6 +7478,82 @@ fn sales_dimensions(values: &[serde_json::Value], fallback_day: &str) -> (String
     (sku, name, day)
 }
 
+fn product_barcodes_from_item(item: &serde_json::Value) -> Vec<String> {
+    fn add(value: &serde_json::Value, output: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => {
+                let text = text.trim();
+                if !text.is_empty() { output.push(text.to_string()); }
+            }
+            serde_json::Value::Number(number) => output.push(number.to_string()),
+            serde_json::Value::Array(values) => values.iter().for_each(|value| add(value, output)),
+            serde_json::Value::Object(object) => {
+                for key in ["barcode", "value", "code"] {
+                    if let Some(value) = object.get(key) { add(value, output); break; }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut barcodes = Vec::new();
+    if let Some(value) = item.get("barcodes") { add(value, &mut barcodes); }
+    if barcodes.is_empty() {
+        if let Some(value) = item.get("barcode") { add(value, &mut barcodes); }
+    }
+    barcodes.sort();
+    barcodes.dedup();
+    barcodes
+}
+
+#[cfg(test)]
+mod product_barcode_tests {
+    use super::product_barcodes_from_item;
+    use serde_json::json;
+    #[test]
+    fn reads_and_deduplicates_product_barcodes() {
+        let item=json!({"barcodes":[" 4601234567890 ",{"barcode":"OZN-ABC"},12345,"4601234567890"]});
+        assert_eq!(product_barcodes_from_item(&item),vec!["12345","4601234567890","OZN-ABC"]);
+    }
+    #[test]
+    fn does_not_use_offer_or_sku_as_a_barcode() {
+        assert!(product_barcodes_from_item(&json!({"offer_id":"SKU-OFFER","sku":123456})).is_empty());
+    }
+}
+
+fn sync_product_barcodes_blocking(state: &AppState) -> Result<ProductBarcodeSyncResult, String> {
+    let mut c=db(state)?;
+    let offer_ids={
+        let mut stmt=c.prepare("SELECT DISTINCT offer_id FROM products WHERE offer_id<>'' ORDER BY offer_id").map_err(|e|e.to_string())?;
+        let values=stmt.query_map([],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        values
+    };
+    if offer_ids.is_empty(){return Err("商品中心尚无货号，请先同步 Seller 商品数据".into());}
+    let mut result=ProductBarcodeSyncResult{requested:offer_ids.len(),products_found:0,products_with_barcodes:0,barcodes_saved:0,products_missing_barcodes:0};
+    for chunk in offer_ids.chunks(500) {
+        let details=seller_post(&c,"/v3/product/info/list",&serde_json::json!({"offer_id":chunk,"product_id":[],"sku":[]}))?;
+        let items=details.get("items").or_else(||details.pointer("/result/items")).and_then(|v|v.as_array()).cloned().unwrap_or_default();
+        let tx=c.transaction().map_err(|e|e.to_string())?;
+        for item in items {
+            let offer=json_text(item.get("offer_id"));
+            let sku=item.get("sku").map(|value|value.as_i64().map(|number|number.to_string()).unwrap_or_else(||json_text(Some(value)))).unwrap_or_default();
+            if offer.is_empty()&&sku.is_empty(){continue;}
+            result.products_found+=1;
+            let barcodes=product_barcodes_from_item(&item);
+            if barcodes.is_empty(){result.products_missing_barcodes+=1;}else{result.products_with_barcodes+=1;result.barcodes_saved+=barcodes.len();}
+            let encoded=serde_json::to_string(&barcodes).map_err(|e|e.to_string())?;
+            if !sku.is_empty(){tx.execute("UPDATE products SET barcodes_json=?1,updated_at=CURRENT_TIMESTAMP WHERE sku=?2",params![encoded,sku]).map_err(|e|e.to_string())?;}else{tx.execute("UPDATE products SET barcodes_json=?1,updated_at=CURRENT_TIMESTAMP WHERE offer_id=?2",params![encoded,offer]).map_err(|e|e.to_string())?;}
+        }
+        tx.commit().map_err(|e|e.to_string())?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn sync_product_barcodes(state: State<'_, AppState>) -> Result<ProductBarcodeSyncResult, String> {
+    let owned=background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move||sync_product_barcodes_blocking(&owned)).await.map_err(|e|e.to_string())?
+}
+
 fn sync_seller_sales_blocking(
     range: DateRange,
     force: bool,
@@ -7680,10 +7784,11 @@ fn sync_seller_sales_blocking(
                             .unwrap_or_else(|| json_text(Some(v)))
                     })
                     .unwrap_or_default();
+                let barcodes=serde_json::to_string(&product_barcodes_from_item(&item)).map_err(|e|e.to_string())?;
                 if !sku.is_empty() {
-                    tx.execute("INSERT INTO products(sku,offer_id,product_id,name,image_url,source)VALUES(?1,?2,?3,?4,?5,'api')ON CONFLICT(sku)DO UPDATE SET offer_id=excluded.offer_id,product_id=excluded.product_id,name=CASE WHEN excluded.name<>''THEN excluded.name ELSE products.name END,image_url=CASE WHEN excluded.image_url<>''THEN excluded.image_url ELSE products.image_url END,source='api',updated_at=CURRENT_TIMESTAMP",params![sku,offer,json_text(item.get("id")).or_else_empty(||json_text(item.get("product_id"))),json_text(item.get("name")),image]).map_err(|e|e.to_string())?;
+                    tx.execute("INSERT INTO products(sku,offer_id,product_id,name,image_url,barcodes_json,source)VALUES(?1,?2,?3,?4,?5,?6,'api')ON CONFLICT(sku)DO UPDATE SET offer_id=excluded.offer_id,product_id=excluded.product_id,name=CASE WHEN excluded.name<>''THEN excluded.name ELSE products.name END,image_url=CASE WHEN excluded.image_url<>''THEN excluded.image_url ELSE products.image_url END,barcodes_json=excluded.barcodes_json,source='api',updated_at=CURRENT_TIMESTAMP",params![sku,offer,json_text(item.get("id")).or_else_empty(||json_text(item.get("product_id"))),json_text(item.get("name")),image,barcodes]).map_err(|e|e.to_string())?;
                 } else if !image.is_empty() {
-                    tx.execute("UPDATE products SET image_url=?1,updated_at=CURRENT_TIMESTAMP WHERE offer_id=?2", params![image, offer]).map_err(|e| e.to_string())?;
+                    tx.execute("UPDATE products SET image_url=?1,barcodes_json=?2,updated_at=CURRENT_TIMESTAMP WHERE offer_id=?3",params![image,barcodes,offer]).map_err(|e|e.to_string())?;
                 }
             }
             tx.commit().map_err(|e| e.to_string())?;
@@ -12277,6 +12382,7 @@ pub fn run() {
             book_supply_timeslot,
             sync_logs,
             sync_seller_sales,
+            sync_product_barcodes,
             sync_performance_ads,
             sync_finance,
             sync_all_data,

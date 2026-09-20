@@ -29,6 +29,7 @@ import {
   sendFeishuInventory,
   seriesInsights,
   syncInventory,
+  syncProductBarcodes,
   updateShop,
 } from "./bridge";
 import type {
@@ -99,6 +100,7 @@ export function ProductsPage({
   reload: () => void;
 }) {
   const [editing, setEditing] = useState<ProductRow | null>(null),
+    [barcodeBusy, setBarcodeBusy] = useState(false),
     [page, setPage] = useState(0);
   const pages = Math.max(1, Math.ceil(rows.length / 50)),
     visible = rows.slice(page * 50, page * 50 + 50);
@@ -109,6 +111,22 @@ export function ProductsPage({
   const exportCosts = async () => {
     const path = await exportProductCosts();
     window.alert(`成本数据已导出：\n${path}`);
+  };
+  const fetchBarcodes = async () => {
+    setBarcodeBusy(true);
+    try {
+      const result = await syncProductBarcodes();
+      window.alert(
+        `条形码获取完成：请求 ${result.requested} 个商品，命中 ${result.productsFound} 个，` +
+          `其中 ${result.productsWithBarcodes} 个商品共保存 ${result.barcodesSaved} 个条码；` +
+          `${result.productsMissingBarcodes} 个商品由 Ozon 返回无条码。`,
+      );
+      reload();
+    } catch (error) {
+      window.alert(`条形码获取失败：${String(error)}`);
+    } finally {
+      setBarcodeBusy(false);
+    }
   };
   return (
     <>
@@ -149,6 +167,14 @@ export function ProductsPage({
           <small>按销售额降序，最多展示 2000 个商品</small>
         </div>
         <div className="toolbar-actions">
+          <button
+            className="outline-button"
+            disabled={barcodeBusy}
+            onClick={() => void fetchBarcodes()}
+          >
+            <RefreshCw size={15} className={barcodeBusy ? "spinning" : ""} />
+            {barcodeBusy ? "正在获取条码" : "获取产品条形码"}
+          </button>
           <button className="outline-button" onClick={exportCosts}>
             <Download size={15} />
             导出成本
@@ -165,6 +191,7 @@ export function ProductsPage({
           <thead>
             <tr>
               <th>货号 / Ozon SKU</th>
+              <th>产品条形码</th>
               <th>下单</th>
               <th>妥投</th>
               <th>退货</th>
@@ -180,6 +207,18 @@ export function ProductsPage({
                 <td>
                   <b>{row.offerId || "—"}</b>
                   <small>{row.sku}</small>
+                </td>
+                <td>
+                  {row.barcodes.length ? (
+                    <>
+                      <b>{row.barcodes[0]}</b>
+                      {row.barcodes.length > 1 && (
+                        <small>另有 {row.barcodes.length - 1} 个条码</small>
+                      )}
+                    </>
+                  ) : (
+                    <span className="missing">条码缺失</span>
+                  )}
                 </td>
                 <td>
                   <b>{row.orderedUnits}</b>
