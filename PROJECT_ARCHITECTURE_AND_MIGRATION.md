@@ -1638,3 +1638,12 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 远端源码引用但未提交的 `ozon-logistics-tariffs-2026-08-28.json` 已通过仓库脚本从官方工作簿确定性生成并纳入版本控制，避免全新检出后前端构建失败。
 - 验证：`cargo check --locked`、`cargo test --locked product_barcode_tests`（2 项通过）及 `pnpm build` 均通过；Vite 仍有既有的部分 chunk 超过 500 kB 提示，不阻断构建。
 - 使用 `desktop-next/scripts/build-tauri-release.cmd` 完成正式 Release 构建并覆盖根目录启动器。Release 与根目录 `ozon-analytics-next.exe` 均为 `32,378,880` 字节，修改时间 `2026-09-20 20:16:34`，SHA-256 均为 `9B2E49B41C52DAFF141E12F2D7A1F6AE8A00ACB8D92105A6186B2EF09574393F`。
+
+## 2026-09-20：商品条形码选择导出与手工设置
+
+- 商品中心增加跨分页商品勾选，并支持将所选商品导出为带 UTF-8 BOM 的 CSV；文件包含 SKU、货号、商品名称、条形码和条码序号，一个商品有多个条码时逐条输出，无条码商品保留空行便于核对。
+- 每个商品的条码列增加设置入口，可按换行、逗号或分号录入多个条码；保存时去空、排序、去重，限制单条最多 128 个字符、单商品最多 20 个条码，也支持清空全部条码。
+- 手工条码只写入当前店铺独立数据库的 `products.barcodes_json`，不会将货号或 Ozon SKU 自动当作条码。
+- 验证：`cargo check --locked`、`cargo test --locked product_barcode_tests`（3 项通过）及 `pnpm build` 均通过；既有大型 chunk 提示不阻断构建。
+- 使用 `desktop-next/scripts/build-tauri-release.cmd` 完成正式构建并覆盖根目录启动器。Release 与根目录 EXE 均为 `32,404,992` 字节，修改时间 `2026-09-20 20:32:24`，SHA-256 均为 `ECB7D6EC7BFFD0D6CA3576530B206FA38126F07672E0E8B1FE604141744675DB`。
+- 根目录正式 EXE 已启动，进程 PID 7460 且处于 Responding 状态。当前会话的电脑操作插件未开放原生应用控制接口，因此未执行按钮级可见点击验收；没有用源码构建成功替代这一限制说明。

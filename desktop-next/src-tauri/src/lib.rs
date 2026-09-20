@@ -2929,6 +2929,106 @@ fn match_product_costs(
 fn csv_cell(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
+
+#[tauri::command]
+fn save_product_barcodes(
+    sku: String,
+    barcodes: Vec<String>,
+    state: State<AppState>,
+) -> Result<usize, String> {
+    let sku = sku.trim();
+    if sku.is_empty() {
+        return Err("SKU 不能为空".into());
+    }
+    let barcodes = normalize_product_barcodes(barcodes)?;
+    let encoded = serde_json::to_string(&barcodes).map_err(|e| e.to_string())?;
+    let changed = db(&state)?
+        .execute(
+            "UPDATE products SET barcodes_json=?1,updated_at=CURRENT_TIMESTAMP WHERE sku=?2",
+            params![encoded, sku],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("未找到对应商品，条形码未保存".into());
+    }
+    Ok(barcodes.len())
+}
+
+#[tauri::command]
+fn export_product_barcodes(skus: Vec<String>, state: State<AppState>) -> Result<String, String> {
+    let mut skus = skus
+        .into_iter()
+        .map(|sku| sku.trim().to_string())
+        .filter(|sku| !sku.is_empty())
+        .collect::<Vec<_>>();
+    skus.sort();
+    skus.dedup();
+    if skus.is_empty() {
+        return Err("请至少选择一个商品".into());
+    }
+    if skus.len() > 2000 {
+        return Err("单次最多导出 2000 个商品".into());
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(skus.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT sku,offer_id,name,barcodes_json FROM products WHERE sku IN ({placeholders}) ORDER BY offer_id,sku"
+    );
+    let c = db(&state)?;
+    let mut stmt = c.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(skus.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let folder = state
+        .data_dir
+        .parent()
+        .unwrap_or(&state.data_dir)
+        .join("exports");
+    fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let path = folder.join(format!(
+        "product_barcodes_{}.csv",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    ));
+    let mut text = String::from("\u{feff}SKU,货号,商品名称,条形码,条码序号\r\n");
+    for row in rows {
+        let (sku, offer_id, name, encoded) = row.map_err(|e| e.to_string())?;
+        let barcodes: Vec<String> = serde_json::from_str(&encoded).unwrap_or_default();
+        if barcodes.is_empty() {
+            text.push_str(&format!(
+                "{},{},{},{},\r\n",
+                csv_cell(&sku),
+                csv_cell(&offer_id),
+                csv_cell(&name),
+                csv_cell("")
+            ));
+        } else {
+            for (index, barcode) in barcodes.iter().enumerate() {
+                text.push_str(&format!(
+                    "{},{},{},{},{}\r\n",
+                    csv_cell(&sku),
+                    csv_cell(&offer_id),
+                    csv_cell(&name),
+                    csv_cell(barcode),
+                    index + 1
+                ));
+            }
+        }
+    }
+    fs::write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn export_product_costs(state: State<AppState>) -> Result<String, String> {
     let c = db(&state)?;
@@ -7478,6 +7578,23 @@ fn sales_dimensions(values: &[serde_json::Value], fallback_day: &str) -> (String
     (sku, name, day)
 }
 
+fn normalize_product_barcodes(barcodes: Vec<String>) -> Result<Vec<String>, String> {
+    let mut barcodes = barcodes
+        .into_iter()
+        .map(|barcode| barcode.trim().to_string())
+        .filter(|barcode| !barcode.is_empty())
+        .collect::<Vec<_>>();
+    if barcodes.iter().any(|barcode| barcode.chars().count() > 128) {
+        return Err("单个条形码不能超过 128 个字符".into());
+    }
+    barcodes.sort();
+    barcodes.dedup();
+    if barcodes.len() > 20 {
+        return Err("每个商品最多保存 20 个条形码".into());
+    }
+    Ok(barcodes)
+}
+
 fn product_barcodes_from_item(item: &serde_json::Value) -> Vec<String> {
     fn add(value: &serde_json::Value, output: &mut Vec<String>) {
         match value {
@@ -7500,14 +7617,12 @@ fn product_barcodes_from_item(item: &serde_json::Value) -> Vec<String> {
     if barcodes.is_empty() {
         if let Some(value) = item.get("barcode") { add(value, &mut barcodes); }
     }
-    barcodes.sort();
-    barcodes.dedup();
-    barcodes
+    normalize_product_barcodes(barcodes).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod product_barcode_tests {
-    use super::product_barcodes_from_item;
+    use super::{normalize_product_barcodes, product_barcodes_from_item};
     use serde_json::json;
     #[test]
     fn reads_and_deduplicates_product_barcodes() {
@@ -7517,6 +7632,13 @@ mod product_barcode_tests {
     #[test]
     fn does_not_use_offer_or_sku_as_a_barcode() {
         assert!(product_barcodes_from_item(&json!({"offer_id":"SKU-OFFER","sku":123456})).is_empty());
+    }
+    #[test]
+    fn manual_barcodes_are_trimmed_sorted_and_deduplicated() {
+        assert_eq!(
+            normalize_product_barcodes(vec![" 4602 ".into(), "4601".into(), "4602".into()]).unwrap(),
+            vec!["4601", "4602"]
+        );
     }
 }
 
@@ -12321,6 +12443,8 @@ pub fn run() {
             ai_analysis,
             save_product_cost,
             match_product_costs,
+            save_product_barcodes,
+            export_product_barcodes,
             export_product_costs,
             export_product_analysis_json,
             export_dataset,

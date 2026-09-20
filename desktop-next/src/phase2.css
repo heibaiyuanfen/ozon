@@ -394,6 +394,16 @@
 .modal-actions label {
   flex: 1;
 }
+.selection-cell { width: 34px; text-align: center; }
+.selection-cell input { width: 16px; height: 16px; accent-color: #3478f6; cursor: pointer; }
+.barcode-cell { display: flex; align-items: center; justify-content: space-between; gap: 9px; min-width: 190px; }
+.barcode-cell > span { min-width: 0; overflow-wrap: anywhere; }
+.barcode-modal { width: min(620px, calc(100vw - 32px)); }
+.barcode-editor-field { display: flex; flex-direction: column; gap: 8px; margin-top: 20px; color: #69778d; font-size: 12px; }
+.barcode-editor-field textarea { min-height: 150px; resize: vertical; border: 1px solid #dce4ef; border-radius: 10px; padding: 12px; font: inherit; line-height: 1.6; outline: none; }
+.barcode-editor-field textarea:focus { border-color: #4a86ec; box-shadow: 0 0 0 3px rgba(74, 134, 236, .12); }
+.barcode-editor-note { display: block; margin-top: 9px; color: #8794a7; }
+.barcode-modal .modal-actions { justify-content: flex-end; }
 .fbs-controls {
   display: flex;
   align-items: center;

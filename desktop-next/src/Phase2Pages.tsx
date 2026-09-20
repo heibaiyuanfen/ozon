@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   Boxes,
+  Barcode,
   CheckCircle2,
   CircleAlert,
   Database,
@@ -22,10 +23,12 @@ import {
   createShop,
   deleteShop,
   exportProductCosts,
+  exportProductBarcodes,
   loadCredentialsForm,
   matchProductCosts,
   saveCredentialsForm,
   saveProductCost,
+  saveProductBarcodes,
   sendFeishuInventory,
   seriesInsights,
   syncInventory,
@@ -100,11 +103,18 @@ export function ProductsPage({
   reload: () => void;
 }) {
   const [editing, setEditing] = useState<ProductRow | null>(null),
+    [barcodeEditing, setBarcodeEditing] = useState<ProductRow | null>(null),
     [barcodeBusy, setBarcodeBusy] = useState(false),
+    [barcodeExportBusy, setBarcodeExportBusy] = useState(false),
+    [selectedSkus, setSelectedSkus] = useState<Set<string>>(new Set()),
     [page, setPage] = useState(0);
   const pages = Math.max(1, Math.ceil(rows.length / 50)),
     visible = rows.slice(page * 50, page * 50 + 50);
   useEffect(() => setPage(0), [rows]);
+  useEffect(() => {
+    const available = new Set(rows.map((row) => row.sku));
+    setSelectedSkus((current) => new Set([...current].filter((sku) => available.has(sku))));
+  }, [rows]);
   const revenue = rows.reduce((sum, row) => sum + row.revenue, 0),
     units = rows.reduce((sum, row) => sum + row.orderedUnits, 0),
     missing = rows.filter((row) => row.unitCost == null).length;
@@ -127,6 +137,25 @@ export function ProductsPage({
     } finally {
       setBarcodeBusy(false);
     }
+  };
+  const exportBarcodes = async () => {
+    setBarcodeExportBusy(true);
+    try {
+      const path = await exportProductBarcodes([...selectedSkus]);
+      window.alert(`已导出 ${selectedSkus.size} 个商品的条形码：\n${path}`);
+    } catch (error) {
+      window.alert(`条形码导出失败：${String(error)}`);
+    } finally {
+      setBarcodeExportBusy(false);
+    }
+  };
+  const visibleSelected = visible.length > 0 && visible.every((row) => selectedSkus.has(row.sku));
+  const toggleVisible = () => {
+    setSelectedSkus((current) => {
+      const next = new Set(current);
+      visible.forEach((row) => visibleSelected ? next.delete(row.sku) : next.add(row.sku));
+      return next;
+    });
   };
   return (
     <>
@@ -175,6 +204,14 @@ export function ProductsPage({
             <RefreshCw size={15} className={barcodeBusy ? "spinning" : ""} />
             {barcodeBusy ? "正在获取条码" : "获取产品条形码"}
           </button>
+          <button
+            className="outline-button"
+            disabled={!selectedSkus.size || barcodeExportBusy}
+            onClick={() => void exportBarcodes()}
+          >
+            <Download size={15} />
+            {barcodeExportBusy ? "正在导出" : `导出所选条码${selectedSkus.size ? `（${selectedSkus.size}）` : ""}`}
+          </button>
           <button className="outline-button" onClick={exportCosts}>
             <Download size={15} />
             导出成本
@@ -190,6 +227,14 @@ export function ProductsPage({
         <table>
           <thead>
             <tr>
+              <th className="selection-cell">
+                <input
+                  type="checkbox"
+                  aria-label="选择当前页全部商品"
+                  checked={visibleSelected}
+                  onChange={toggleVisible}
+                />
+              </th>
               <th>货号 / Ozon SKU</th>
               <th>产品条形码</th>
               <th>下单</th>
@@ -204,21 +249,40 @@ export function ProductsPage({
           <tbody>
             {visible.map((row) => (
               <tr key={row.sku}>
+                <td className="selection-cell">
+                  <input
+                    type="checkbox"
+                    aria-label={`选择 ${row.offerId || row.sku}`}
+                    checked={selectedSkus.has(row.sku)}
+                    onChange={() => setSelectedSkus((current) => {
+                      const next = new Set(current);
+                      next.has(row.sku) ? next.delete(row.sku) : next.add(row.sku);
+                      return next;
+                    })}
+                  />
+                </td>
                 <td>
                   <b>{row.offerId || "—"}</b>
                   <small>{row.sku}</small>
                 </td>
                 <td>
-                  {row.barcodes.length ? (
-                    <>
+                  <div className="barcode-cell">
+                    <span>
+                    {row.barcodes.length ? (
+                      <>
                       <b>{row.barcodes[0]}</b>
                       {row.barcodes.length > 1 && (
                         <small>另有 {row.barcodes.length - 1} 个条码</small>
                       )}
-                    </>
-                  ) : (
-                    <span className="missing">条码缺失</span>
-                  )}
+                      </>
+                    ) : (
+                      <span className="missing">条码缺失</span>
+                    )}
+                    </span>
+                    <button className="icon-button" title="设置条形码" onClick={() => setBarcodeEditing(row)}>
+                      <Barcode size={15} />
+                    </button>
+                  </div>
                 </td>
                 <td>
                   <b>{row.orderedUnits}</b>
@@ -283,7 +347,61 @@ export function ProductsPage({
           }}
         />
       )}
+      {barcodeEditing && (
+        <BarcodeEditor
+          row={barcodeEditing}
+          close={() => setBarcodeEditing(null)}
+          saved={() => {
+            setBarcodeEditing(null);
+            reload();
+          }}
+        />
+      )}
     </>
+  );
+}
+
+function BarcodeEditor({
+  row,
+  close,
+  saved,
+}: {
+  row: ProductRow;
+  close: () => void;
+  saved: () => void;
+}) {
+  const [value, setValue] = useState(row.barcodes.join("\n"));
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const barcodes = value.split(/[\n,，;；]+/).map((item) => item.trim()).filter(Boolean);
+      const count = await saveProductBarcodes(row.sku, barcodes);
+      window.alert(count ? `已保存 ${count} 个条形码` : "已清空此商品的条形码");
+      saved();
+    } catch (error) {
+      window.alert(`条形码保存失败：${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="modal-backdrop">
+      <div className="cost-modal barcode-modal">
+        <button className="modal-close" onClick={close}><X /></button>
+        <h2>{row.offerId || row.sku}</h2>
+        <p>设置产品条形码</p>
+        <label className="barcode-editor-field">
+          每行填写一个条形码，也支持使用逗号或分号分隔
+          <textarea value={value} onChange={(event) => setValue(event.target.value)} autoFocus />
+        </label>
+        <small className="barcode-editor-note">保存时会自动去除空值、排序并去重；清空后保存可删除全部条码。</small>
+        <div className="modal-actions">
+          <button className="outline-button" disabled={busy} onClick={close}>取消</button>
+          <button className="dark-button" disabled={busy} onClick={() => void save()}>{busy ? "正在保存" : "保存条形码"}</button>
+        </div>
+      </div>
+    </div>
   );
 }
 

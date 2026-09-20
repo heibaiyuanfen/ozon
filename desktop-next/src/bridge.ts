@@ -233,6 +233,14 @@ export async function exportProductCosts(): Promise<string> {
   if (isTauri()) return invoke("export_product_costs");
   return "preview/product_costs.csv";
 }
+export async function saveProductBarcodes(sku: string, barcodes: string[]): Promise<number> {
+  if (isTauri()) return invoke("save_product_barcodes", { sku, barcodes });
+  return barcodes.length;
+}
+export async function exportProductBarcodes(skus: string[]): Promise<string> {
+  if (isTauri()) return invoke("export_product_barcodes", { skus });
+  return "preview/product_barcodes.csv";
+}
 export async function syncProductBarcodes(): Promise<import("./types").ProductBarcodeSyncResult> {
   return invoke("sync_product_barcodes");
 }
