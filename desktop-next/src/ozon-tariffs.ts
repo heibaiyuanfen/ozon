@@ -67,6 +67,8 @@ export const OZON_LOGISTICS_TARIFF_META = {
   origin: bundle.origin,
 };
 
+export const OZON_LOGISTICS_DESTINATIONS = Object.keys(bundle.routes);
+
 export type CrossdockHandoff = "warehouse" | "pvz" | "ppz" | "courier";
 
 /**

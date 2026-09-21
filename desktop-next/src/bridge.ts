@@ -29,6 +29,9 @@ import type {
   ListingSettings,
   MissingCostRow,
   OrderRow,
+  OzonPromotionsData,
+  OzonPromotionProductsData,
+  OzonPromotionActionResult,
   ProductCostInput,
   ProductDetail,
   ProductRow,
@@ -169,6 +172,29 @@ export async function advertising(range: DateRange): Promise<AdvertisingData> {
     trend: [],
   };
 }
+
+export async function ozonPromotions(refresh = false): Promise<OzonPromotionsData> {
+  if (isTauri()) return invoke("ozon_promotions", { refresh });
+  return { promotions: [], cachedAt: "", source: "cache" };
+}
+
+export async function ozonPromotionProducts(
+  actionId: number,
+  mode: "participating" | "candidates",
+): Promise<OzonPromotionProductsData> {
+  if (isTauri()) return invoke("ozon_promotion_products", { actionId, mode });
+  return { products: [], total: 0 };
+}
+
+export async function ozonPromotionProductAction(input: {
+  actionId: number;
+  action: "activate" | "deactivate";
+  productId: number;
+  actionPrice?: number;
+  stock?: number;
+}): Promise<OzonPromotionActionResult> {
+  return invoke("ozon_promotion_product_action", input);
+}
 export async function advertisingSeries(
   range: DateRange,
   skus: string[],
@@ -282,6 +308,37 @@ export async function inventory(
 }
 export async function syncInventory(): Promise<number> {
   return invoke("sync_inventory");
+}
+export async function selectionCategories():Promise<import("./types").SelectionCategory[]>{return invoke("selection_categories")}
+export async function saveSelectionCategory(input:import("./types").SelectionCategoryInput):Promise<number>{return invoke("save_selection_category",{input})}
+export async function deleteSelectionCategory(id:number):Promise<void>{return invoke("delete_selection_category",{id})}
+export async function selectionItems(query:string,categoryId:number|null,status:string):Promise<import("./types").SelectionItem[]>{return invoke("selection_items",{query,categoryId,status})}
+export async function saveSelectionItem(input:import("./types").SelectionItemInput):Promise<number>{return invoke("save_selection_item",{input})}
+export async function deleteSelectionItem(id:number):Promise<void>{return invoke("delete_selection_item",{id})}
+
+export async function getInventoryAlertState(): Promise<import("./types").InventoryAlertState> {
+  return invoke("inventory_alert_state");
+}
+export async function saveInventoryAlertSettings(
+  settings: import("./types").InventoryAlertSettingsInput,
+): Promise<import("./types").InventoryAlertState> {
+  return invoke("save_inventory_alert_settings", { settings });
+}
+export async function saveInventoryAlertProduct(
+  product: import("./types").InventoryAlertProductInput,
+): Promise<import("./types").InventoryAlertState> {
+  return invoke("save_inventory_alert_product", { product });
+}
+export async function removeInventoryAlertProduct(
+  sku: string,
+): Promise<import("./types").InventoryAlertState> {
+  return invoke("remove_inventory_alert_product", { sku });
+}
+export async function acknowledgeInventoryAlert(): Promise<import("./types").InventoryAlertState> {
+  return invoke("acknowledge_inventory_alert");
+}
+export async function runInventoryAlertNow(): Promise<import("./types").InventoryAlertState> {
+  return invoke("run_inventory_alert_now");
 }
 
 export async function connectionStatus(): Promise<ConnectionStatus> {

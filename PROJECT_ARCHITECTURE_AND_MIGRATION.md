@@ -1615,6 +1615,24 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 新增本地草稿架：保存时记录模式、集中配送地址、选中产品/集群/数量和时间，可在页面直接恢复或删除；兼容旧版草稿数据。
 - 官方配送成本测算改为可折叠面板，默认收起，展开后仍保留体积、价格档、基础配送和越库费用的可审计明细。
 - 验证：`pnpm build`、`cargo check --locked`、`cargo test --locked supply_draft_tests`（6 项通过）；正式构建使用 `desktop-next/scripts/build-tauri-release.cmd`。Release 与根目录启动器均为 32,248,832 bytes，SHA-256 `9791919A6F6EBD9CECF4292CD8530538BFAF02E47B41B49A9B6126150293ECBC`；正式版已启动且进程处于 Responding 状态。
+
+## 2026-09-21：Ozon 广告促销中心
+
+- 营销与洞察导航新增“广告促销”独立页面，使用 Ozon Seller API `GET /v1/actions` 读取当前店铺促销；每项促销生成独立卡片。
+- 卡片展示活动名称、类型、起止日期、参与状态、参与商品数、候选商品数、禁用商品数、优惠规则、冻结日期和活动 ID；支持名称/类型/ID 搜索以及可参加、正在参与、即将开始、已结束四类筛选。
+- 每张卡片可独立调用 `POST /v1/actions/products` 和 `POST /v1/actions/candidates`，查看参与商品或候选商品的商品 ID、原价、活动价、库存和加入方式。
+- 促销列表按店铺数据库缓存；首次进入优先使用缓存，点击“刷新 Ozon 促销”才覆盖缓存，避免重复请求平台。商品明细按用户点击按需加载。
+- 验证：`pnpm build`、`cargo check --locked`、`cargo test --locked seller_api_error_tests`（7 项通过）；使用 `desktop-next/scripts/build-tauri-release.cmd` 完成正式构建。Release 与根目录启动器均为 32,399,872 bytes，SHA-256 `DC2278E5835B4AA7405A18D70CC755F7606FB7AD2ECAA70C2DED1B1196D26B04`。
+- 根目录正式版已成功启动；可见验收读取窗口时检测到用户正在操作目标窗口，自动操作按安全规则停止，未继续抢占输入。
+
+## 2026-09-21：促销商品加入、修改与移出管理
+
+- 广告促销卡片的商品明细升级为可编辑管理界面：候选商品可填写活动价与活动数量后加入活动；已参与商品可修改活动价与数量，也可移出活动。
+- 写操作分别调用 Seller API `POST /v1/actions/products/activate` 与 `POST /v1/actions/products/deactivate`；只有响应明确返回目标商品 ID 且没有拒绝原因时才判定成功。
+- 提交前展示商品、活动价和数量的二次确认；前端校验活动价大于 0、活动数量为非负整数，并使用 Ozon 返回的最高活动价作为输入上限提示。
+- Ozon 拒绝时保留原商品数据并展示平台原因；成功后重新读取当前商品列表与促销摘要，清除旧列表缓存。所有写操作保存在店铺数据库 `ozon_promotion_action_logs` 供审计。
+- 验证：`pnpm build`、`cargo check --locked`、`cargo test --locked seller_api_error_tests`（7 项通过）；使用 `desktop-next/scripts/build-tauri-release.cmd` 正式打包。Release 与根目录启动器均为 32,441,856 bytes，SHA-256 `32BD14FD69CDC66318CE6C73D33CA8E8B8C5213E7C6A5FC5C8CE9227AB156C24`。
+- 根目录正式版已启动，窗口为内嵌 `http://tauri.localhost/` 且进程 Responding；尝试导航到促销页时检测到用户正在操作窗口，按安全规则停止自动输入。未在验收中执行任何真实促销写操作。
 ## 2026-09-18：Ozon 商品条形码获取与缓存
 
 - 商品中心新增“获取产品条形码”操作，按当前店铺已缓存的货号分批调用 Seller `/v3/product/info/list`，读取接口返回的 `barcodes`/`barcode`，不再以 `offer_id`、SKU 或商品 ID 伪装条码。
@@ -1647,3 +1665,45 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 验证：`cargo check --locked`、`cargo test --locked product_barcode_tests`（3 项通过）及 `pnpm build` 均通过；既有大型 chunk 提示不阻断构建。
 - 使用 `desktop-next/scripts/build-tauri-release.cmd` 完成正式构建并覆盖根目录启动器。Release 与根目录 EXE 均为 `32,404,992` 字节，修改时间 `2026-09-20 20:32:24`，SHA-256 均为 `ECB7D6EC7BFFD0D6CA3576530B206FA38126F07672E0E8B1FE604141744675DB`。
 - 根目录正式 EXE 已启动，进程 PID 7460 且处于 Responding 状态。当前会话的电脑操作插件未开放原生应用控制接口，因此未执行按钮级可见点击验收；没有用源码构建成功替代这一限制说明。
+
+## 2026-09-21：每日库存更新与商品预警
+
+- 库存管理页新增独立的每日库存任务：可开启/关闭、设置本地固定时间（默认 10:00），并从当前店铺库存中选择需要监控的商品及各自预警线。
+- 后台线程每分钟检查一次任务；软件在设定时间正常运行时当天执行一次，若设定时间之后才首次启动，则启动后自动补跑当天任务，并通过 `last_run_day` 保证不会重复执行。
+- 每日任务只调用 Seller 库存接口，不触发销量、广告或 Finance 全量同步；监控商品可来自多家店铺，任务按店铺顺序更新各自独立数据库。
+- 配置和最近检查结果保存在数据目录 `inventory-alerts.json`；达到“可售库存 ≤ 预警线”时生成应用内全局弹窗，列出店铺、商品、当前库存与预警线，用户确认后清除本次提示。
+- 增加“立即更新并检查”用于配置验证；库存任务加入进程级防重锁，店铺更新失败不会用该店铺的历史库存制造本次误报。
+- 验证：`cargo check --locked`、`cargo test --locked inventory_alert_tests`（2 项通过）及 `pnpm build` 均通过；正式 `build-tauri-release.cmd` 构建完成。Release 与根目录启动器均为 `32,461,312` bytes，SHA-256 `74B2196898DA54AEA743F3CC048D3223658E411136B87D5473327269F63795BE`。
+- 根目录正式版已启动并返回唯一 `Ozon ERP` 窗口。准备读取窗口进行可见验收时检测到用户正在操作该窗口，按 Windows 自动化安全规则停止后续界面输入；未自动开启每日任务，也未触发真实库存接口。
+
+### 店铺选择与可售天数预警完善
+
+- 每日库存任务增加独立的店铺多选；定时与手动检查只更新所选店铺，但预警商品配置仍按店铺隔离保存。
+- 原“库存件数阈值”升级为“可售天数阈值”：预计可售天数 = 最新可售库存 ÷ 近 7 天日均销量，结果低于商品设定天数时触发全局弹窗。
+- 库存为 0 时按 0 个可售日处理；商品有库存但近 7 天无销量时显示“无法估算”且不误报。界面同时展示当前库存、近 7 天日均销量、预计可售天数和预警天数。
+- 兼容上一版配置文件：旧监控商品沿用原数值作为预警天数，并首次自动带出已有监控商品所属店铺；保存后以用户选择为准。异常退出留下的 `running` 状态会在下次启动恢复为可重试状态。
+- 验证：`cargo test --locked inventory_alert_tests`（3 项通过）、`cargo check --locked`、`pnpm build` 与正式 `build-tauri-release.cmd` 均通过。Release 与根目录启动器均为 `32,491,520` bytes，SHA-256 `B4ABA041D3D1D7BC1F7E42FBBCB2556EF448C739591F42D6D6CE78A25EE9C066`；根目录正式版已启动且进程 Responding。
+
+## 2026-09-21：选品资料库
+
+- “营销与洞察”新增独立的“选品资料库”，数据写入当前店铺数据库，切换店铺时资料自动隔离。
+- 支持自定义类目及类目备注；删除类目时保留候选产品并转为“未分类”。
+- 候选产品可录入产品名称、图片链接、目标市场、竞品链接、采购链接、竞品价、采购价、目标售价、预计月销量、包装长宽高、重量、状态、优先级、标签、优势、风险和调研备注。
+- 卡片列表支持关键词、类目、状态筛选，展示核心价格、销量与包装信息，并可直接打开竞品或采购链接；支持编辑与二次确认删除。
+- 后端严格校验必填名称、非负数值和 HTTP(S) 链接，数据库自动创建 `selection_categories`、`selection_items` 及筛选索引。
+
+### 选品资料编辑器视觉重构
+
+- 修复新增/编辑弹窗沿用通用样式导致白色容器缺失、输入框裸露和视觉层级混乱的问题。
+- 弹窗改为固定头部、独立滚动内容区和固定底部操作栏，并按“基础信息、链接与价格、包装参数、选品判断”四个区块组织字段。
+- 统一标签、输入框、下拉框、文本域、焦点状态和占位提示；重量及尺寸增加单位后缀，产品名称增加明确必填标记。
+- 增加 850px 与 560px 两级响应式布局，小窗口自动从双列分区收敛为单列并在手机宽度使用全屏编辑器。
+- 验证：`pnpm build` 与 `cargo check --locked` 均通过；使用 `desktop-next/scripts/build-tauri-release.cmd` 完成正式构建。Release 已覆盖根目录启动器，文件大小 `32,611,328` bytes，SHA-256 `262C6E5005DC1BA310B2CBAEEFA080A2C594086C4C80541CBF8018EF9405AB6C`。
+
+## 2026-09-21：独立基础配送费查询
+
+- “库存与供应链”新增独立“基础配送费查询”页面，与约仓计划、供应单预约完全解耦。
+- 可按当前店铺的 SKU、货号或商品名称查找商品，自动带出包装长宽高；缺失或需试算时可在页面临时修改尺寸，并实时按 `长 × 宽 × 高 ÷ 1000` 计算升数。
+- 页面读取内置 Ozon 官方费率表，按莫斯科始发、目的区域、体积档和商品售价 `≤ 300 ₽ / > 300 ₽` 展示单件基础配送费；同时保留两档费率以便直接对比。
+- 目的区域统一显示中文和俄文原名，支持区域筛选，并展示官方表生效日期与来源链接。页面明确提示基础配送费不包含佣金、末端附加费及越库费用。
+- 验证：`pnpm build`、`cargo check --locked` 与正式 `build-tauri-release.cmd` 均通过。Release 已覆盖唯一根目录入口 `Ozon ERP.exe`，文件大小 `32,615,424` bytes，SHA-256 `46C65FF98D0AE4FAC33C96F950D04D1F8A174F5B24EE296C9F94F78A033D38AA`；程序已启动且 Responding。

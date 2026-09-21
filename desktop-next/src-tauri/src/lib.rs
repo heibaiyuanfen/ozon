@@ -28,6 +28,7 @@ mod product_master;
 mod product_worker;
 mod purchase_orders;
 mod secrets;
+mod selection_library;
 mod wb;
 mod wb_shop_center;
 static INVENTORY_SYNC_LOCK: Mutex<()> = Mutex::new(());
@@ -36,6 +37,8 @@ static PERFORMANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static FINANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static AUTO_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 static AUTO_SYNC_STATE_LOCK: Mutex<()> = Mutex::new(());
+static INVENTORY_ALERT_STATE_LOCK: Mutex<()> = Mutex::new(());
+static INVENTORY_ALERT_RUNNING: AtomicBool = AtomicBool::new(false);
 static COMPETITOR_COLLECTION_STOP: AtomicBool = AtomicBool::new(false);
 static COMPETITOR_TASK_STOPS: LazyLock<Mutex<HashSet<i64>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -1230,7 +1233,7 @@ fn initialize_extensions(c: &Connection) -> Result<(), String> {
             "ALTER TABLE products ADD COLUMN image_url TEXT NOT NULL DEFAULT ''",
             [],
         )
-            .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
     }
     let has_barcodes = c
         .prepare("PRAGMA table_info(products)")
@@ -1292,6 +1295,7 @@ pub(crate) fn db(state: &AppState) -> Result<Connection, String> {
     ad_experiments::ensure(&c)?;
     daily_tasks::ensure(&c)?;
     contracts::ensure(&c)?;
+    selection_library::ensure(&c)?;
     ad_attribution::ensure(&c)?;
     Ok(c)
 }
@@ -1448,6 +1452,289 @@ pub(crate) fn seller_post(
     let response = response.ok_or_else(|| format!("Ozon Seller API 接口 {path} 未返回响应"))?;
     let raw = response.into_string().map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| format!("Ozon Seller API 返回无法解析的 JSON：{e}"))
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InventoryAlertProduct {
+    shop_id: String,
+    shop_name: String,
+    sku: String,
+    offer_id: String,
+    product_name: String,
+    threshold: f64,
+    last_stock: Option<i64>,
+    #[serde(default)]
+    last_daily_sales: f64,
+    #[serde(default)]
+    last_sellable_days: Option<f64>,
+    last_checked_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct InventoryAlertState {
+    enabled: bool,
+    daily_time: String,
+    last_run_day: String,
+    last_started_at: String,
+    last_finished_at: String,
+    last_status: String,
+    last_message: String,
+    pending_notification: bool,
+    shop_selection_initialized: bool,
+    selected_shop_ids: Vec<String>,
+    available_shops: Vec<AutoSyncShopOption>,
+    products: Vec<InventoryAlertProduct>,
+}
+
+impl Default for InventoryAlertState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            daily_time: "10:00".into(),
+            last_run_day: String::new(),
+            last_started_at: String::new(),
+            last_finished_at: String::new(),
+            last_status: "idle".into(),
+            last_message: "尚未执行每日库存更新".into(),
+            pending_notification: false,
+            shop_selection_initialized: false,
+            selected_shop_ids: Vec::new(),
+            available_shops: Vec::new(),
+            products: Vec::new(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InventoryAlertSettingsInput {
+    enabled: bool,
+    daily_time: String,
+    selected_shop_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InventoryAlertProductInput {
+    sku: String,
+    offer_id: String,
+    product_name: String,
+    threshold: f64,
+}
+
+fn seller_get(c: &Connection, path: &str) -> Result<serde_json::Value, String> {
+    let client_id = setting(c, "seller_client_id");
+    let api_key = secret_setting(c, "seller_api_key")?;
+    if client_id.is_empty() || api_key.is_empty() {
+        return Err("请先在连接设置中配置 Seller Client ID 和 API Key".into());
+    }
+    let url = format!("https://api-seller.ozon.ru{path}");
+    let response = ureq::get(&url)
+        .set("Client-Id", &client_id)
+        .set("Api-Key", &api_key)
+        .set("Accept", "application/json")
+        .set("User-Agent", "OzonERPDesktop/0.1")
+        .timeout(std::time::Duration::from_secs(45))
+        .call()
+        .map_err(|error| match error {
+            ureq::Error::Status(status, response) => {
+                let detail =
+                    seller_error_detail(response.into_string().unwrap_or_default().as_str());
+                format!("Ozon Seller API 接口 {path} 请求失败（HTTP {status}）。{detail}")
+            }
+            other => format!("Ozon Seller API 接口 {path} 请求失败：{other}"),
+        })?;
+    let raw = response.into_string().map_err(|e| e.to_string())?;
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .map_err(|e| format!("Ozon Seller API 接口 {path} 返回无法解析：{e}"))
+}
+
+fn promotion_number(value: &serde_json::Value, key: &str) -> f64 {
+    value.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0)
+}
+
+fn promotion_text(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[tauri::command]
+fn ozon_promotions(refresh: bool, state: State<AppState>) -> Result<serde_json::Value, String> {
+    let c = db(&state)?;
+    c.execute_batch("CREATE TABLE IF NOT EXISTS ozon_promotion_cache(cache_key TEXT PRIMARY KEY,payload TEXT NOT NULL,saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e| e.to_string())?;
+    if !refresh {
+        if let Ok((payload, saved_at)) = c.query_row(
+            "SELECT payload,saved_at FROM ozon_promotion_cache WHERE cache_key='actions'",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ) {
+            if let Ok(promotions) = serde_json::from_str::<serde_json::Value>(&payload) {
+                return Ok(
+                    serde_json::json!({"promotions":promotions,"cachedAt":saved_at,"source":"cache"}),
+                );
+            }
+        }
+    }
+    let response = seller_get(&c, "/v1/actions")?;
+    let source = response
+        .get("result")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let promotions = source.iter().map(|item| serde_json::json!({
+        "id": promotion_number(item,"id") as i64,
+        "title": promotion_text(item,"title"),
+        "actionType": promotion_text(item,"action_type"),
+        "description": promotion_text(item,"description"),
+        "dateStart": promotion_text(item,"date_start"),
+        "dateEnd": promotion_text(item,"date_end"),
+        "freezeDate": promotion_text(item,"freeze_date"),
+        "potentialProductsCount": promotion_number(item,"potential_products_count") as i64,
+        "participatingProductsCount": promotion_number(item,"participating_products_count") as i64,
+        "bannedProductsCount": promotion_number(item,"banned_products_count") as i64,
+        "isParticipating": item.get("is_participating").and_then(|v| v.as_bool()).unwrap_or(false),
+        "isVoucherAction": item.get("is_voucher_action").and_then(|v| v.as_bool()).unwrap_or(false),
+        "withTargeting": item.get("with_targeting").and_then(|v| v.as_bool()).unwrap_or(false),
+        "orderAmount": promotion_number(item,"order_amount"),
+        "discountType": promotion_text(item,"discount_type"),
+        "discountValue": promotion_number(item,"discount_value")
+    })).collect::<Vec<_>>();
+    let payload = serde_json::to_string(&promotions).map_err(|e| e.to_string())?;
+    c.execute("INSERT INTO ozon_promotion_cache(cache_key,payload,saved_at) VALUES('actions',?1,CURRENT_TIMESTAMP) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload,saved_at=CURRENT_TIMESTAMP",[payload]).map_err(|e| e.to_string())?;
+    let saved_at: String = c
+        .query_row(
+            "SELECT saved_at FROM ozon_promotion_cache WHERE cache_key='actions'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"promotions":promotions,"cachedAt":saved_at,"source":"api"}))
+}
+
+#[tauri::command]
+fn ozon_promotion_products(
+    action_id: i64,
+    mode: String,
+    state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let c = db(&state)?;
+    let path = if mode == "candidates" {
+        "/v1/actions/candidates"
+    } else {
+        "/v1/actions/products"
+    };
+    let response = seller_post(
+        &c,
+        path,
+        &serde_json::json!({"action_id":action_id,"limit":1000,"offset":0}),
+    )?;
+    let result = response
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let source = result
+        .get("products")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let products = source
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "id": promotion_number(item,"id") as i64,
+                "price": promotion_number(item,"price"),
+                "actionPrice": promotion_number(item,"action_price"),
+                "maxActionPrice": promotion_number(item,"max_action_price"),
+                "stock": promotion_number(item,"stock") as i64,
+                "minStock": promotion_number(item,"min_stock") as i64,
+                "addMode": promotion_text(item,"add_mode")
+            })
+        })
+        .collect::<Vec<_>>();
+    let total = result
+        .get("total")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(products.len() as i64);
+    Ok(serde_json::json!({"products":products,"total":total}))
+}
+
+#[tauri::command]
+fn ozon_promotion_product_action(
+    action_id: i64,
+    action: String,
+    product_id: i64,
+    action_price: Option<f64>,
+    stock: Option<i64>,
+    state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let c = db(&state)?;
+    c.execute_batch("CREATE TABLE IF NOT EXISTS ozon_promotion_action_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,action_id INTEGER NOT NULL,product_id INTEGER NOT NULL,action TEXT NOT NULL,action_price REAL,stock INTEGER,status TEXT NOT NULL,message TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e| e.to_string())?;
+    let (path, body) = if action == "deactivate" {
+        (
+            "/v1/actions/products/deactivate",
+            serde_json::json!({"action_id":action_id,"product_ids":[product_id]}),
+        )
+    } else {
+        let price = action_price
+            .filter(|value| *value > 0.0)
+            .ok_or("活动价必须大于 0")?;
+        let quantity = stock
+            .filter(|value| *value >= 0)
+            .ok_or("活动数量不能小于 0")?;
+        (
+            "/v1/actions/products/activate",
+            serde_json::json!({"action_id":action_id,"products":[{"product_id":product_id,"action_price":price,"stock":quantity}]}),
+        )
+    };
+    let response = seller_post(&c, path, &body)?;
+    let result = response
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let rejected = result
+        .get("rejected")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let rejection = rejected
+        .iter()
+        .find(|item| item.get("product_id").and_then(|value| value.as_i64()) == Some(product_id))
+        .and_then(|item| item.get("reason").and_then(|value| value.as_str()))
+        .unwrap_or_default()
+        .to_string();
+    let accepted = result
+        .get("product_ids")
+        .and_then(|value| value.as_array())
+        .map(|items| items.iter().any(|item| item.as_i64() == Some(product_id)))
+        .unwrap_or(false);
+    let success = rejection.is_empty() && accepted;
+    let message = if success {
+        if action == "deactivate" {
+            "商品已移出促销".to_string()
+        } else {
+            "商品促销价格与数量已提交".to_string()
+        }
+    } else {
+        if rejection.is_empty() {
+            "Ozon 未确认该商品操作，请刷新后检查活动状态".to_string()
+        } else {
+            format!("Ozon 拒绝：{rejection}")
+        }
+    };
+    c.execute("INSERT INTO ozon_promotion_action_logs(action_id,product_id,action,action_price,stock,status,message) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![action_id,product_id,action,action_price,stock,if success {"success"} else {"rejected"},message]).map_err(|e| e.to_string())?;
+    if success {
+        c.execute(
+            "DELETE FROM ozon_promotion_cache WHERE cache_key='actions'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(serde_json::json!({"success":success,"message":message,"rejected":rejected}))
 }
 
 fn seller_error_detail(raw: &str) -> String {
@@ -2846,8 +3133,7 @@ fn products(
                 offer_id: r.get(1)?,
                 product_id: r.get(2)?,
                 name: r.get(3)?,
-                barcodes: serde_json::from_str(&r.get::<_, String>(4)?)
-                    .unwrap_or_default(),
+                barcodes: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
                 revenue: {
                     let value: f64 = r.get(5)?;
                     if cross_border {
@@ -7600,22 +7886,31 @@ fn product_barcodes_from_item(item: &serde_json::Value) -> Vec<String> {
         match value {
             serde_json::Value::String(text) => {
                 let text = text.trim();
-                if !text.is_empty() { output.push(text.to_string()); }
+                if !text.is_empty() {
+                    output.push(text.to_string());
+                }
             }
             serde_json::Value::Number(number) => output.push(number.to_string()),
             serde_json::Value::Array(values) => values.iter().for_each(|value| add(value, output)),
             serde_json::Value::Object(object) => {
                 for key in ["barcode", "value", "code"] {
-                    if let Some(value) = object.get(key) { add(value, output); break; }
+                    if let Some(value) = object.get(key) {
+                        add(value, output);
+                        break;
+                    }
                 }
             }
             _ => {}
         }
     }
     let mut barcodes = Vec::new();
-    if let Some(value) = item.get("barcodes") { add(value, &mut barcodes); }
+    if let Some(value) = item.get("barcodes") {
+        add(value, &mut barcodes);
+    }
     if barcodes.is_empty() {
-        if let Some(value) = item.get("barcode") { add(value, &mut barcodes); }
+        if let Some(value) = item.get("barcode") {
+            add(value, &mut barcodes);
+        }
     }
     normalize_product_barcodes(barcodes).unwrap_or_default()
 }
@@ -7626,54 +7921,107 @@ mod product_barcode_tests {
     use serde_json::json;
     #[test]
     fn reads_and_deduplicates_product_barcodes() {
-        let item=json!({"barcodes":[" 4601234567890 ",{"barcode":"OZN-ABC"},12345,"4601234567890"]});
-        assert_eq!(product_barcodes_from_item(&item),vec!["12345","4601234567890","OZN-ABC"]);
+        let item =
+            json!({"barcodes":[" 4601234567890 ",{"barcode":"OZN-ABC"},12345,"4601234567890"]});
+        assert_eq!(
+            product_barcodes_from_item(&item),
+            vec!["12345", "4601234567890", "OZN-ABC"]
+        );
     }
     #[test]
     fn does_not_use_offer_or_sku_as_a_barcode() {
-        assert!(product_barcodes_from_item(&json!({"offer_id":"SKU-OFFER","sku":123456})).is_empty());
+        assert!(
+            product_barcodes_from_item(&json!({"offer_id":"SKU-OFFER","sku":123456})).is_empty()
+        );
     }
     #[test]
     fn manual_barcodes_are_trimmed_sorted_and_deduplicated() {
         assert_eq!(
-            normalize_product_barcodes(vec![" 4602 ".into(), "4601".into(), "4602".into()]).unwrap(),
+            normalize_product_barcodes(vec![" 4602 ".into(), "4601".into(), "4602".into()])
+                .unwrap(),
             vec!["4601", "4602"]
         );
     }
 }
 
 fn sync_product_barcodes_blocking(state: &AppState) -> Result<ProductBarcodeSyncResult, String> {
-    let mut c=db(state)?;
-    let offer_ids={
-        let mut stmt=c.prepare("SELECT DISTINCT offer_id FROM products WHERE offer_id<>'' ORDER BY offer_id").map_err(|e|e.to_string())?;
-        let values=stmt.query_map([],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut c = db(state)?;
+    let offer_ids = {
+        let mut stmt = c
+            .prepare("SELECT DISTINCT offer_id FROM products WHERE offer_id<>'' ORDER BY offer_id")
+            .map_err(|e| e.to_string())?;
+        let values = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
         values
     };
-    if offer_ids.is_empty(){return Err("商品中心尚无货号，请先同步 Seller 商品数据".into());}
-    let mut result=ProductBarcodeSyncResult{requested:offer_ids.len(),products_found:0,products_with_barcodes:0,barcodes_saved:0,products_missing_barcodes:0};
+    if offer_ids.is_empty() {
+        return Err("商品中心尚无货号，请先同步 Seller 商品数据".into());
+    }
+    let mut result = ProductBarcodeSyncResult {
+        requested: offer_ids.len(),
+        products_found: 0,
+        products_with_barcodes: 0,
+        barcodes_saved: 0,
+        products_missing_barcodes: 0,
+    };
     for chunk in offer_ids.chunks(500) {
-        let details=seller_post(&c,"/v3/product/info/list",&serde_json::json!({"offer_id":chunk,"product_id":[],"sku":[]}))?;
-        let items=details.get("items").or_else(||details.pointer("/result/items")).and_then(|v|v.as_array()).cloned().unwrap_or_default();
-        let tx=c.transaction().map_err(|e|e.to_string())?;
+        let details = seller_post(
+            &c,
+            "/v3/product/info/list",
+            &serde_json::json!({"offer_id":chunk,"product_id":[],"sku":[]}),
+        )?;
+        let items = details
+            .get("items")
+            .or_else(|| details.pointer("/result/items"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let tx = c.transaction().map_err(|e| e.to_string())?;
         for item in items {
-            let offer=json_text(item.get("offer_id"));
-            let sku=item.get("sku").map(|value|value.as_i64().map(|number|number.to_string()).unwrap_or_else(||json_text(Some(value)))).unwrap_or_default();
-            if offer.is_empty()&&sku.is_empty(){continue;}
-            result.products_found+=1;
-            let barcodes=product_barcodes_from_item(&item);
-            if barcodes.is_empty(){result.products_missing_barcodes+=1;}else{result.products_with_barcodes+=1;result.barcodes_saved+=barcodes.len();}
-            let encoded=serde_json::to_string(&barcodes).map_err(|e|e.to_string())?;
-            if !sku.is_empty(){tx.execute("UPDATE products SET barcodes_json=?1,updated_at=CURRENT_TIMESTAMP WHERE sku=?2",params![encoded,sku]).map_err(|e|e.to_string())?;}else{tx.execute("UPDATE products SET barcodes_json=?1,updated_at=CURRENT_TIMESTAMP WHERE offer_id=?2",params![encoded,offer]).map_err(|e|e.to_string())?;}
+            let offer = json_text(item.get("offer_id"));
+            let sku = item
+                .get("sku")
+                .map(|value| {
+                    value
+                        .as_i64()
+                        .map(|number| number.to_string())
+                        .unwrap_or_else(|| json_text(Some(value)))
+                })
+                .unwrap_or_default();
+            if offer.is_empty() && sku.is_empty() {
+                continue;
+            }
+            result.products_found += 1;
+            let barcodes = product_barcodes_from_item(&item);
+            if barcodes.is_empty() {
+                result.products_missing_barcodes += 1;
+            } else {
+                result.products_with_barcodes += 1;
+                result.barcodes_saved += barcodes.len();
+            }
+            let encoded = serde_json::to_string(&barcodes).map_err(|e| e.to_string())?;
+            if !sku.is_empty() {
+                tx.execute("UPDATE products SET barcodes_json=?1,updated_at=CURRENT_TIMESTAMP WHERE sku=?2",params![encoded,sku]).map_err(|e|e.to_string())?;
+            } else {
+                tx.execute("UPDATE products SET barcodes_json=?1,updated_at=CURRENT_TIMESTAMP WHERE offer_id=?2",params![encoded,offer]).map_err(|e|e.to_string())?;
+            }
         }
-        tx.commit().map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
     Ok(result)
 }
 
 #[tauri::command]
-async fn sync_product_barcodes(state: State<'_, AppState>) -> Result<ProductBarcodeSyncResult, String> {
-    let owned=background_state(&state)?;
-    tauri::async_runtime::spawn_blocking(move||sync_product_barcodes_blocking(&owned)).await.map_err(|e|e.to_string())?
+async fn sync_product_barcodes(
+    state: State<'_, AppState>,
+) -> Result<ProductBarcodeSyncResult, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || sync_product_barcodes_blocking(&owned))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn sync_seller_sales_blocking(
@@ -7906,7 +8254,8 @@ fn sync_seller_sales_blocking(
                             .unwrap_or_else(|| json_text(Some(v)))
                     })
                     .unwrap_or_default();
-                let barcodes=serde_json::to_string(&product_barcodes_from_item(&item)).map_err(|e|e.to_string())?;
+                let barcodes = serde_json::to_string(&product_barcodes_from_item(&item))
+                    .map_err(|e| e.to_string())?;
                 if !sku.is_empty() {
                     tx.execute("INSERT INTO products(sku,offer_id,product_id,name,image_url,barcodes_json,source)VALUES(?1,?2,?3,?4,?5,?6,'api')ON CONFLICT(sku)DO UPDATE SET offer_id=excluded.offer_id,product_id=excluded.product_id,name=CASE WHEN excluded.name<>''THEN excluded.name ELSE products.name END,image_url=CASE WHEN excluded.image_url<>''THEN excluded.image_url ELSE products.image_url END,barcodes_json=excluded.barcodes_json,source='api',updated_at=CURRENT_TIMESTAMP",params![sku,offer,json_text(item.get("id")).or_else_empty(||json_text(item.get("product_id"))),json_text(item.get("name")),image,barcodes]).map_err(|e|e.to_string())?;
                 } else if !image.is_empty() {
@@ -8741,6 +9090,332 @@ fn auto_sync_state_path(data_dir: &Path) -> PathBuf {
     data_dir.join("auto-sync.json")
 }
 
+fn inventory_alert_state_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("inventory-alerts.json")
+}
+
+fn read_inventory_alert_state(data_dir: &Path) -> InventoryAlertState {
+    let mut state: InventoryAlertState = fs::read_to_string(inventory_alert_state_path(data_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    if state.last_status == "running" && !INVENTORY_ALERT_RUNNING.load(Ordering::SeqCst) {
+        state.last_status = "failed".into();
+        state.last_message = "上次每日库存更新因软件关闭而中断，今天会重新执行".into();
+    }
+    if state.pending_notification
+        && !state
+            .products
+            .iter()
+            .any(|product| product.last_sellable_days.is_some())
+    {
+        // A notification persisted by the previous stock-count threshold has
+        // no valid sellable-days result and must not open an empty dialog.
+        state.pending_notification = false;
+    }
+    if let Ok(registry) = read_registry(data_dir) {
+        state.available_shops = registry
+            .shops
+            .iter()
+            .map(|shop| AutoSyncShopOption {
+                shop_id: shop.id.clone(),
+                shop_name: shop.name.clone(),
+            })
+            .collect();
+        let valid = state
+            .available_shops
+            .iter()
+            .map(|shop| shop.shop_id.as_str())
+            .collect::<HashSet<_>>();
+        state
+            .selected_shop_ids
+            .retain(|id| valid.contains(id.as_str()));
+        if !state.shop_selection_initialized {
+            state.selected_shop_ids = state
+                .products
+                .iter()
+                .map(|product| product.shop_id.clone())
+                .filter(|id| valid.contains(id.as_str()))
+                .collect();
+            state.selected_shop_ids.sort();
+            state.selected_shop_ids.dedup();
+        }
+    }
+    state
+}
+
+fn inventory_sellable_days(stock: i64, daily_sales: f64) -> Option<f64> {
+    if daily_sales > 0.0 {
+        Some(stock as f64 / daily_sales)
+    } else if stock <= 0 {
+        Some(0.0)
+    } else {
+        None
+    }
+}
+
+fn write_inventory_alert_state(data_dir: &Path, value: &InventoryAlertState) -> Result<(), String> {
+    let _guard = INVENTORY_ALERT_STATE_LOCK
+        .lock()
+        .map_err(|_| "库存预警设置写入锁异常".to_string())?;
+    let path = inventory_alert_state_path(data_dir);
+    let temporary = path.with_extension("json.tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_string_pretty(value).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    fs::rename(temporary, path).map_err(|e| e.to_string())
+}
+
+fn inventory_alert_is_due(
+    state: &InventoryAlertState,
+    now: chrono::DateTime<chrono::Local>,
+) -> bool {
+    state.enabled
+        && !state.selected_shop_ids.is_empty()
+        && state.last_status != "running"
+        && state.last_run_day != now.format("%Y-%m-%d").to_string()
+        && now.format("%H:%M").to_string() >= state.daily_time
+}
+
+fn run_daily_inventory_alert(data_dir: &Path) -> Result<InventoryAlertState, String> {
+    if INVENTORY_ALERT_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("每日库存更新正在执行，请勿重复启动".into());
+    }
+    struct RunningGuard;
+    impl Drop for RunningGuard {
+        fn drop(&mut self) {
+            INVENTORY_ALERT_RUNNING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _running_guard = RunningGuard;
+    let mut alert = read_inventory_alert_state(data_dir);
+    let shop_ids = alert
+        .selected_shop_ids
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    if shop_ids.is_empty() {
+        return Err("请先选择至少一家每日自动更新店铺".into());
+    }
+    let now = chrono::Local::now();
+    alert.last_started_at = now.to_rfc3339();
+    alert.last_status = "running".into();
+    alert.last_message = "正在按店铺更新库存并核对预警线".into();
+    write_inventory_alert_state(data_dir, &alert)?;
+
+    let registry = read_registry(data_dir)?;
+    let mut errors = Vec::new();
+    let mut updated_rows = 0_i64;
+    let mut successful_shop_ids = HashSet::new();
+    for shop_id in shop_ids {
+        let Some(shop) = registry.shops.iter().find(|shop| shop.id == shop_id) else {
+            errors.push(format!("店铺 {shop_id} 已不存在"));
+            continue;
+        };
+        let shop_state = AppState {
+            data_dir: data_dir.to_path_buf(),
+            active_shop_id: Mutex::new(shop.id.clone()),
+        };
+        match sync_inventory_blocking(&shop_state) {
+            Ok(count) => {
+                updated_rows += count;
+                successful_shop_ids.insert(shop.id.clone());
+            }
+            Err(error) => {
+                errors.push(format!("{}：{error}", shop.name));
+                continue;
+            }
+        }
+        let conn = db(&shop_state)?;
+        for product in alert
+            .products
+            .iter_mut()
+            .filter(|item| item.shop_id == shop.id)
+        {
+            let stock = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(available_stock),0) FROM inventory_stock WHERE sku=?1",
+                    [&product.sku],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            let daily_sales = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(ordered_units),0)/7.0 FROM sales_daily WHERE sku=?1 AND day>=date('now','-6 day')",
+                    [&product.sku],
+                    |row| row.get::<_, f64>(0),
+                )
+                .unwrap_or(0.0);
+            product.last_stock = Some(stock);
+            product.last_daily_sales = daily_sales;
+            product.last_sellable_days = inventory_sellable_days(stock, daily_sales);
+            product.last_checked_at = chrono::Local::now().to_rfc3339();
+        }
+    }
+    let low_count = alert
+        .products
+        .iter()
+        .filter(|item| {
+            successful_shop_ids.contains(&item.shop_id)
+                && item
+                    .last_sellable_days
+                    .is_some_and(|days| days < item.threshold)
+        })
+        .count();
+    alert.last_run_day = now.format("%Y-%m-%d").to_string();
+    alert.last_finished_at = chrono::Local::now().to_rfc3339();
+    alert.last_status = if errors.is_empty() {
+        "success"
+    } else {
+        "partial"
+    }
+    .into();
+    alert.pending_notification = low_count > 0;
+    alert.last_message = if errors.is_empty() {
+        format!("每日库存更新完成：写入 {updated_rows} 条仓库库存，{low_count} 个商品达到预警线")
+    } else {
+        format!(
+            "库存更新部分完成：{low_count} 个商品达到预警线；{}",
+            errors.join("；")
+        )
+    };
+    write_inventory_alert_state(data_dir, &alert)?;
+    Ok(alert)
+}
+
+#[tauri::command]
+fn inventory_alert_state(state: State<AppState>) -> InventoryAlertState {
+    read_inventory_alert_state(&state.data_dir)
+}
+
+#[tauri::command]
+fn save_inventory_alert_settings(
+    settings: InventoryAlertSettingsInput,
+    state: State<AppState>,
+) -> Result<InventoryAlertState, String> {
+    let time_parts = settings.daily_time.split(':').collect::<Vec<_>>();
+    let valid_time = time_parts.len() == 2
+        && time_parts[0].len() == 2
+        && time_parts[1].len() == 2
+        && time_parts[0].parse::<u8>().is_ok_and(|hour| hour < 24)
+        && time_parts[1].parse::<u8>().is_ok_and(|minute| minute < 60);
+    if !valid_time {
+        return Err("每日更新时间格式无效".into());
+    }
+    let mut current = read_inventory_alert_state(&state.data_dir);
+    current.enabled = settings.enabled;
+    current.daily_time = settings.daily_time;
+    let valid_shop_ids = current
+        .available_shops
+        .iter()
+        .map(|shop| shop.shop_id.as_str())
+        .collect::<HashSet<_>>();
+    current.selected_shop_ids = settings
+        .selected_shop_ids
+        .into_iter()
+        .filter(|id| valid_shop_ids.contains(id.as_str()))
+        .collect();
+    current.selected_shop_ids.sort();
+    current.selected_shop_ids.dedup();
+    current.shop_selection_initialized = true;
+    if current.enabled && current.selected_shop_ids.is_empty() {
+        return Err("已开启每日库存更新，请至少选择一家店铺".into());
+    }
+    write_inventory_alert_state(&state.data_dir, &current)?;
+    Ok(current)
+}
+
+#[tauri::command]
+fn save_inventory_alert_product(
+    product: InventoryAlertProductInput,
+    state: State<AppState>,
+) -> Result<InventoryAlertState, String> {
+    if product.sku.trim().is_empty() {
+        return Err("SKU 不能为空".into());
+    }
+    if !product.threshold.is_finite() || product.threshold <= 0.0 {
+        return Err("可售天数预警线必须大于 0".into());
+    }
+    let shop_id = state
+        .active_shop_id
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let registry = read_registry(&state.data_dir)?;
+    let shop_name = registry
+        .shops
+        .iter()
+        .find(|shop| shop.id == shop_id)
+        .map(|shop| shop.name.clone())
+        .unwrap_or_else(|| shop_id.clone());
+    let mut current = read_inventory_alert_state(&state.data_dir);
+    if let Some(existing) = current
+        .products
+        .iter_mut()
+        .find(|item| item.shop_id == shop_id && item.sku == product.sku)
+    {
+        existing.offer_id = product.offer_id;
+        existing.product_name = product.product_name;
+        existing.threshold = product.threshold;
+    } else {
+        current.products.push(InventoryAlertProduct {
+            shop_id,
+            shop_name,
+            sku: product.sku,
+            offer_id: product.offer_id,
+            product_name: product.product_name,
+            threshold: product.threshold,
+            last_stock: None,
+            last_daily_sales: 0.0,
+            last_sellable_days: None,
+            last_checked_at: String::new(),
+        });
+    }
+    write_inventory_alert_state(&state.data_dir, &current)?;
+    Ok(current)
+}
+
+#[tauri::command]
+fn remove_inventory_alert_product(
+    sku: String,
+    state: State<AppState>,
+) -> Result<InventoryAlertState, String> {
+    let shop_id = state
+        .active_shop_id
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let mut current = read_inventory_alert_state(&state.data_dir);
+    current
+        .products
+        .retain(|item| !(item.shop_id == shop_id && item.sku == sku));
+    write_inventory_alert_state(&state.data_dir, &current)?;
+    Ok(current)
+}
+
+#[tauri::command]
+fn acknowledge_inventory_alert(state: State<AppState>) -> Result<InventoryAlertState, String> {
+    let mut current = read_inventory_alert_state(&state.data_dir);
+    current.pending_notification = false;
+    write_inventory_alert_state(&state.data_dir, &current)?;
+    Ok(current)
+}
+
+#[tauri::command]
+async fn run_inventory_alert_now(
+    state: State<'_, AppState>,
+) -> Result<InventoryAlertState, String> {
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || run_daily_inventory_alert(&data_dir))
+        .await
+        .map_err(|e| format!("每日库存任务执行失败：{e}"))?
+}
+
 fn read_auto_sync_state(data_dir: &Path) -> AutoSyncState {
     let mut state: AutoSyncState = fs::read_to_string(auto_sync_state_path(data_dir))
         .ok()
@@ -9015,6 +9690,21 @@ fn start_auto_sync_worker(data_dir: PathBuf) {
             if should_run {
                 let kind = if startup_run { "startup" } else { "all" };
                 let _ = run_all_shops_sync(&data_dir, false, kind, Vec::new());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    });
+}
+
+fn start_inventory_alert_worker(data_dir: PathBuf) {
+    std::thread::spawn(move || {
+        // A short startup delay lets the main window finish opening. The first
+        // check also implements the requested catch-up run after the daily time.
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        loop {
+            let state = read_inventory_alert_state(&data_dir);
+            if inventory_alert_is_due(&state, chrono::Local::now()) {
+                let _ = run_daily_inventory_alert(&data_dir);
             }
             std::thread::sleep(std::time::Duration::from_secs(60));
         }
@@ -10148,11 +10838,17 @@ fn multi_cluster_dropoff_warehouse_type(_listed_type: Option<&str>) -> &'static 
 
 #[cfg(test)]
 mod supply_draft_tests {
-    use super::{collect_draft_destinations, collect_supply_timeslots, draft_status_diagnostics, multi_cluster_dropoff_warehouse_type};
+    use super::{
+        collect_draft_destinations, collect_supply_timeslots, draft_status_diagnostics,
+        multi_cluster_dropoff_warehouse_type,
+    };
 
     #[test]
     fn warehouse_list_default_enum_is_not_forwarded_to_draft_creation() {
-        assert_eq!(multi_cluster_dropoff_warehouse_type(Some("0")), "DELIVERY_POINT");
+        assert_eq!(
+            multi_cluster_dropoff_warehouse_type(Some("0")),
+            "DELIVERY_POINT"
+        );
         assert_eq!(multi_cluster_dropoff_warehouse_type(None), "DELIVERY_POINT");
     }
 
@@ -10193,7 +10889,9 @@ mod supply_draft_tests {
         collect_draft_destinations(&payload, "", &mut destinations);
         assert_eq!(destinations.len(), 2);
         assert!(destinations.iter().all(|row| row.storage_warehouse_id == 0));
-        assert!(destinations.iter().all(|row| row.name == "统一发运（Ozon 自动分配）"));
+        assert!(destinations
+            .iter()
+            .all(|row| row.name == "统一发运（Ozon 自动分配）"));
     }
 
     #[test]
@@ -10216,7 +10914,6 @@ mod supply_draft_tests {
         assert_eq!(missing, vec!["Samara（4042）"]);
         assert_eq!(reasons, vec!["INVALID_STORAGE_WAREHOUSE"]);
     }
-
 }
 
 fn supply_quantities_for_status(status: &str, quantity: i64) -> (i64, i64, i64, i64) {
@@ -10394,7 +11091,9 @@ fn collect_draft_destinations(
                 &cluster
             };
             let warehouse_id = supply_json_i64(map.get("storage_warehouse_id").or_else(|| {
-                (!inherited_cluster.is_empty()).then(|| map.get("warehouse_id")).flatten()
+                (!inherited_cluster.is_empty())
+                    .then(|| map.get("warehouse_id"))
+                    .flatten()
             }));
             // In Ozon's current MULTI_CLUSTER unified-shipping response, a
             // FULL_AVAILABLE route intentionally has `storage_warehouse:null`.
@@ -10402,7 +11101,9 @@ fn collect_draft_destinations(
             // storage_warehouse_id=0, which means "Ozon chooses the internal
             // destination" rather than "route missing".
             let auto_routed = !cluster.is_empty()
-                && map.get("storage_warehouse").is_some_and(serde_json::Value::is_null)
+                && map
+                    .get("storage_warehouse")
+                    .is_some_and(serde_json::Value::is_null)
                 && map
                     .get("availability_status")
                     .and_then(|value| value.get("state"))
@@ -10444,20 +11145,28 @@ fn collect_supply_timeslots(value: &serde_json::Value, output: &mut Vec<SupplyTi
         serde_json::Value::Object(map) => {
             let from = json_text(map.get("from").or_else(|| map.get("from_in_timezone")));
             let to = json_text(map.get("to").or_else(|| map.get("to_in_timezone")));
-            if !from.is_empty() && !to.is_empty() && !output.iter().any(|slot| slot.from == from && slot.to == to) {
+            if !from.is_empty()
+                && !to.is_empty()
+                && !output.iter().any(|slot| slot.from == from && slot.to == to)
+            {
                 output.push(SupplyTimeslot { from, to });
             }
-            for child in map.values() { collect_supply_timeslots(child, output); }
+            for child in map.values() {
+                collect_supply_timeslots(child, output);
+            }
         }
         serde_json::Value::Array(values) => {
-            for child in values { collect_supply_timeslots(child, output); }
+            for child in values {
+                collect_supply_timeslots(child, output);
+            }
         }
         _ => {}
     }
 }
 
 fn draft_status_diagnostics(payload: &serde_json::Value) -> (usize, Vec<String>, Vec<String>) {
-    let clusters = payload.get("clusters")
+    let clusters = payload
+        .get("clusters")
         .or_else(|| payload.pointer("/result/clusters"))
         .and_then(|value| value.as_array());
     let mut without_warehouses = Vec::new();
@@ -10466,22 +11175,48 @@ fn draft_status_diagnostics(payload: &serde_json::Value) -> (usize, Vec<String>,
             let warehouses = cluster.get("warehouses").and_then(|value| value.as_array());
             if warehouses.map(|rows| rows.is_empty()).unwrap_or(true) {
                 let name = json_text(cluster.get("cluster_name"));
-                let id = supply_identifier(cluster.get("macrolocal_cluster_id").or_else(|| cluster.get("cluster_id")));
-                without_warehouses.push(if name.is_empty() { format!("集群 {id}") } else if id.is_empty() { name } else { format!("{name}（{id}）") });
+                let id = supply_identifier(
+                    cluster
+                        .get("macrolocal_cluster_id")
+                        .or_else(|| cluster.get("cluster_id")),
+                );
+                without_warehouses.push(if name.is_empty() {
+                    format!("集群 {id}")
+                } else if id.is_empty() {
+                    name
+                } else {
+                    format!("{name}（{id}）")
+                });
             }
         }
     }
     let mut reasons = Vec::new();
-    let errors = payload.get("errors").or_else(|| payload.pointer("/result/errors")).and_then(|value| value.as_array());
+    let errors = payload
+        .get("errors")
+        .or_else(|| payload.pointer("/result/errors"))
+        .and_then(|value| value.as_array());
     for error in errors.into_iter().flatten() {
         let message = json_text(error.get("message").or_else(|| error.get("error_message")));
-        if !message.is_empty() && message != "UNSPECIFIED" && !reasons.contains(&message) { reasons.push(message); }
-        for reason in error.get("error_reasons").and_then(|value| value.as_array()).into_iter().flatten() {
+        if !message.is_empty() && message != "UNSPECIFIED" && !reasons.contains(&message) {
+            reasons.push(message);
+        }
+        for reason in error
+            .get("error_reasons")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+        {
             let value = json_text(Some(reason));
-            if !value.is_empty() && value != "UNSPECIFIED" && !reasons.contains(&value) { reasons.push(value); }
+            if !value.is_empty() && value != "UNSPECIFIED" && !reasons.contains(&value) {
+                reasons.push(value);
+            }
         }
     }
-    (clusters.map(Vec::len).unwrap_or(0), without_warehouses, reasons)
+    (
+        clusters.map(Vec::len).unwrap_or(0),
+        without_warehouses,
+        reasons,
+    )
 }
 
 #[tauri::command]
@@ -12393,6 +13128,61 @@ mod auto_sync_tests {
     }
 }
 
+#[cfg(test)]
+mod inventory_alert_tests {
+    use super::{
+        inventory_alert_is_due, inventory_sellable_days, InventoryAlertProduct, InventoryAlertState,
+    };
+
+    fn configured_state() -> InventoryAlertState {
+        let mut state = InventoryAlertState::default();
+        state.enabled = true;
+        state.daily_time = "10:00".into();
+        state.selected_shop_ids = vec!["shop-a".into()];
+        state.products.push(InventoryAlertProduct {
+            shop_id: "shop-a".into(),
+            shop_name: "A 店".into(),
+            sku: "123".into(),
+            offer_id: "SKU-A".into(),
+            product_name: "测试商品".into(),
+            threshold: 10.0,
+            last_stock: None,
+            last_daily_sales: 0.0,
+            last_sellable_days: None,
+            last_checked_at: String::new(),
+        });
+        state
+    }
+
+    #[test]
+    fn missed_daily_time_runs_once_after_launch() {
+        let state = configured_state();
+        let after_time = chrono::DateTime::parse_from_rfc3339("2026-09-21T10:30:00+08:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert!(inventory_alert_is_due(&state, after_time));
+        let mut completed = state;
+        completed.last_run_day = "2026-09-21".into();
+        assert!(!inventory_alert_is_due(&completed, after_time));
+    }
+
+    #[test]
+    fn task_waits_until_configured_time() {
+        let state = configured_state();
+        let before_time = chrono::DateTime::parse_from_rfc3339("2026-09-21T09:59:00+08:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert!(!inventory_alert_is_due(&state, before_time));
+    }
+
+    #[test]
+    fn sellable_days_uses_seven_day_daily_sales_and_handles_zero_stock() {
+        assert_eq!(inventory_sellable_days(70, 7.0), Some(10.0));
+        assert_eq!(inventory_sellable_days(0, 0.0), Some(0.0));
+        assert_eq!(inventory_sellable_days(70, 0.0), None);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -12406,6 +13196,7 @@ pub fn run() {
             let registry = read_registry(&data_dir).map_err(std::io::Error::other)?;
             product_worker::start(data_dir.clone());
             start_auto_sync_worker(data_dir.clone());
+            start_inventory_alert_worker(data_dir.clone());
             app.manage(AppState {
                 data_dir,
                 active_shop_id: Mutex::new(registry.active_shop_id),
@@ -12421,6 +13212,9 @@ pub fn run() {
             dashboard,
             orders,
             advertising,
+            ozon_promotions,
+            ozon_promotion_products,
+            ozon_promotion_product_action,
             advertising_series,
             advertising_series_dataset,
             advertising_series_candidates,
@@ -12434,7 +13228,19 @@ pub fn run() {
             campaign_ai_analysis,
             products,
             inventory,
+            selection_library::selection_categories,
+            selection_library::save_selection_category,
+            selection_library::delete_selection_category,
+            selection_library::selection_items,
+            selection_library::save_selection_item,
+            selection_library::delete_selection_item,
             sync_inventory,
+            inventory_alert_state,
+            save_inventory_alert_settings,
+            save_inventory_alert_product,
+            remove_inventory_alert_product,
+            acknowledge_inventory_alert,
+            run_inventory_alert_now,
             connection_status,
             load_credentials_form,
             save_credentials_form,

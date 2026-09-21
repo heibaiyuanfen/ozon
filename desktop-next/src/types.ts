@@ -3,6 +3,7 @@ export type PageKey =
   | "orders"
   | "products"
   | "advertising"
+  | "promotions"
   | "ad_experiments"
   | "ad_attribution"
   | "daily_tasks"
@@ -28,6 +29,8 @@ export type PageKey =
   | "competitors"
   | "differentiation"
   | "product_analysis"
+  | "selection_library"
+  | "delivery_fee_query"
   | "mind_map"
   | "shops"
   | "settings";
@@ -44,6 +47,57 @@ export interface Shop {
 export interface DateRange {
   from: string;
   to: string;
+}
+
+export interface SelectionCategory { id:number; name:string; note:string; itemCount:number }
+export interface SelectionItem { id:number; categoryId:number|null; categoryName:string; productName:string; imageUrl:string; targetMarket:string; competitorUrl:string; purchaseUrl:string; competitorPrice:number|null; purchasePrice:number|null; targetPrice:number|null; estimatedMonthlySales:number|null; weightKg:number|null; lengthCm:number|null; widthCm:number|null; heightCm:number|null; status:string; priority:string; tags:string; advantages:string; risks:string; notes:string; createdAt:string; updatedAt:string }
+export type SelectionCategoryInput={id:number|null;name:string;note:string};
+export type SelectionItemInput=Omit<SelectionItem,"id"|"categoryName"|"createdAt"|"updatedAt"> & {id:number|null};
+
+export interface OzonPromotion {
+  id: number;
+  title: string;
+  actionType: string;
+  description: string;
+  dateStart: string;
+  dateEnd: string;
+  freezeDate: string;
+  potentialProductsCount: number;
+  participatingProductsCount: number;
+  bannedProductsCount: number;
+  isParticipating: boolean;
+  isVoucherAction: boolean;
+  withTargeting: boolean;
+  orderAmount: number;
+  discountType: string;
+  discountValue: number;
+}
+
+export interface OzonPromotionsData {
+  promotions: OzonPromotion[];
+  cachedAt: string;
+  source: "api" | "cache";
+}
+
+export interface OzonPromotionProduct {
+  id: number;
+  price: number;
+  actionPrice: number;
+  maxActionPrice: number;
+  stock: number;
+  minStock: number;
+  addMode: string;
+}
+
+export interface OzonPromotionProductsData {
+  products: OzonPromotionProduct[];
+  total: number;
+}
+
+export interface OzonPromotionActionResult {
+  success: boolean;
+  message: string;
+  rejected: Array<{ product_id?: number; reason?: string }>;
 }
 
 export interface DashboardData {
@@ -287,6 +341,42 @@ export interface InventoryRow {
   returnRate30d: number | null;
   returnLogisticsCost30d: number;
   updatedAt: string;
+}
+export interface InventoryAlertProduct {
+  shopId: string;
+  shopName: string;
+  sku: string;
+  offerId: string;
+  productName: string;
+  threshold: number;
+  lastStock: number | null;
+  lastDailySales: number;
+  lastSellableDays: number | null;
+  lastCheckedAt: string;
+}
+export interface InventoryAlertState {
+  enabled: boolean;
+  dailyTime: string;
+  lastRunDay: string;
+  lastStartedAt: string;
+  lastFinishedAt: string;
+  lastStatus: string;
+  lastMessage: string;
+  pendingNotification: boolean;
+  selectedShopIds: string[];
+  availableShops: AutoSyncShopOption[];
+  products: InventoryAlertProduct[];
+}
+export interface InventoryAlertSettingsInput {
+  enabled: boolean;
+  dailyTime: string;
+  selectedShopIds: string[];
+}
+export interface InventoryAlertProductInput {
+  sku: string;
+  offerId: string;
+  productName: string;
+  threshold: number;
 }
 
 export interface ConnectionStatus {

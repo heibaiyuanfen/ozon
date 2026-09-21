@@ -25,13 +25,18 @@ import {
   exportProductCosts,
   exportProductBarcodes,
   loadCredentialsForm,
+  getInventoryAlertState,
   matchProductCosts,
+  removeInventoryAlertProduct,
   saveCredentialsForm,
   saveProductCost,
   saveProductBarcodes,
+  saveInventoryAlertProduct,
+  saveInventoryAlertSettings,
   sendFeishuInventory,
   seriesInsights,
   syncInventory,
+  runInventoryAlertNow,
   syncProductBarcodes,
   updateShop,
 } from "./bridge";
@@ -39,6 +44,7 @@ import type {
   ConnectionStatus,
   CredentialsForm,
   InventoryRow,
+  InventoryAlertState,
   InsightRow,
   ProductCostInput,
   ProductRow,
@@ -513,6 +519,7 @@ function CostEditor({
 }
 
 export function InventoryPage({
+  shopId,
   rows,
   query,
   setQuery,
@@ -524,6 +531,7 @@ export function InventoryPage({
   setSafetyDays,
   reload,
 }: {
+  shopId: string;
   rows: InventoryRow[];
   query: string;
   setQuery: (value: string) => void;
@@ -543,6 +551,14 @@ export function InventoryPage({
     [series, setSeries] = useState<InsightRow[]>([]),
     [selectedSeriesId, setSelectedSeriesId] = useState(""),
     [page, setPage] = useState(0);
+  const [alertState, setAlertState] = useState<InventoryAlertState | null>(null);
+  const [alertSku, setAlertSku] = useState("");
+  const [alertThreshold, setAlertThreshold] = useState(30);
+  const [alertBusy, setAlertBusy] = useState(false);
+  const loadAlertState = () => getInventoryAlertState().then(setAlertState).catch((error) => setMessage(String(error)));
+  useEffect(() => { void loadAlertState(); }, [shopId]);
+  const monitoredProducts = alertState?.products.filter((item) => item.shopId === shopId) ?? [];
+  const unmonitoredRows = rows.filter((row) => !monitoredProducts.some((item) => item.sku === row.sku));
   const filteredRows = riskFilter === "all" ? rows : rows.filter((row) =>
     riskFilter === "replenishment" ? row.suggestedQty > 0 :
     riskFilter === "returns" ? (row.returnRate30d ?? 0) >= 5 :
@@ -646,6 +662,74 @@ export function InventoryPage({
           </button>
         </div>
       </div>
+      <section className="card inventory-alert-panel">
+        <div className="inventory-alert-heading">
+          <div>
+            <b>每日库存更新与预警</b>
+            <small>软件运行时在固定时间更新；当天错过时间后首次启动会自动补跑一次。</small>
+          </div>
+          <label className="inventory-alert-switch">
+            <input
+              type="checkbox"
+              checked={alertState?.enabled ?? false}
+              onChange={(event) => alertState && setAlertState({ ...alertState, enabled: event.target.checked })}
+            />
+            启用每日任务
+          </label>
+          <label>更新时间
+            <input type="time" value={alertState?.dailyTime ?? "10:00"} onChange={(event) => alertState && setAlertState({ ...alertState, dailyTime: event.target.value })} />
+          </label>
+          <div className="inventory-alert-shops">
+            <span>每日自动更新店铺</span>
+            <div>{alertState?.availableShops.map((shop) => <label key={shop.shopId}><input type="checkbox" checked={alertState.selectedShopIds.includes(shop.shopId)} onChange={(event) => setAlertState({ ...alertState, selectedShopIds: event.target.checked ? [...alertState.selectedShopIds, shop.shopId] : alertState.selectedShopIds.filter((id) => id !== shop.shopId) })} />{shop.shopName}</label>)}</div>
+          </div>
+          <button className="outline-button" disabled={!alertState || alertBusy} onClick={async () => {
+            if (!alertState) return;
+            setAlertBusy(true);
+            try { setAlertState(await saveInventoryAlertSettings({ enabled: alertState.enabled, dailyTime: alertState.dailyTime, selectedShopIds: alertState.selectedShopIds })); setMessage("每日库存设置已保存。"); }
+            catch (error) { setMessage(String(error)); }
+            finally { setAlertBusy(false); }
+          }}>保存设置</button>
+          <button className="dark-button" disabled={alertBusy || !(alertState?.selectedShopIds.length)} onClick={async () => {
+            setAlertBusy(true);
+            try { setAlertState(await runInventoryAlertNow()); setMessage("库存更新与预警检查已完成。"); await reload(); }
+            catch (error) { setMessage(String(error)); }
+            finally { setAlertBusy(false); }
+          }}>{alertBusy ? "正在执行…" : "立即更新并检查"}</button>
+        </div>
+        <div className="inventory-alert-add">
+          <select value={alertSku} onChange={(event) => setAlertSku(event.target.value)}>
+            <option value="">选择当前店铺商品</option>
+            {unmonitoredRows.map((row) => <option value={row.sku} key={row.sku}>{row.offerId || row.sku} · {row.productName || "未命名商品"} · 当前 {row.availableStock}</option>)}
+          </select>
+          <label>可售天数低于 <input type="number" min="0.1" step="0.5" value={alertThreshold} onChange={(event) => setAlertThreshold(Math.max(0.1, Number(event.target.value) || 0.1))} /></label>
+          <button className="outline-button" disabled={!alertSku || alertBusy} onClick={async () => {
+            const row = rows.find((item) => item.sku === alertSku);
+            if (!row) return;
+            setAlertBusy(true);
+            try {
+              setAlertState(await saveInventoryAlertProduct({ sku: row.sku, offerId: row.offerId, productName: row.productName, threshold: alertThreshold }));
+              setAlertSku("");
+              setMessage(`已将 ${row.offerId || row.sku} 加入库存预警。`);
+            } catch (error) { setMessage(String(error)); }
+            finally { setAlertBusy(false); }
+          }}>加入预警</button>
+        </div>
+        <div className="inventory-alert-list">
+          {monitoredProducts.length ? monitoredProducts.map((item) => (
+            <div className={item.lastSellableDays !== null && item.lastSellableDays < item.threshold ? "inventory-alert-item low" : "inventory-alert-item"} key={`${item.shopId}-${item.sku}`}>
+              <span><b>{item.offerId || item.sku}</b><small>{item.productName || `SKU ${item.sku}`}</small></span>
+              <span>当前库存<strong>{item.lastStock ?? "待检查"}</strong></span>
+              <span>近 7 天日均<strong>{item.lastCheckedAt ? item.lastDailySales.toFixed(1) : "—"}</strong></span>
+              <span>预计可售<strong>{item.lastSellableDays === null ? "无法估算" : `${item.lastSellableDays.toFixed(1)} 天`}</strong></span>
+              <label>预警天数<input type="number" min="0.1" step="0.5" value={item.threshold} onChange={(event) => setAlertState(alertState ? { ...alertState, products: alertState.products.map((entry) => entry.shopId === item.shopId && entry.sku === item.sku ? { ...entry, threshold: Math.max(0.1, Number(event.target.value) || 0.1) } : entry) } : alertState)} /></label>
+              <button className="outline-button" disabled={alertBusy} onClick={async () => { setAlertBusy(true); try { setAlertState(await saveInventoryAlertProduct({ sku: item.sku, offerId: item.offerId, productName: item.productName, threshold: item.threshold })); } finally { setAlertBusy(false); } }}>保存</button>
+              <button className="icon-button danger" title="取消预警" disabled={alertBusy} onClick={async () => { setAlertBusy(true); try { setAlertState(await removeInventoryAlertProduct(item.sku)); } finally { setAlertBusy(false); } }}><Trash2 size={15} /></button>
+            </div>
+          )) : <div className="empty-note">尚未选择预警商品。可从上方选择当前店铺商品并设置预警线。</div>}
+        </div>
+        {alertState && <div className="inventory-alert-status">{alertState.lastMessage}{alertState.lastFinishedAt ? ` · 最近完成 ${new Date(alertState.lastFinishedAt).toLocaleString("zh-CN")}` : ""}</div>}
+      </section>
       <div className="mini-stats">
         <div>
           <Warehouse />

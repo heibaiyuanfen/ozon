@@ -208,7 +208,9 @@ pub struct Targets {
     #[serde(default = "default_checkpoint_days")]
     pub checkpoint_days: i64,
 }
-fn default_checkpoint_days() -> i64 { 3 }
+fn default_checkpoint_days() -> i64 {
+    3
+}
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SkuRule {
@@ -327,7 +329,9 @@ fn validate(input: &Create) -> Result<()> {
         {
             return Err("目标数值无效".into());
         }
-        if t.planned_budget_rub.is_some_and(|v| !v.is_finite() || v < 0.0) {
+        if t.planned_budget_rub
+            .is_some_and(|v| !v.is_finite() || v < 0.0)
+        {
             return Err("阶段计划预算必须为非负有限数值".into());
         }
     }
@@ -344,9 +348,17 @@ fn validate(input: &Create) -> Result<()> {
     }
     for change in &input.changes {
         if let Some(rule) = &change.rule {
-            if [rule.acos_max, rule.cpa_max, rule.cvr_min, rule.tacos_max,
-                rule.next_budget_rub, rule.reduce_budget_rub]
-                .iter().flatten().any(|v| !v.is_finite() || *v < 0.0)
+            if [
+                rule.acos_max,
+                rule.cpa_max,
+                rule.cvr_min,
+                rule.tacos_max,
+                rule.next_budget_rub,
+                rule.reduce_budget_rub,
+            ]
+            .iter()
+            .flatten()
+            .any(|v| !v.is_finite() || *v < 0.0)
             {
                 return Err(format!("SKU {} 的检查规则数值无效", change.sku));
             }
@@ -457,64 +469,129 @@ fn event(
 }
 
 fn payload_number(value: &Value) -> Result<f64> {
-    let parsed=value.as_f64().or_else(||value.as_str()?.trim().parse::<f64>().ok())
-        .filter(|number|number.is_finite() && *number>=0.0)
+    let parsed = value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+        .filter(|number| number.is_finite() && *number >= 0.0)
         .ok_or("修改值必须是非负数字")?;
     Ok(parsed)
 }
 
-fn update_manual_configuration(c: &Connection, id: i64, sku: &str, kind: &str, payload: &Value, reason: &str) -> Result<Create> {
-    if sku.is_empty() || !["budget","price","status"].contains(&kind) {
-        return input_for(c,id);
+fn update_manual_configuration(
+    c: &Connection,
+    id: i64,
+    sku: &str,
+    kind: &str,
+    payload: &Value,
+    reason: &str,
+) -> Result<Create> {
+    if sku.is_empty() || !["budget", "price", "status"].contains(&kind) {
+        return input_for(c, id);
     }
-    let raw:String=c.query_row("SELECT payload FROM ad_experiment_skus WHERE experiment_id=?1 AND sku=?2",params![id,sku],|r|r.get(0)).map_err(err)?;
-    let mut change:Change=serde_json::from_str(&raw).map_err(err)?;
+    let raw: String = c
+        .query_row(
+            "SELECT payload FROM ad_experiment_skus WHERE experiment_id=?1 AND sku=?2",
+            params![id, sku],
+            |r| r.get(0),
+        )
+        .map_err(err)?;
+    let mut change: Change = serde_json::from_str(&raw).map_err(err)?;
     match kind {
         "budget" => {
-            let before=payload_number(&payload["before"]["value"])?;
-            let after=payload_number(&payload["after"]["value"])?;
-            change.before_budget=Some(before);
-            change.after_budget=Some(after);
-            change.action=if after>before{"increase_budget"}else if after<before{"reduce_budget"}else{"hold"}.into();
+            let before = payload_number(&payload["before"]["value"])?;
+            let after = payload_number(&payload["after"]["value"])?;
+            change.before_budget = Some(before);
+            change.after_budget = Some(after);
+            change.action = if after > before {
+                "increase_budget"
+            } else if after < before {
+                "reduce_budget"
+            } else {
+                "hold"
+            }
+            .into();
         }
         "price" => {
-            let before=payload_number(&payload["before"]["value"])?;
-            let after=payload_number(&payload["after"]["value"])?;
-            change.before_price=Some(before);
-            change.after_price=Some(after);
-            change.action="price_change".into();
+            let before = payload_number(&payload["before"]["value"])?;
+            let after = payload_number(&payload["after"]["value"])?;
+            change.before_price = Some(before);
+            change.after_price = Some(after);
+            change.action = "price_change".into();
         }
         "status" => {
-            change.before_status=payload["before"]["value"].as_str().map(str::to_owned);
-            change.after_status=payload["after"]["value"].as_str().map(str::to_owned);
-            change.action=if change.after_status.as_deref().is_some_and(|value|value.eq_ignore_ascii_case("paused")){"pause"}else{"resume"}.into();
+            change.before_status = payload["before"]["value"].as_str().map(str::to_owned);
+            change.after_status = payload["after"]["value"].as_str().map(str::to_owned);
+            change.action = if change
+                .after_status
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("paused"))
+            {
+                "pause"
+            } else {
+                "resume"
+            }
+            .into();
         }
         _ => {}
     }
-    change.reason=reason.to_owned();
-    c.execute("UPDATE ad_experiment_skus SET payload=?1 WHERE experiment_id=?2 AND sku=?3",params![serde_json::to_string(&change).map_err(err)?,id,sku]).map_err(err)?;
-    let mut input=input_for(c,id)?;
-    if kind=="budget" && input.changes.iter().all(|item|item.after_budget.or(item.before_budget).is_some()) {
-        let mut seen=std::collections::HashSet::new();
-        let total=input.changes.iter().filter(|item|seen.insert(item.campaign_id.clone().unwrap_or_else(||format!("sku:{}",item.sku)))).filter_map(|item|item.after_budget.or(item.before_budget)).sum::<f64>();
-        let stage:usize=c.query_row("SELECT stage_index FROM ad_experiments WHERE id=?1",[id],|r|r.get(0)).map_err(err)?;
-        if let Some(target)=input.targets.stages.get_mut(stage) { target.planned_budget_rub=Some(total); }
-        c.execute("UPDATE ad_experiment_targets SET payload=?1 WHERE experiment_id=?2",params![serde_json::to_string(&input.targets).map_err(err)?,id]).map_err(err)?;
+    change.reason = reason.to_owned();
+    c.execute(
+        "UPDATE ad_experiment_skus SET payload=?1 WHERE experiment_id=?2 AND sku=?3",
+        params![serde_json::to_string(&change).map_err(err)?, id, sku],
+    )
+    .map_err(err)?;
+    let mut input = input_for(c, id)?;
+    if kind == "budget"
+        && input
+            .changes
+            .iter()
+            .all(|item| item.after_budget.or(item.before_budget).is_some())
+    {
+        let mut seen = std::collections::HashSet::new();
+        let total = input
+            .changes
+            .iter()
+            .filter(|item| {
+                seen.insert(
+                    item.campaign_id
+                        .clone()
+                        .unwrap_or_else(|| format!("sku:{}", item.sku)),
+                )
+            })
+            .filter_map(|item| item.after_budget.or(item.before_budget))
+            .sum::<f64>();
+        let stage: usize = c
+            .query_row(
+                "SELECT stage_index FROM ad_experiments WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        if let Some(target) = input.targets.stages.get_mut(stage) {
+            target.planned_budget_rub = Some(total);
+        }
+        c.execute(
+            "UPDATE ad_experiment_targets SET payload=?1 WHERE experiment_id=?2",
+            params![serde_json::to_string(&input.targets).map_err(err)?, id],
+        )
+        .map_err(err)?;
     }
-    input_for(c,id)
+    input_for(c, id)
 }
 
 fn repair_manual_configuration_events(c: &Connection) -> Result<()> {
     let rows=c.prepare("SELECT experiment_id,sku,before_value,after_value,reason FROM ad_experiment_events WHERE event_type='manual_change' AND sku<>'' ORDER BY id").map_err(err)?
         .query_map([],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?))).map_err(err)?
         .collect::<std::result::Result<Vec<_>,_>>().map_err(err)?;
-    for (id,sku,before_raw,after_raw,reason) in rows {
-        let before:Value=serde_json::from_str(&before_raw).unwrap_or(Value::Null);
-        let after:Value=serde_json::from_str(&after_raw).unwrap_or(Value::Null);
-        let Some(kind)=after["kind"].as_str() else { continue; };
-        if ["budget","price","status"].contains(&kind) {
-            let payload=json!({"before":before,"after":after});
-            update_manual_configuration(c,id,&sku,kind,&payload,&reason)?;
+    for (id, sku, before_raw, after_raw, reason) in rows {
+        let before: Value = serde_json::from_str(&before_raw).unwrap_or(Value::Null);
+        let after: Value = serde_json::from_str(&after_raw).unwrap_or(Value::Null);
+        let Some(kind) = after["kind"].as_str() else {
+            continue;
+        };
+        if ["budget", "price", "status"].contains(&kind) {
+            let payload = json!({"before":before,"after":after});
+            update_manual_configuration(c, id, &sku, kind, &payload, &reason)?;
         }
     }
     Ok(())
@@ -524,7 +601,8 @@ fn start_round(c: &Connection, id: i64, trigger: &str, configuration: Value) -> 
     c.execute(
         "UPDATE ad_experiment_rounds SET end_date=?1 WHERE experiment_id=?2 AND end_date IS NULL",
         params![(today() - Duration::days(1)).to_string(), id],
-    ).map_err(err)?;
+    )
+    .map_err(err)?;
     let next: i64 = c.query_row(
         "SELECT COALESCE(MAX(round_index),0)+1 FROM ad_experiment_rounds WHERE experiment_id=?1",
         [id], |r| r.get(0),
@@ -553,8 +631,11 @@ fn metrics(summary: &Value, days: i64) -> Value {
 }
 fn rolling_metrics(rows: &[Value]) -> Value {
     let sum = |key: &str| -> Option<f64> {
-        if rows.is_empty() { return None; }
-        rows.iter().try_fold(0.0, |acc, row| num(row, key).map(|v| acc + v))
+        if rows.is_empty() {
+            return None;
+        }
+        rows.iter()
+            .try_fold(0.0, |acc, row| num(row, key).map(|v| acc + v))
     };
     let days = rows.len() as f64;
     let units = sum("totalUnits");
@@ -579,21 +660,43 @@ fn rolling_metrics(rows: &[Value]) -> Value {
 }
 
 fn sku_checkpoint(rule: Option<&SkuRule>, recent: &Value, budget: Option<f64>) -> Value {
-    let utilization = divide(num(recent,"weeklySpendRunRate"), budget).map(|v|v*100.0);
+    let utilization = divide(num(recent, "weeklySpendRunRate"), budget).map(|v| v * 100.0);
     let Some(rule) = rule else {
         return json!({"decision":"UNCONFIGURED","budgetUtilizationPercent":utilization,"reason":"尚未设置 SKU 独立检查规则"});
     };
     let enough = recent["complete"] == true;
     let passes = enough
-        && rule.acos_max.is_none_or(|v|num(recent,"acos").is_some_and(|x|x<=v))
-        && rule.cpa_max.is_none_or(|v|num(recent,"cpa").is_some_and(|x|x<=v))
-        && rule.cvr_min.is_none_or(|v|num(recent,"cvr").is_some_and(|x|x>=v))
-        && rule.tacos_max.is_none_or(|v|num(recent,"tacos").is_some_and(|x|x<=v));
-    let severe = rule.acos_max.is_some_and(|v|num(recent,"acos").is_some_and(|x|x>v*1.25))
-        || rule.cpa_max.is_some_and(|v|num(recent,"cpa").is_some_and(|x|x>v*1.25))
-        || rule.cvr_min.is_some_and(|v|num(recent,"cvr").is_some_and(|x|x<v*0.75));
-    let constrained = utilization.is_some_and(|v|v>=90.0);
-    let decision = if !enough {"INSUFFICIENT_DATA"} else if severe {"REDUCE"} else if passes && constrained {"INCREASE"} else {"HOLD"};
+        && rule
+            .acos_max
+            .is_none_or(|v| num(recent, "acos").is_some_and(|x| x <= v))
+        && rule
+            .cpa_max
+            .is_none_or(|v| num(recent, "cpa").is_some_and(|x| x <= v))
+        && rule
+            .cvr_min
+            .is_none_or(|v| num(recent, "cvr").is_some_and(|x| x >= v))
+        && rule
+            .tacos_max
+            .is_none_or(|v| num(recent, "tacos").is_some_and(|x| x <= v));
+    let severe = rule
+        .acos_max
+        .is_some_and(|v| num(recent, "acos").is_some_and(|x| x > v * 1.25))
+        || rule
+            .cpa_max
+            .is_some_and(|v| num(recent, "cpa").is_some_and(|x| x > v * 1.25))
+        || rule
+            .cvr_min
+            .is_some_and(|v| num(recent, "cvr").is_some_and(|x| x < v * 0.75));
+    let constrained = utilization.is_some_and(|v| v >= 90.0);
+    let decision = if !enough {
+        "INSUFFICIENT_DATA"
+    } else if severe {
+        "REDUCE"
+    } else if passes && constrained {
+        "INCREASE"
+    } else {
+        "HOLD"
+    };
     json!({"decision":decision,"budgetUtilizationPercent":utilization,"budgetConstrained":constrained,
         "nextBudgetRub":rule.next_budget_rub,"reduceBudgetRub":rule.reduce_budget_rub,
         "reason":match decision {"INCREASE"=>"检查指标达标且预算利用率不低于 90%","REDUCE"=>"关键效率指标显著越线","HOLD"=>"尚未同时满足效率与预算受限条件",_=>"检查窗口数据不完整"}})
@@ -831,7 +934,7 @@ fn evaluate(c: &mut Connection, id: i64) -> Result<Value> {
     };
     let baseline: Value = serde_json::from_str(&raw).map_err(err)?;
     let Some(start) = start else {
-        let waiting=json!({"decision":"WAITING_EXECUTION","completedDays":0,"observationDays":input.observation_days,
+        let waiting = json!({"decision":"WAITING_EXECUTION","completedDays":0,"observationDays":input.observation_days,
             "stageQualified":false,"facts":["基准已锁定，但尚未确认平台实际执行"],
             "nextAction":"请在平台完成本阶段调整后点击“确认已执行并开始观察”"});
         c.execute("UPDATE ad_experiments SET evaluation_json=?1,status='running',updated_at=CURRENT_TIMESTAMP WHERE id=?2",params![waiting.to_string(),id]).map_err(err)?;
@@ -917,8 +1020,24 @@ fn evaluate(c: &mut Connection, id: i64) -> Result<Value> {
         "SELECT start_date FROM ad_experiment_rounds WHERE experiment_id=?1 AND end_date IS NULL ORDER BY round_index DESC LIMIT 1",
         [id], |r| r.get(0),
     ).optional().map_err(err)?;
-    let current_round_daily = daily.iter().filter(|row| active_round_start.as_deref().is_none_or(|start| row["date"].as_str().is_some_and(|value|value>=start))).cloned().collect::<Vec<_>>();
-    let recent_series = current_round_daily.iter().rev().take(checkpoint_days).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>();
+    let current_round_daily = daily
+        .iter()
+        .filter(|row| {
+            active_round_start
+                .as_deref()
+                .is_none_or(|start| row["date"].as_str().is_some_and(|value| value >= start))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let recent_series = current_round_daily
+        .iter()
+        .rev()
+        .take(checkpoint_days)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
     result["checkpoint"] = json!({
         "requiredDays": checkpoint_days,
         "ready": recent_series.len() >= checkpoint_days && quality(&recent_series)["status"] == "complete",
@@ -951,13 +1070,33 @@ fn evaluate(c: &mut Connection, id: i64) -> Result<Value> {
         );
         score["sku"] = json!(sku);
         score["targetScope"] = json!("series_target_context_not_per_sku_allocation");
-        let current_round_sku = d.iter().filter(|row| active_round_start.as_deref().is_none_or(|start| row["date"].as_str().is_some_and(|value|value>=start))).cloned().collect::<Vec<_>>();
-        let recent = current_round_sku.iter().rev().take(checkpoint_days).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>();
+        let current_round_sku = d
+            .iter()
+            .filter(|row| {
+                active_round_start
+                    .as_deref()
+                    .is_none_or(|start| row["date"].as_str().is_some_and(|value| value >= start))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let recent = current_round_sku
+            .iter()
+            .rev()
+            .take(checkpoint_days)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
         let recent_metrics = rolling_metrics(&recent);
         let change = input.changes.iter().find(|change| change.sku == *sku);
         let budget = change.and_then(|change| change.after_budget.or(change.before_budget));
         score["recentCheckpoint"] = recent_metrics.clone();
-        score["checkpointDecision"] = sku_checkpoint(change.and_then(|change|change.rule.as_ref()), &recent_metrics, budget);
+        score["checkpointDecision"] = sku_checkpoint(
+            change.and_then(|change| change.rule.as_ref()),
+            &recent_metrics,
+            budget,
+        );
         sku_scores.push(score);
     }
     result["skuScores"] = json!(sku_scores);
@@ -1075,8 +1214,11 @@ fn detail(c: &Connection, id: i64) -> Result<Value> {
     let mut rounds=c.prepare("SELECT id,round_index,start_date,end_date,trigger,configuration_json,evaluation_json,created_at FROM ad_experiment_rounds WHERE experiment_id=?1 ORDER BY round_index").map_err(err)?;
     r["rounds"]=json!(rounds.query_map([id],|row|Ok(json!({"id":row.get::<_,i64>(0)?,"roundIndex":row.get::<_,i64>(1)?,"startDate":row.get::<_,String>(2)?,"endDate":row.get::<_,Option<String>>(3)?,"trigger":row.get::<_,String>(4)?,"configuration":row.get::<_,String>(5)?,"evaluation":row.get::<_,Option<String>>(6)?,"createdAt":row.get::<_,String>(7)?}))).map_err(err)?.collect::<std::result::Result<Vec<_>,_>>().map_err(err)?);
     for round in r["rounds"].as_array_mut().into_iter().flatten() {
-        for key in ["configuration","evaluation"] {
-            round[key]=round[key].as_str().and_then(|v|serde_json::from_str(v).ok()).unwrap_or(Value::Null);
+        for key in ["configuration", "evaluation"] {
+            round[key] = round[key]
+                .as_str()
+                .and_then(|v| serde_json::from_str(v).ok())
+                .unwrap_or(Value::Null);
         }
     }
     let mut s=c.prepare("SELECT id,name,payload,created_at FROM ad_stable_baselines WHERE experiment_id IN (SELECT experiment_id FROM ad_experiment_skus WHERE sku IN (SELECT sku FROM ad_experiment_skus WHERE experiment_id=?1)) ORDER BY id DESC").map_err(err)?;
@@ -1160,10 +1302,25 @@ fn action(c: &mut Connection, shop: &str, id: i64, action: &str, payload: Value)
                 "运营人员确认已在平台执行计划；系统未代为提交",
                 Some(&format!("confirmed:{id}")),
             )?;
-            let has_start: bool = c.query_row("SELECT observation_start IS NOT NULL FROM ad_experiments WHERE id=?1",[id],|r|r.get(0)).map_err(err)?;
+            let has_start: bool = c
+                .query_row(
+                    "SELECT observation_start IS NOT NULL FROM ad_experiments WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .map_err(err)?;
             if !has_start {
-                c.execute("UPDATE ad_experiments SET observation_start=?1,status='observing' WHERE id=?2",params![(today()+Duration::days(1)).to_string(),id]).map_err(err)?;
-                start_round(c,id,"execution_confirmed",json!({"changes":input.changes}))?;
+                c.execute(
+                    "UPDATE ad_experiments SET observation_start=?1,status='observing' WHERE id=?2",
+                    params![(today() + Duration::days(1)).to_string(), id],
+                )
+                .map_err(err)?;
+                start_round(
+                    c,
+                    id,
+                    "execution_confirmed",
+                    json!({"changes":input.changes}),
+                )?;
             }
             evaluate(c, id)?;
         }
@@ -1231,8 +1388,11 @@ fn action(c: &mut Connection, shop: &str, id: i64, action: &str, payload: Value)
                 .as_str()
                 .filter(|s| !s.trim().is_empty())
                 .ok_or("请填写操作原因")?;
-            let change_kind=payload.pointer("/after/kind").and_then(Value::as_str).unwrap_or("other");
-            let tx=c.transaction().map_err(err)?;
+            let change_kind = payload
+                .pointer("/after/kind")
+                .and_then(Value::as_str)
+                .unwrap_or("other");
+            let tx = c.transaction().map_err(err)?;
             event(
                 &tx,
                 id,
@@ -1244,9 +1404,24 @@ fn action(c: &mut Connection, shop: &str, id: i64, action: &str, payload: Value)
                 reason,
                 None,
             )?;
-            let latest=update_manual_configuration(&tx,id,sku,change_kind,&payload,reason)?;
-            if ["budget","bid","status","price","creative","listing","promotion"].contains(&change_kind) {
-                start_round(&tx,id,&format!("manual_{change_kind}_change"),json!({"changes":latest.changes,"event":payload}))?;
+            let latest = update_manual_configuration(&tx, id, sku, change_kind, &payload, reason)?;
+            if [
+                "budget",
+                "bid",
+                "status",
+                "price",
+                "creative",
+                "listing",
+                "promotion",
+            ]
+            .contains(&change_kind)
+            {
+                start_round(
+                    &tx,
+                    id,
+                    &format!("manual_{change_kind}_change"),
+                    json!({"changes":latest.changes,"event":payload}),
+                )?;
             }
             tx.commit().map_err(err)?;
             evaluate(c, id)?;
@@ -1906,7 +2081,10 @@ mod tests {
         assert_eq!(first["id"], second["id"]);
         assert_eq!(first["parentId"], id);
         assert_eq!(first["stageIndex"], 1);
-        assert_eq!(first["input"]["targets"]["stages"][1]["plannedBudgetRub"], 20_000.0);
+        assert_eq!(
+            first["input"]["targets"]["stages"][1]["plannedBudgetRub"],
+            20_000.0
+        );
         assert!(first["input"]["changes"]
             .as_array()
             .unwrap()
@@ -1922,7 +2100,10 @@ mod tests {
             .unwrap();
         assert_eq!(children, 1);
         let history = stage_history(&c, first["id"].as_i64().unwrap()).unwrap();
-        assert_eq!(history["schemaVersion"], "ozon-ad-experiment-stage-history-v1");
+        assert_eq!(
+            history["schemaVersion"],
+            "ozon-ad-experiment-stage-history-v1"
+        );
         assert_eq!(history["stageCount"], 2);
         assert_eq!(history["stages"][0]["status"], "completed");
         assert_eq!(history["stages"][1]["status"], "draft");
@@ -1971,32 +2152,79 @@ mod tests {
         assert_eq!(detail["rounds"].as_array().unwrap().len(), 2);
         assert!(!detail["rounds"][0]["endDate"].is_null());
         assert_eq!(detail["rounds"][1]["trigger"], "manual_budget_change");
-        let green=detail["input"]["changes"].as_array().unwrap().iter().find(|change|change["sku"]=="GREEN").unwrap();
-        assert_eq!(green["beforeBudget"],4500.0);
-        assert_eq!(green["afterBudget"],6000.0);
-        assert_eq!(green["action"],"increase_budget");
+        let green = detail["input"]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["sku"] == "GREEN")
+            .unwrap();
+        assert_eq!(green["beforeBudget"], 4500.0);
+        assert_eq!(green["afterBudget"], 6000.0);
+        assert_eq!(green["action"], "increase_budget");
     }
     #[test]
     fn sku_checkpoint_requires_efficiency_and_budget_constraint() {
-        let rule=SkuRule{acos_max:Some(10.0),cpa_max:Some(300.0),cvr_min:Some(2.8),tacos_max:Some(5.0),next_budget_rub:Some(7500.0),reduce_budget_rub:Some(5000.0)};
-        let healthy=json!({"complete":true,"weeklySpendRunRate":5900.0,"acos":8.0,"cpa":250.0,"cvr":3.1,"tacos":4.0});
-        assert_eq!(sku_checkpoint(Some(&rule),&healthy,Some(6000.0))["decision"],"INCREASE");
-        let weak=json!({"complete":true,"weeklySpendRunRate":5900.0,"acos":14.0,"cpa":410.0,"cvr":1.8,"tacos":7.0});
-        assert_eq!(sku_checkpoint(Some(&rule),&weak,Some(6000.0))["decision"],"REDUCE");
-        let unused=json!({"complete":true,"weeklySpendRunRate":3000.0,"acos":8.0,"cpa":250.0,"cvr":3.1,"tacos":4.0});
-        assert_eq!(sku_checkpoint(Some(&rule),&unused,Some(6000.0))["decision"],"HOLD");
+        let rule = SkuRule {
+            acos_max: Some(10.0),
+            cpa_max: Some(300.0),
+            cvr_min: Some(2.8),
+            tacos_max: Some(5.0),
+            next_budget_rub: Some(7500.0),
+            reduce_budget_rub: Some(5000.0),
+        };
+        let healthy = json!({"complete":true,"weeklySpendRunRate":5900.0,"acos":8.0,"cpa":250.0,"cvr":3.1,"tacos":4.0});
+        assert_eq!(
+            sku_checkpoint(Some(&rule), &healthy, Some(6000.0))["decision"],
+            "INCREASE"
+        );
+        let weak = json!({"complete":true,"weeklySpendRunRate":5900.0,"acos":14.0,"cpa":410.0,"cvr":1.8,"tacos":7.0});
+        assert_eq!(
+            sku_checkpoint(Some(&rule), &weak, Some(6000.0))["decision"],
+            "REDUCE"
+        );
+        let unused = json!({"complete":true,"weeklySpendRunRate":3000.0,"acos":8.0,"cpa":250.0,"cvr":3.1,"tacos":4.0});
+        assert_eq!(
+            sku_checkpoint(Some(&rule), &unused, Some(6000.0))["decision"],
+            "HOLD"
+        );
     }
     #[test]
     fn existing_manual_budget_events_repair_matrix_configuration() {
-        let mut c=setup();
-        let id=create(&mut c,"test",input()).unwrap();
-        let original:String=c.query_row("SELECT payload FROM ad_experiment_skus WHERE experiment_id=?1 AND sku='GREEN'",[id],|r|r.get(0)).unwrap();
-        event(&c,id,"GREEN","manual_change",json!({"kind":"budget","value":"4500"}),json!({"kind":"budget","value":"6000"}),"fixture","增加预算",None).unwrap();
-        c.execute("UPDATE ad_experiment_skus SET payload=?1 WHERE experiment_id=?2 AND sku='GREEN'",params![original,id]).unwrap();
+        let mut c = setup();
+        let id = create(&mut c, "test", input()).unwrap();
+        let original: String = c
+            .query_row(
+                "SELECT payload FROM ad_experiment_skus WHERE experiment_id=?1 AND sku='GREEN'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        event(
+            &c,
+            id,
+            "GREEN",
+            "manual_change",
+            json!({"kind":"budget","value":"4500"}),
+            json!({"kind":"budget","value":"6000"}),
+            "fixture",
+            "增加预算",
+            None,
+        )
+        .unwrap();
+        c.execute(
+            "UPDATE ad_experiment_skus SET payload=?1 WHERE experiment_id=?2 AND sku='GREEN'",
+            params![original, id],
+        )
+        .unwrap();
         ensure(&c).unwrap();
-        let repaired=input_for(&c,id).unwrap().changes.into_iter().find(|change|change.sku=="GREEN").unwrap();
-        assert_eq!(repaired.before_budget,Some(4500.0));
-        assert_eq!(repaired.after_budget,Some(6000.0));
-        assert_eq!(repaired.action,"increase_budget");
+        let repaired = input_for(&c, id)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.sku == "GREEN")
+            .unwrap();
+        assert_eq!(repaired.before_budget, Some(4500.0));
+        assert_eq!(repaired.after_budget, Some(6000.0));
+        assert_eq!(repaired.action, "increase_budget");
     }
 }
