@@ -1707,3 +1707,38 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 页面读取内置 Ozon 官方费率表，按莫斯科始发、目的区域、体积档和商品售价 `≤ 300 ₽ / > 300 ₽` 展示单件基础配送费；同时保留两档费率以便直接对比。
 - 目的区域统一显示中文和俄文原名，支持区域筛选，并展示官方表生效日期与来源链接。页面明确提示基础配送费不包含佣金、末端附加费及越库费用。
 - 验证：`pnpm build`、`cargo check --locked` 与正式 `build-tauri-release.cmd` 均通过。Release 已覆盖唯一根目录入口 `Ozon ERP.exe`，文件大小 `32,615,424` bytes，SHA-256 `46C65FF98D0AE4FAC33C96F950D04D1F8A174F5B24EE296C9F94F78A033D38AA`；程序已启动且 Responding。
+
+## 2026-09-22：竞品店铺拆解与飞书同步
+
+- “营销与洞察”新增“竞品店铺拆解”：可导入 Ozon 店铺 `.xlsx`，自动识别首个工作表并按“店铺名称 + SKU”新增或更新，原始数据保存在当前店铺数据库的 `competitor_shop_imports` 与 `competitor_shop_products`。
+- 商品卡片集中展示链接、图片、类目、履约方式、售价、销量、销售额、增长率、毛利率、曝光、访问、加购/下单转化、退货取消、评分与重量；广告费估算按销售额乘广告费占比计算，并支持将单品加入选品资料库。
+- 新增“同步当前店铺到飞书”按钮，复用系统设置中的飞书 App ID、App Secret、App Token 与商品 Table ID；缺少的竞品字段会自动创建。
+- 飞书记录以“数据类型=竞品 + 竞品店铺 + SKU”作为更新键，同一店铺重复同步会更新原记录，不会覆盖普通自有商品记录。同步只在用户点击按钮时发生，不在导入或启动时自动向外部发送数据。
+- 已通过竞品解析单元测试（1 项）、`pnpm build`、`cargo check --locked` 与正式 `build-tauri-release.cmd`。Release 已覆盖唯一根目录入口 `Ozon ERP.exe`，文件大小 `32,906,240` bytes，SHA-256 `C34CECADEBA7E2185CA5F6780258812BDDF8FF37261B9C9B775A0F24BA556D99`；程序已启动且 Responding，根目录未保留多余的 `ozon-analytics-next.exe`。
+
+### 竞品卡片与链接修复
+
+- 修复竞品页样式类与旧“竞品跟踪”页面全局样式重名导致卡片被强制压成三列的问题；所有样式改为页面级作用域，商品改成单列宽卡片，指标在宽屏四列、小屏两列显示。
+- 卡片补齐 Excel 已导入的销售额增长、搜索曝光、搜索加购、平均折扣、促销销量占比、曝光下单、卖家类型、销售方式与上架时间等字段，不再用横向溢出隐藏数据。
+- Seerfar Excel 的图片列实际为 `IMAGE("URL")` 公式，导入和读取时会提取其中的 HTTP(S) 地址；已有缓存无需重新导入即可恢复图片。失效图片显示明确占位。
+- “打开商品”不再复用仅允许 1688 域名的采购链接命令，改用独立的 HTTP(S) 商品链接校验与系统浏览器打开命令，并在页面展示具体失败信息。
+- 验证：读取原始 `Seerfar-Shop-4971118.xlsx` 确认图片公式与 Ozon 商品 URL；竞品解析单元测试、`pnpm build`、`cargo check --locked` 和正式 `build-tauri-release.cmd` 均通过。唯一根目录入口 `Ozon ERP.exe` 为 `32,943,104` bytes，SHA-256 `0A2E478DC111D44896EBEC12116639C442FBF0DF29AD3951332CAFF0E3776BBA`，程序已启动且 Responding。
+
+### 竞品飞书目标表独立配置
+
+- 修复竞品同步错误复用全局“商品表 Table ID”造成 `1254041: TableIdNotFound` 的问题。
+- 竞品页增加独立“飞书目标多维表格”输入框，支持直接粘贴完整飞书链接，自动解析 `/base/` 后的 App Token 与 `table=` 后的 Table ID；`view=` 参数不会进入 API 路径。
+- 当前指定目标为 `IxeZbgbIIaJjPqsetkXcxDMjnXc / tblbO9mtOJ22kCcf`。目标链接按当前店铺数据库保存，App ID 与 App Secret 继续复用系统连接设置。
+- 验证：链接解析与竞品解析测试共 2 项通过，`pnpm build`、`cargo check --locked` 和正式 `build-tauri-release.cmd` 均通过。唯一根目录入口 `Ozon ERP.exe` 为 `32,709,632` bytes，SHA-256 `CE7BCFCABF1B5B92D815CFD9C56FA9DA73330D2031F0A0D4F7BBB3C5C112DFBB`，程序已启动且 Responding。
+
+### 飞书 403 权限诊断
+
+- 竞品目标表增加“测试权限”按钮，先验证当前 App ID/App Secret 获取的租户令牌是否能读取目标表字段，再允许用户决定是否执行真实同步。
+- Feishu HTTP 非 2xx 响应会读取并展示响应体中的平台错误码和消息；遇到 HTTP 403 时明确提示检查多维表格记录/字段读写权限、发布应用版本，并将应用加入目标表的协作者或高级权限。
+- 验证：竞品测试 2 项、`pnpm build`、`cargo check --locked` 与正式 `build-tauri-release.cmd` 均通过。唯一根目录入口 `Ozon ERP.exe` 为 `32,715,264` bytes，SHA-256 `485BEE3DB15487741CEBB0D05A455C13B7B7944E71B8C086168FF6D88941A7B7`，程序已启动且 Responding。
+
+### 竞品飞书字段适配
+
+- 按用户现有“宜春-产品利润测算表”结构调整竞品同步映射：`品名`写入 Ozon 商品链接，`包装重`写入 Excel 产品重量（kg）。
+- 不再自动创建或写入重复用途的`产品链接`与`重量kg`字段；再次同步同一竞品店铺时按现有同步键更新记录。
+- 验证：竞品测试 2 项、`pnpm build`、`cargo check --locked` 与正式 `build-tauri-release.cmd` 均通过。唯一根目录入口 `Ozon ERP.exe` 为 `32,714,240` bytes，SHA-256 `55BFB90501CECB6D3EAEAB437D48FC7506760EA341F5B806FD500795710C4D7D`，程序已启动且 Responding。

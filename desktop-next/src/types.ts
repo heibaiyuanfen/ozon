@@ -31,6 +31,7 @@ export type PageKey =
   | "product_analysis"
   | "selection_library"
   | "delivery_fee_query"
+  | "competitor_shop"
   | "mind_map"
   | "shops"
   | "settings";
@@ -48,6 +49,8 @@ export interface DateRange {
   from: string;
   to: string;
 }
+export interface CompetitorShopProduct { id:number;shopName:string;sku:string;title:string;imageUrl:string;listingUrl:string;brand:string;category:string;salesMethod:string;price:number;sales:number;revenue:number;salesGrowth:number;revenueGrowth:number;grossMargin:number;totalImpressions:number;impressions:number;productViews:number;viewToCart:number;searchToCart:number;averageDiscount:number;promoSalesShare:number;impressionToOrder:number;orderConversion:number;adCostShare:number;estimatedAdCost:number;returnCancelRate:number;lostRevenue:number;rating:number;ratingCount:number;sellerType:string;fulfillment:string;weightKg:number|null;launchAge:string;updatedAt:string }
+export interface CompetitorShopImportResult { shopName:string;imported:number;updated:number;sourceFile:string }
 
 export interface SelectionCategory { id:number; name:string; note:string; itemCount:number }
 export interface SelectionItem { id:number; categoryId:number|null; categoryName:string; productName:string; imageUrl:string; targetMarket:string; competitorUrl:string; purchaseUrl:string; competitorPrice:number|null; purchasePrice:number|null; targetPrice:number|null; estimatedMonthlySales:number|null; weightKg:number|null; lengthCm:number|null; widthCm:number|null; heightCm:number|null; status:string; priority:string; tags:string; advantages:string; risks:string; notes:string; createdAt:string; updatedAt:string }

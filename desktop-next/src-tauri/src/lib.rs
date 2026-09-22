@@ -15,6 +15,7 @@ mod ad_attribution;
 mod ad_experiments;
 mod ad_history;
 mod ad_series;
+mod competitor_shop;
 mod contracts;
 mod daily_tasks;
 mod freight_quotes;
@@ -1296,6 +1297,7 @@ pub(crate) fn db(state: &AppState) -> Result<Connection, String> {
     daily_tasks::ensure(&c)?;
     contracts::ensure(&c)?;
     selection_library::ensure(&c)?;
+    competitor_shop::ensure(&c)?;
     ad_attribution::ensure(&c)?;
     Ok(c)
 }
@@ -1967,8 +1969,26 @@ fn feishu_raw(
         request.send_string(&value.to_string())
     } else {
         request.call()
-    }
-    .map_err(|e| format!("飞书 API 请求失败：{e}"))?;
+    };
+    let response = match response {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, response)) => {
+            let raw = response.into_string().unwrap_or_default();
+            let payload: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+            let code = payload.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
+            let msg = json_text(payload.get("msg"));
+            let detail = if code == 0 && msg.is_empty() {
+                raw
+            } else {
+                format!("错误码 {code}：{msg}")
+            };
+            if status == 403 {
+                return Err(format!("飞书拒绝访问（HTTP 403，{detail}）。请在飞书开放平台为当前自建应用开通多维表格记录和字段读写权限并发布版本，然后在目标多维表格的协作者/高级权限中将该应用添加为可编辑协作者。"));
+            }
+            return Err(format!("飞书 API 请求失败（HTTP {status}，{detail}）"));
+        }
+        Err(error) => return Err(format!("飞书 API 请求失败：{error}")),
+    };
     let raw = response.into_string().map_err(|e| e.to_string())?;
     let payload: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| format!("飞书 API 返回无法解析：{e}"))?;
@@ -13234,6 +13254,15 @@ pub fn run() {
             selection_library::selection_items,
             selection_library::save_selection_item,
             selection_library::delete_selection_item,
+            competitor_shop::import_competitor_shop_excel,
+            competitor_shop::competitor_shop_products,
+            competitor_shop::competitor_shop_names,
+            competitor_shop::add_competitor_to_selection,
+            competitor_shop::sync_competitor_shop_feishu,
+            competitor_shop::open_competitor_product_url,
+            competitor_shop::competitor_feishu_target,
+            competitor_shop::save_competitor_feishu_target,
+            competitor_shop::test_competitor_feishu_target,
             sync_inventory,
             inventory_alert_state,
             save_inventory_alert_settings,

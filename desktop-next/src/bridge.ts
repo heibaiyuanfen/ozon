@@ -952,3 +952,12 @@ export async function saveMlDraft(draft: import("./types").MlDraft): Promise<num
 export async function publishMlDraft(id: number): Promise<string> { return invoke("publish_ml_draft", { id }); }
 export async function syncMlOrders(range: import("./types").DateRange): Promise<number> { return invoke("sync_ml_orders", { range }); }
 export async function mlAnalytics(range: import("./types").DateRange): Promise<import("./types").MlAnalytics> { return invoke("ml_analytics", { range }); }
+export async function importCompetitorShopExcel(path:string):Promise<import("./types").CompetitorShopImportResult>{return invoke("import_competitor_shop_excel",{path})}
+export async function competitorShopNames():Promise<string[]>{return invoke("competitor_shop_names")}
+export async function competitorShopProducts(shopName:string,query:string):Promise<import("./types").CompetitorShopProduct[]>{return invoke("competitor_shop_products",{shopName,query})}
+export async function addCompetitorToSelection(id:number):Promise<number>{return invoke("add_competitor_to_selection",{id})}
+export async function syncCompetitorShopFeishu(shopName:string,targetUrl:string):Promise<string>{return invoke("sync_competitor_shop_feishu",{shopName,targetUrl})}
+export async function openCompetitorProductUrl(url:string):Promise<void>{return invoke("open_competitor_product_url",{url})}
+export async function competitorFeishuTarget():Promise<string>{return invoke("competitor_feishu_target")}
+export async function saveCompetitorFeishuTarget(url:string):Promise<string>{return invoke("save_competitor_feishu_target",{url})}
+export async function testCompetitorFeishuTarget(url:string):Promise<string>{return invoke("test_competitor_feishu_target",{url})}

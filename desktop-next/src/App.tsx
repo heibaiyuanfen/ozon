@@ -110,6 +110,7 @@ import { PackingDocumentsPage } from "./PackingDocumentsPage";
 import { PricePromotionCenter } from "./PricePromotionCenter";
 import { PromotionCenter } from "./PromotionCenter";
 import { DeliveryFeeQueryPage } from "./DeliveryFeeQueryPage";
+import { CompetitorShopPage } from "./CompetitorShopPage";
 
 type Workspace = "ozon" | "product_library" | "wb" | "mercadolibre";
 type WbPageKey = "shop_api" | "price_center" | "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings";
@@ -232,7 +233,7 @@ function Sidebar({
 }) {
   const groups: Array<{ id: string; label: string; icon: typeof LayoutDashboard; items: Array<[PageKey, string, typeof LayoutDashboard]> }> = [
     { id: "operations", label: "经营管理", icon: LayoutDashboard, items: [["dashboard", "经营总览", LayoutDashboard], ["daily_tasks", "每日任务", ListTodo], ["purchase_orders", "采购单添加", FilePlus2], ["contracts", "采购合同", FileText], ["orders", "订单中心", ShoppingBag], ["products", "商品中心", Box], ["fbs", "FBS 管理", Truck]] },
-    { id: "marketing", label: "营销与洞察", icon: Target, items: [["growth_center", "增长中心", BarChart3], ["product_analysis", "产品分析", Target], ["selection_library", "选品资料库", Database], ["advertising", "广告运营", Megaphone], ["promotions", "广告促销", BadgePercent], ["ad_attribution", "系列广告归因", GitBranch], ["ad_experiments", "广告优化实验中心", Target], ["competitors", "竞品跟踪", PackageSearch], ["differentiation", "亚马逊差异化选品", Target], ["ai", "AI 分析", BrainCircuit]] },
+    { id: "marketing", label: "营销与洞察", icon: Target, items: [["growth_center", "增长中心", BarChart3], ["product_analysis", "产品分析", Target], ["selection_library", "选品资料库", Database], ["competitor_shop", "竞品店铺拆解", Store], ["advertising", "广告运营", Megaphone], ["promotions", "广告促销", BadgePercent], ["ad_attribution", "系列广告归因", GitBranch], ["ad_experiments", "广告优化实验中心", Target], ["competitors", "竞品跟踪", PackageSearch], ["differentiation", "亚马逊差异化选品", Target], ["ai", "AI 分析", BrainCircuit]] },
     { id: "reports", label: "报表与利润", icon: BarChart3, items: [["reports", "数据报告", BarChart3], ["monthly_profit", "月度盈亏", BarChart3], ["weekly_report", "经营周报", CalendarDays], ["cross_profit", "跨境店铺利润", BarChart3]] },
     { id: "inventory", label: "库存与供应链", icon: PackageSearch, items: [["inventory", "库存管理", PackageSearch], ["delivery_fee_query", "基础配送费查询", BadgeRussianRuble], ["freight_quotes", "物流询价配货表", Truck], ["packing", "补货装箱", FileText], ["supply", "约仓计划", Truck]] },
     { id: "cross", label: "跨境运营", icon: Truck, items: [["cross_border_ops", "俄罗斯跨境经营", Truck], ["listing", "产品台账", PackageSearch]] },
@@ -1533,6 +1534,7 @@ export function App() {
             {page === "growth_center" && <GrowthCenterPage range={range} currency={currency} shopName={activeShop?.name || "当前店铺"} />}{" "}
             {page === "product_analysis" && <ProductAnalysisPage currency={currency} shopId={activeShop?.id || ""} />}{" "}
             {page === "selection_library" && <SelectionLibraryPage key={activeShop?.id} shopId={activeShop?.id || ""} />}{" "}
+            {page === "competitor_shop" && <CompetitorShopPage key={activeShop?.id} />}{" "}
             {page === "ad_experiments" && <AdExperimentCenter key={activeShop?.id} shopId={activeShop?.id || ""} seed={experimentSeed} />}
             {page === "ad_attribution" && <AdAttributionPage key={activeShop?.id} />}
             {page === "daily_tasks" && <DailyTaskCenter key={activeShop?.id} />}
