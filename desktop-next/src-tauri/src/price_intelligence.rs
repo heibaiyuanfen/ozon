@@ -255,23 +255,21 @@ fn resolve_reprice_product_ids_blocking(skus: Vec<String>, state: &AppState) -> 
 }
 
 #[tauri::command]
-pub async fn price_reprice_validate(sku: String, price_cny: f64, state: State<'_, AppState>) -> Result<f64, String> {
+pub async fn price_reprice_validate(sku: String, price_cny: f64, state: State<'_, AppState>) -> Result<Option<f64>, String> {
     let snapshot = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || price_reprice_validate_blocking(sku, price_cny, &snapshot))
         .await.map_err(|e| format!("利润校验任务异常：{e}"))?
 }
 
-fn price_reprice_validate_blocking(sku: String, price_cny: f64, state: &AppState) -> Result<f64, String> {
+fn price_reprice_validate_blocking(sku: String, price_cny: f64, state: &AppState) -> Result<Option<f64>, String> {
     if !price_cny.is_finite() || price_cny <= 0.0 { return Err("目标售价必须大于 0".into()); }
     let c = db(state)?;
     let data = build_data(&c, state)?;
     if !data.is_cross_border { return Err("仅支持跨境店利润模型".into()); }
     let row = data.rows.iter().find(|row| row.sku == sku).ok_or("商品未找到")?;
-    let cost = row.purchase_cost_cny.filter(|v| *v > 0.0).ok_or("缺少采购成本")?;
-    let weight = row.weight_kg.filter(|v| *v > 0.0).ok_or("缺少重量")?;
-    let margin = projected_margin(price_cny, cost, weight).ok_or("目标售价或重量超出跨境运费公式范围")?;
-    if margin * 100.0 <= data.warning_margin { return Err(format!("预计利润率 {:.2}% 未高于预警线 {:.2}%", margin * 100.0, data.warning_margin)); }
-    Ok(margin)
+    Ok(row.purchase_cost_cny.filter(|v| *v > 0.0)
+        .zip(row.weight_kg.filter(|v| *v > 0.0))
+        .and_then(|(cost, weight)| projected_margin(price_cny, cost, weight)))
 }
 
 fn warning_margin(c: &Connection) -> f64 {
@@ -290,7 +288,9 @@ fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData,
     let is_cross_border = active_shop_kind(state)? == "cross_border";
     let rate = rub_per_cny_for(state, c)?;
     let limit = warning_margin(c);
-    let mut stmt = c.prepare("WITH known AS(SELECT sku FROM products UNION SELECT sku FROM product_costs UNION SELECT sku FROM product_price_cache) SELECT k.sku,COALESCE(NULLIF(p.offer_id,''),pp.offer_id,''),COALESCE(p.name,''),COALESCE(pp.currency_code,'RUB'),pp.price,pp.old_price,pp.marketing_price,pp.marketing_seller_price,pp.retail_price,pc.unit_cost_cny,COALESCE(pc.first_mile_cost_cny,CASE WHEN pc.first_mile_cost IS NULL THEN NULL ELSE pc.first_mile_cost/?1 END),pc.length_cm,pc.width_cm,pc.height_cm,pc.weight_kg,COALESCE(pp.synced_at,''),COALESCE(NULLIF(p.product_id,''),NULLIF(pp.product_id,''),'') FROM known k LEFT JOIN products p ON p.sku=k.sku LEFT JOIN product_price_cache pp ON pp.sku=k.sku LEFT JOIN product_costs pc ON pc.sku=k.sku ORDER BY CASE WHEN pc.unit_cost_cny>0 AND pc.weight_kg>0 AND pc.length_cm>0 AND pc.width_cm>0 AND pc.height_cm>0 THEN 0 ELSE 1 END,COALESCE(p.offer_id,k.sku)").map_err(|e|e.to_string())?;
+    // products belongs to the selected shop database. Cost and price caches may
+    // contain historical imports; they cannot introduce extra shop products.
+    let mut stmt = c.prepare("SELECT p.sku,COALESCE(NULLIF(p.offer_id,''),pp.offer_id,''),COALESCE(p.name,''),COALESCE(pp.currency_code,'RUB'),pp.price,pp.old_price,pp.marketing_price,pp.marketing_seller_price,pp.retail_price,pc.unit_cost_cny,COALESCE(pc.first_mile_cost_cny,CASE WHEN pc.first_mile_cost IS NULL THEN NULL ELSE pc.first_mile_cost/?1 END),pc.length_cm,pc.width_cm,pc.height_cm,pc.weight_kg,COALESCE(pp.synced_at,''),COALESCE(NULLIF(p.product_id,''),NULLIF(pp.product_id,''),'') FROM products p LEFT JOIN product_price_cache pp ON pp.sku=p.sku LEFT JOIN product_costs pc ON pc.sku=p.sku ORDER BY CASE WHEN pc.unit_cost_cny>0 AND pc.weight_kg>0 AND pc.length_cm>0 AND pc.width_cm>0 AND pc.height_cm>0 THEN 0 ELSE 1 END,p.offer_id").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map([rate], |r| {
             let sku: String = r.get(0)?;
@@ -424,6 +424,14 @@ fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData,
     })
 }
 
+fn belongs_to_current_shop(c: &Connection, sku: &str) -> Result<bool, String> {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM products WHERE sku=?1)",
+        [sku],
+        |r| r.get(0),
+    ).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn price_intelligence(state: State<'_, AppState>) -> Result<PriceIntelligenceData, String> {
     let snapshot = state.inner().clone();
@@ -459,10 +467,16 @@ fn refresh_price_intelligence_blocking(
             .collect::<Vec<_>>();
         rows
     } else {
-        skus.into_iter()
+        let requested = skus.into_iter()
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty())
-            .collect()
+            .collect::<Vec<_>>();
+        for sku in &requested {
+            if !belongs_to_current_shop(&c, sku)? {
+                return Err(format!("SKU {sku} 不属于当前店铺商品目录；请切换到正确店铺后重试"));
+            }
+        }
+        requested
     };
     let (refreshed, errors) = insights::refresh_prices_batch(&c, &targets)?;
     let data = build_data(&c, state)?;
@@ -499,6 +513,13 @@ pub fn save_profit_monitor_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn price_monitor_only_accepts_products_in_current_shop_catalog() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE products(sku TEXT PRIMARY KEY); CREATE TABLE product_costs(sku TEXT PRIMARY KEY); CREATE TABLE product_price_cache(sku TEXT PRIMARY KEY); INSERT INTO products VALUES('OWN'); INSERT INTO product_costs VALUES('OTHER'); INSERT INTO product_price_cache VALUES('OTHER');").unwrap();
+        assert!(belongs_to_current_shop(&c, "OWN").unwrap());
+        assert!(!belongs_to_current_shop(&c, "OTHER").unwrap());
+    }
     #[test]
     fn lower_seller_price_is_pricing_basis() {
         assert_eq!(minimum_positive(Some(120.0), Some(150.0)), Some(120.0));

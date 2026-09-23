@@ -1804,3 +1804,25 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 将促销活动查询、活动商品查询、促销商品改价、单品价格刷新、普通售价修改、利润试算与校验、利润缓存读取等耗时 Tauri 命令移至后台阻塞线程，避免 Seller API 等待、改价后的回读等待及数据库读取占用界面事件处理。
 - 自动批量改价每组最多 5 件，组前统一重新核对活动，组内顺序提交，组末批量刷新价格缓存，减少重复查询。弹窗新增当前商品、已处理数量和“完成当前件后停止”；已提交的 API 步骤不自动回滚，仍逐项记录结果。
 - 验证：`cargo check --locked`、`cargo test --locked`（194 passed、5 ignored）、`pnpm build` 与正式 `build-tauri-release.cmd` 均通过。根目录原 `Ozon ERP.exe` 已覆盖（33,447,936 bytes，SHA-256 `CE282742DF995404B4D71C765D9BB799B6DA61983F2782DF195EE2720778ACDA`），与 Release 产物一致；启动后进程 Responding。未以真实店铺执行批量改价或完成页面可见验收。
+
+## 2026-09-23：拉取最新版后的正式启动器重建
+
+- 基于本地 `main` 提交 `2d4a519`，通过 `desktop-next/scripts/build-tauri-release.cmd` 构建内嵌前端的 Release EXE，并复制到根目录 `ozon-analytics-next.exe`。
+- `cargo check --locked` 和 `pnpm build` 通过。完整 Rust 测试在沙箱中为 193 passed、1 failed、5 ignored；唯一失败的 Windows DPAPI 测试在正常用户环境单独复测通过，属于沙箱权限差异。
+- Release 与根目录 EXE 大小均为 33,458,176 bytes，修改时间均为 `2026-09-23 20:36:43`，SHA-256 均为 `323DB45FE2AE31052CF6C346067ECD5CB15E4904550D8E02C841AD7D1BC60265`。
+- 根目录启动器已启动，进程 Responding。可见窗口的文档地址为 `http://tauri.localhost/`，已加载“价格与利润监控”页面。验收时页面已有正在执行的改价流程，未触碰该流程，也未对真实改价结果作验证。
+
+## 2026-09-23：清理多余旧版启动入口
+
+- 保留当前根目录 `ozon-analytics-next.exe` 和正式构建产物 `desktop-next/src-tauri/target/release/ozon-analytics-next.exe`；两者大小均为 33,510,400 字节、SHA-256 均为 `D23DC7F0C316EC8A8916A2C76F49C840BF0474A879FA7873ECDC8A4C101BCE64`。
+- 删除启动旧 Python 版的 `run_app.bat`、`run_debug.bat`，并将 README 启动说明指向当前根目录 EXE。旧 Python 源代码和构建脚本保留供迁移核对。
+- 删除 `release/` 中 2026 年 8 月的旧便携 EXE（含重复副本）、便携 ZIP、旧 Setup EXE，以及 `target/release/bundle/nsis/` 中旧安装包；这些文件均非当前 2026-09-23 Release 产物。
+- 删除桌面和开始菜单中指向 `D:\Users\Windows\AppData\Local\Ozon Analytics\ozon-analytics-next.exe` 旧安装目录的两个 `Ozon Analytics` 快捷方式。旧安装程序本体与业务数据未删除，避免直接破坏卸载结构或误伤数据。上述删除为文件系统删除，未提供回收站恢复。
+
+## 2026-09-23：竞品店铺 Seerfar 可见面板补全试验
+
+- 核对用户提供的 `Seerfar-Shop-4918548.xlsx`：13 条商品记录，店铺 `529GHKJ`，SKU 均与 Ozon 商品链接的 ID 对应。现有 Excel 导入已在默认本土店数据库形成 13 条商品记录。
+- “竞品店铺拆解”新增单品 `Seerfar 补全` 入口，打开浏览器时附加 90 秒一次性令牌；本机仅监听随机 `127.0.0.1` 端口，并校验令牌、SKU 与商品链接 ID 后保存。浏览器辅助扩展源码位于 `desktop-next/seerfar-bridge/`，需用户自行安装与授权。只读取网页 DOM 可见的 Seerfar 字段，无法读取其他扩展私有存储、跨源 iframe 或封闭 Shadow DOM。
+- 插件实际售价、重量、体积、类目、库存、卖家、上架日期及商品图独立保存到 `competitor_shop_seerfar_capture`，不覆盖 Excel 售价或其他原始字段。前端独立显示补全结果及采集时间；未收到数据时提示超时，不将缺失字段写为零。
+- `cargo check --locked`、`cargo test --locked competitor_capture::tests`（2 项通过）、`pnpm build`、`desktop-next/scripts/build-tauri-release.cmd` 均通过。Release 与根目录 `ozon-analytics-next.exe` 均为 33,568,256 bytes，修改时间 `2026-09-23 22:43:58`，SHA-256 均为 `D6C9CBB133E41EAA172A0A0E7C75E9395F695620256A93637FE5D8848F685F5C`。
+- 用户截图证实 Ozon 商品页面可打开且 Seerfar 面板可见；但默认本土店数据库的真实回传记录仍为 0 条。辅助扩展的安装状态尚未核实，未完成真实浏览器到 ERP 的端到端验收。上一轮尝试桌面可见验收时用户按 Escape 停止 Computer Use，故不能声称正式程序 UI 或真实采集已验收。

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Calculator, RefreshCw, Search, Tags } from "lucide-react";
 import { priceIntelligence, refreshPriceIntelligence, saveProfitMonitorSettings } from "./bridge";
-import type { PriceIntelligenceData } from "./types";
+import type { PriceIntelligenceData, Shop } from "./types";
 import { RepriceDialog } from "./RepriceDialog";
 import "./price-intelligence.css";
 
@@ -9,7 +9,7 @@ const rub = (value: number | null) => value == null ? "—" : `${value.toLocaleS
 const cny = (value: number | null) => value == null ? "—" : `¥${value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`;
 const percent = (value: number | null) => value == null ? "—" : `${(value * 100).toFixed(1)}%`;
 
-export function PriceIntelligencePage() {
+export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { shops: Shop[]; activeShop?: Shop; onSelectShop: (id: string) => Promise<void> }) {
   const [data, setData] = useState<PriceIntelligenceData | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
@@ -19,6 +19,16 @@ export function PriceIntelligencePage() {
   const [message, setMessage] = useState("");
   const [warning, setWarning] = useState("15");
   const [repriceSkus, setRepriceSkus] = useState<string[] | null>(null);
+  const [repriceMode, setRepriceMode] = useState<"manual" | "warning">("manual");
+  const currentKind = activeShop?.kind ?? "local";
+  const currentShops = shops.filter((shop) => shop.kind === currentKind);
+  const changeScope = async (kind: Shop["kind"]) => {
+    if (busy || kind === currentKind) return;
+    const target = shops.find((shop) => shop.kind === kind);
+    if (!target) return;
+    try { await onSelectShop(target.id); }
+    catch (error) { setMessage(`切换店铺失败：${String(error)}`); }
+  };
   const load = () => priceIntelligence().then((value) => { setData(value); setWarning(String(value.warningMargin)); }).catch((e) => setMessage(String(e)));
   useEffect(() => { void load(); }, []);
   const rows = useMemo(() => (data?.rows ?? []).filter((row) => `${row.sku} ${row.offerId} ${row.productName}`.toLowerCase().includes(query.trim().toLowerCase())), [data, query]);
@@ -77,9 +87,16 @@ export function PriceIntelligencePage() {
   };
   return <main className="price-intelligence-page">
     <header className="pi-head">
-      <div><span>OZON PRICE INTELLIGENCE</span><h1>价格、补贴与跨境利润监控</h1><p>独立读取前台价、促销价和原价；跨境店按完整商品资料核算并缓存利润。</p></div>
+      <div><span>OZON PRICE INTELLIGENCE</span><h1>价格与利润监控</h1><p>本土店与跨境店分区查看；每次只读取当前店铺的商品目录与价格缓存。</p></div>
       <button className="primary" disabled={busy} onClick={() => refresh([])}><RefreshCw size={16} className={busy ? "spin" : ""}/>{busy ? "正在分批扫描" : "扫描未缓存商品"}</button>
     </header>
+    <section className="pi-shop-scope card" aria-label="店铺类型与店铺选择">
+      <div className="pi-shop-tabs" role="group" aria-label="店铺类型">
+        {(["local", "cross_border"] as const).map((kind) => <button key={kind} type="button" className={currentKind === kind ? "active" : ""} aria-pressed={currentKind === kind} disabled={busy || !shops.some((shop) => shop.kind === kind)} onClick={() => void changeScope(kind)}>{kind === "local" ? "本土店商品" : "跨境店商品"}<span>{shops.filter((shop) => shop.kind === kind).length} 家店</span></button>)}
+      </div>
+      <label>当前店铺 <select value={activeShop?.id ?? ""} disabled={busy || !currentShops.length} onChange={(event) => void onSelectShop(event.target.value).catch((error) => setMessage(`切换店铺失败：${String(error)}`))}>{currentShops.map((shop) => <option key={shop.id} value={shop.id}>{shop.name}</option>)}</select></label>
+      <small>{currentKind === "local" ? "仅显示本土店商品，价格单位 RUB；不套用跨境利润公式。" : "仅显示跨境店商品，利润按 CNY 试算。"}</small>
+    </section>
     <section className="pi-summary">
       <article><Tags/><span>已缓存商品</span><strong>{data?.rows.filter((r) => !!r.syncedAt).length ?? 0}</strong></article>
       <article><Calculator/><span>可完整核算</span><strong>{complete}</strong></article>
@@ -90,7 +107,7 @@ export function PriceIntelligencePage() {
     <section className="pi-toolbar card">
       <label className="pi-search"><Search size={16}/><input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="搜索 SKU、货号或商品名"/></label>
       <button disabled={!selected.size || busy} onClick={()=>refresh([...selected])}>更新所选（{selected.size}）</button>
-      {data?.isCrossBorder && <><button disabled={busy || ![...selected].some((sku) => data.rows.some((row) => row.sku === sku && row.warning))} onClick={() => setRepriceSkus([...selected].filter((sku) => data.rows.some((row) => row.sku === sku && row.warning)))}>所选预警商品改价试算</button><button disabled={!warnings || busy} onClick={() => setSelected(new Set(data.rows.filter((row) => row.warning).map((row) => row.sku)))}>选择全部预警</button></>}
+      {data?.isCrossBorder && <><button disabled={busy || !selected.size} onClick={() => { setRepriceMode("manual"); setRepriceSkus([...selected]); }}>手动调价所选（{selected.size}）</button><button disabled={busy || ![...selected].some((sku) => data.rows.some((row) => row.sku === sku && row.warning))} onClick={() => { setRepriceMode("warning"); setRepriceSkus([...selected].filter((sku) => data.rows.some((row) => row.sku === sku && row.warning))); }}>预警商品试算</button><button disabled={!warnings || busy} onClick={() => setSelected(new Set(data.rows.filter((row) => row.warning).map((row) => row.sku)))}>选择全部预警</button></>}
       {data?.isCrossBorder && <div className="pi-limit"><label>利润率低于</label><input type="number" value={warning} onChange={(e)=>setWarning(e.target.value)}/><span>% 时预警</span><button onClick={saveLimit}>保存</button></div>}
     </section>
     {message && <div className="sync-message">{message}</div>}
@@ -101,13 +118,13 @@ export function PriceIntelligencePage() {
       <th><input type="checkbox" checked={!!rows.length && rows.every(r=>selected.has(r.sku))} onChange={(e)=>setSelected(e.target.checked?new Set(rows.map(r=>r.sku)):new Set())}/></th><th>商品</th><th>前台价<br/><small>补贴后</small></th><th>促销价</th><th>设置原价</th><th>最终定价</th><th>Ozon 补贴</th><th>成本资料</th>{data?.isCrossBorder && <><th>费用拆解</th><th>利润 / 利润率</th></>}<th>状态</th>
     </tr></thead><tbody>{rows.map((row)=><tr key={row.sku} className={row.warning?"warning-row":""}>
       <td><input type="checkbox" checked={selected.has(row.sku)} onChange={(e)=>setSelected(old=>{const next=new Set(old);e.target.checked?next.add(row.sku):next.delete(row.sku);return next;})}/></td>
-      <td><b>{row.offerId || row.sku}</b><span>{row.productName || "未读取商品名"}</span><small>SKU {row.sku}</small></td>
+      <td><b>{row.offerId || row.sku}</b><span>{row.productName || "未读取商品名"}</span><small>SKU {row.sku}</small>{data?.isCrossBorder && <button className="pi-row-reprice" disabled={busy} onClick={() => { setRepriceMode("manual"); setRepriceSkus([row.sku]); }}>手动调价</button>}</td>
       <td className="front-price">{shownPrice(row.frontendPrice, row.currencyCode)}</td><td>{shownPrice(row.promotionPrice, row.currencyCode)}</td><td>{shownPrice(row.originalPrice, row.currencyCode)}</td><td><b>{shownPrice(row.finalPricing, row.currencyCode)}</b></td>
       <td><b>{percent(row.subsidyRate)}</b><small>{shownPrice(row.subsidyAmount, row.currencyCode)}</small></td>
       <td><span>成本 {cny(row.purchaseCostCny)}</span><small>体积 {row.volumeL==null?"—":`${row.volumeL.toFixed(2)} L`} · {row.weightKg==null?"—":`${row.weightKg} kg`}</small>{data?.isCrossBorder ? <small>跨境运费（全部运费）{cny(row.freightCny)}</small> : <small>本土物流费按实际结算，不套用跨境阶梯</small>}</td>
       {data?.isCrossBorder && <><td><span>广告 {cny(row.advertisingCny)} · 货损 {cny(row.damageCny)}</span><small>平台佣金 {cny(row.commissionCny)} · 物流佣金 {cny(row.logisticsCommissionCny)}</small><small>贴单 {cny(row.labelFeeCny)}</small></td><td className={row.warning?"profit danger-text":"profit"}><b>{cny(row.profitCny)}</b><small>{percent(row.profitMargin)}</small></td></>}
       <td>{row.warning && <div className="warning-badge">需要改价</div>}{row.missingFields.length ? <div className="missing">缺：{row.missingFields.join("、")}</div> : !row.warning && <div className="ok-badge">正常</div>}<small>{row.syncedAt||"尚未读取"}</small></td>
     </tr>)}</tbody></table>{!rows.length&&<div className="empty">没有符合条件的商品</div>}</section>
-    {repriceSkus && data && <RepriceDialog skus={repriceSkus} warningMargin={data.warningMargin} onClose={() => setRepriceSkus(null)} onChanged={() => { void load(); }}/>} 
+    {repriceSkus && data && <RepriceDialog skus={repriceSkus} mode={repriceMode} warningMargin={data.warningMargin} onClose={() => setRepriceSkus(null)} onChanged={() => { void load(); }}/>}
   </main>;
 }

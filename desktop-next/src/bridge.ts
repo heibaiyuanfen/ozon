@@ -942,7 +942,7 @@ export async function priceRepriceSuggestions(skus: string[]): Promise<import(".
 export async function resolveRepriceProductIds(skus: string[]): Promise<Record<string, string>> {
     return invoke("resolve_reprice_product_ids", { skus });
 }
-export async function priceRepriceValidate(sku: string, priceCny: number): Promise<number> {
+export async function priceRepriceValidate(sku: string, priceCny: number): Promise<number | null> {
     return invoke("price_reprice_validate", { sku, priceCny });
 }
 export async function refreshPriceIntelligence(skus: string[]): Promise<import("./types").PriceIntelligenceRefreshResult> {
@@ -976,6 +976,8 @@ export async function competitorShopProducts(shopName:string,query:string):Promi
 export async function addCompetitorToSelection(id:number):Promise<number>{return invoke("add_competitor_to_selection",{id})}
 export async function syncCompetitorShopFeishu(shopName:string,targetUrl:string):Promise<string>{return invoke("sync_competitor_shop_feishu",{shopName,targetUrl})}
 export async function openCompetitorProductUrl(url:string):Promise<void>{return invoke("open_competitor_product_url",{url})}
+export async function startCompetitorSeerfarCapture(productId:number):Promise<string>{return invoke("start_competitor_seerfar_capture",{productId})}
+export async function competitorSeerfarCaptures(shopName:string):Promise<import("./types").CompetitorSeerfarCapture[]>{return invoke("competitor_seerfar_captures",{shopName})}
 export async function competitorFeishuTarget():Promise<string>{return invoke("competitor_feishu_target")}
 export async function saveCompetitorFeishuTarget(url:string):Promise<string>{return invoke("save_competitor_feishu_target",{url})}
 export async function testCompetitorFeishuTarget(url:string):Promise<string>{return invoke("test_competitor_feishu_target",{url})}

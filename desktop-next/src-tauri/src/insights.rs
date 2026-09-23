@@ -87,6 +87,9 @@ fn validate_price_update(form: &ProductPriceUpdate) -> Result<(), String> {
     if form.old_price > 0.0 && form.old_price <= form.price {
         return Err("划线价必须高于当前售价；不使用划线价时请填写 0".into());
     }
+    if form.old_price > 0.0 && form.price <= form.old_price * 0.1 {
+        return Err("划线价与售价的折扣达到或超过 90%；请将划线价设为 0 后重试".into());
+    }
     if form.min_price > 0.0 && form.price < form.min_price {
         return Err("售价不能低于最低价".into());
     }
@@ -746,6 +749,8 @@ mod price_tests {
         assert!(validate_price_update(&form(0.0, 0.0, 0.0)).is_err());
         assert!(validate_price_update(&form(1686.0, 1600.0, 1500.0)).is_err());
         assert!(validate_price_update(&form(1400.0, 1990.0, 1500.0)).is_err());
+        assert!(validate_price_update(&form(36.06, 400.0, 0.0)).is_err());
+        assert!(validate_price_update(&form(36.06, 0.0, 0.0)).is_ok());
     }
 }
 

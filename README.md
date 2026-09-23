@@ -44,17 +44,15 @@
 
 ## 启动方法
 
-双击 `run_app.bat`。
+双击项目根目录的 `ozon-analytics-next.exe` 启动当前桌面版。不要运行旧版 Python 启动脚本或旧安装包。
 
-如果启动失败或需要查看报错，双击 `run_debug.bat`。
-
-开发环境也可以直接运行：
+旧版 Python 源代码仅用于迁移核对；需要调试旧版时可在开发环境直接运行：
 
 ```powershell
 python main.py
 ```
 
-需要 Python 3.11 或更高版本。双击 `run_app.bat` 会优先使用已包含 Word/PDF 组件的本地运行时；若直接使用自己的 Python，请先执行 `python -m pip install -r requirements.txt`。
+调试旧版需要 Python 3.11 或更高版本，并先执行 `python -m pip install -r requirements.txt`。当前桌面版不依赖旧版 Python 启动脚本。
 
 ## Windows 打包
 

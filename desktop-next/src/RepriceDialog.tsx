@@ -8,7 +8,7 @@ type Plan = { kind: "promotion" | "base" | "blocked"; price: number; steps: stri
 const money = (value: number) => `¥${value.toFixed(2)}`;
 const close = (a: number, b: number) => Math.abs(a - b) <= Math.max(0.05, b * 0.005);
 
-export function RepriceDialog({ skus, warningMargin, onClose, onChanged }: { skus: string[]; warningMargin: number; onClose: () => void; onChanged: () => void }) {
+export function RepriceDialog({ skus, warningMargin, mode, onClose, onChanged }: { skus: string[]; warningMargin: number; mode: "manual" | "warning"; onClose: () => void; onChanged: () => void }) {
   const [suggestions, setSuggestions] = useState<RepriceSuggestion[]>([]);
   const [targets, setTargets] = useState<Record<string, string>>({});
   const [checks, setChecks] = useState<Record<string, Check>>({});
@@ -54,14 +54,14 @@ export function RepriceDialog({ skus, warningMargin, onClose, onChanged }: { sku
         }
         if (!alive) return;
         setSuggestions(items);
-        setTargets(Object.fromEntries(items.map((item) => [item.sku, item.suggestedPriceCny?.toFixed(2) ?? ""])));
+        setTargets(Object.fromEntries(items.map((item) => [item.sku, (mode === "manual" ? item.currentPriceCny : item.suggestedPriceCny)?.toFixed(2) ?? ""])));
         const result = await inspect(items);
         if (alive) setChecks(result);
       } catch (error) { if (alive) setNotice(`试算或活动查询失败：${String(error)}`); }
       finally { if (alive) setLoading(false); }
     })();
     return () => { alive = false; };
-  }, [skus.join("|")]);
+  }, [skus.join("|"), mode]);
 
   const planFor = (item: RepriceSuggestion, target: number, check?: Check): Plan => {
     if (!item.productId || !/^\d+$/.test(item.productId)) return { kind: "blocked", price: target, steps: [], reason: "没有可核对的 Ozon 商品 ID" };
@@ -70,14 +70,14 @@ export function RepriceDialog({ skus, warningMargin, onClose, onChanged }: { sku
     if (!check.memberships.length) return { kind: "base", price: target, steps: [`修改普通售价至 ${money(target)}`], reason: "未参加已读取的促销活动" };
     const upper = Math.min(...check.memberships.map(({ product }) => product.maxActionPrice > 0 ? product.maxActionPrice : Infinity));
     const lower = Math.max(...check.memberships.map(({ product }) => product.minActionPrice > 0 ? product.minActionPrice : 0));
-    const price = target < lower ? lower : target;
+    if (target < lower) return { kind: "blocked", price: target, steps: [], reason: `目标价低于活动下限 ${money(lower)}；不会擅自上调目标价` };
     const now = Date.now();
-    if (check.memberships.some(({ action }) => action.freezeDate && Date.parse(action.freezeDate) <= now)) return { kind: "blocked", price, steps: [], reason: "活动已到冻结期，需在 Ozon 后台核对改价权限" };
-    if (!Number.isFinite(upper)) return { kind: "blocked", price, steps: [], reason: "Ozon 未返回活动允许最高价，无法安全判断是否需要退出活动" };
-    if (price <= upper) {
-      return { kind: "promotion", price, steps: check.memberships.map(({ action }) => `将「${action.title}」活动价改为 ${money(price)}`), reason: target < lower ? `低于活动下限，按 ${money(lower)} 执行` : "目标位于活动允许区间" };
+    if (check.memberships.some(({ action }) => action.freezeDate && Date.parse(action.freezeDate) <= now)) return { kind: "blocked", price: target, steps: [], reason: "活动已到冻结期，需在 Ozon 后台核对改价权限" };
+    if (!Number.isFinite(upper)) return { kind: "blocked", price: target, steps: [], reason: "Ozon 未返回活动允许最高价，无法安全判断是否需要退出活动" };
+    if (target <= upper) {
+      return { kind: "promotion", price: target, steps: check.memberships.map(({ action }) => `将「${action.title}」活动价改为 ${money(target)}`), reason: "目标位于活动允许区间" };
     }
-    return { kind: "base", price: target, steps: [...check.memberships.map(({ action }) => `退出「${action.title}」`), `修改普通售价至 ${money(target)}`], reason: `目标超过活动上限 ${money(upper)}` };
+    return { kind: "base", price: target, steps: [`先修改普通售价至 ${money(target)}`, ...check.memberships.map(({ action }) => `再退出「${action.title}」`)], reason: `目标超过活动上限 ${money(upper)}` };
   };
 
   const plans = useMemo(() => Object.fromEntries(suggestions.map((item) => [item.sku, planFor(item, Number(targets[item.sku]), checks[item.sku])])), [suggestions, targets, checks]);
@@ -90,7 +90,7 @@ export function RepriceDialog({ skus, warningMargin, onClose, onChanged }: { sku
     if (item.productId !== current.productId) throw new Error("商品 ID 已变化，请重新打开试算窗口");
     if (fresh.memberships.some(({ product }) => !close(product.price, current.price))) throw new Error("活动价格币种或商品基准价无法与人民币售价核对，请手动处理");
     const margin = await priceRepriceValidate(item.sku, plan.price);
-    setLog((old) => [...old, `${item.offerId || item.sku}：目标 ${money(plan.price)}，预计利润率 ${(margin * 100).toFixed(2)}%，开始执行`]);
+    setLog((old) => [...old, `${item.offerId || item.sku}：目标 ${money(plan.price)}，${margin == null ? "成本或重量缺失，无法试算利润率" : `预计利润率 ${(margin * 100).toFixed(2)}%`}，开始执行`]);
     if (plan.kind === "promotion") {
       for (const { action, product } of fresh.memberships) {
         if (product.maxActionPrice <= 0) throw new Error("Ozon 未返回活动允许最高价，未提交改价");
@@ -100,24 +100,28 @@ export function RepriceDialog({ skus, warningMargin, onClose, onChanged }: { sku
         setLog((old) => [...old, `已提交「${action.title}」活动价 ${money(plan.price)}`]);
       }
     } else {
-      for (const { action, product } of fresh.memberships) {
-        const result = await ozonPromotionProductAction({ actionId: action.id, action: "deactivate", productId: product.id });
-        if (!result.success) throw new Error(`${action.title}：${result.message}`);
-        setLog((old) => [...old, `已退出「${action.title}」`]);
-      }
-      const oldPrice = current.oldPrice > plan.price ? current.oldPrice : 0;
+      // Update the base price first. A rejected price must never expose the old base price by exiting a promotion.
+      const oldPrice = current.oldPrice > plan.price && plan.price > current.oldPrice * 0.1 ? current.oldPrice : 0;
       const minPrice = current.minPrice <= plan.price ? current.minPrice : 0;
       await updateProductPrice({ sku: item.sku, price: plan.price, oldPrice, minPrice, currencyCode: "CNY" });
       setLog((old) => [...old, `已提交普通售价 ${money(plan.price)}`]);
+      for (const { action, product } of fresh.memberships) {
+        const result = await ozonPromotionProductAction({ actionId: action.id, action: "deactivate", productId: product.id });
+        if (!result.success) throw new Error(`${action.title}：${result.message}；普通售价已提交，活动仍可能生效`);
+        setLog((old) => [...old, `已退出「${action.title}」`]);
+      }
     }
     setLog((old) => [...old, `${item.offerId || item.sku}：改价步骤已提交，稍后统一刷新缓存。前台补贴价可能延迟，以 Ozon 后台最终显示为准。`]);
   };
 
   const run = async (items: RepriceSuggestion[], automatic: boolean) => {
     if (busy) return;
-    const actionable = items.filter((item) => item.suggestedPriceCny != null && planFor(item, automatic ? item.suggestedPriceCny : Number(targets[item.sku]), checks[item.sku]).kind !== "blocked");
+    const actionable = items.filter((item) => {
+      const target = automatic ? item.suggestedPriceCny : Number(targets[item.sku]);
+      return target != null && (!automatic || (item.currentPriceCny != null && target <= item.currentPriceCny * 1.2)) && planFor(item, target, checks[item.sku]).kind !== "blocked";
+    });
     if (!actionable.length) { setNotice("没有可执行的商品；请查看每行原因"); return; }
-    const question = automatic ? `按试算价自动处理 ${actionable.length} 个商品？可能退出促销并提交普通售价；已完成的步骤无法自动回滚。` : `按输入的目标价处理 ${actionable[0].offerId || actionable[0].sku}？已提交的步骤无法自动回滚。`;
+    const question = automatic ? `按试算价自动处理 ${actionable.length} 个商品？自动涨幅限制为当前售价的 20%；已完成的步骤无法自动回滚。` : `确认将 ${actionable[0].offerId || actionable[0].sku} 调至 ${money(Number(targets[actionable[0].sku]))}？${planFor(actionable[0], Number(targets[actionable[0].sku]), checks[actionable[0].sku]).steps.join(" → ")}。已提交的步骤无法自动回滚。`;
     if (!window.confirm(question)) return;
     stopRequested.current = false;
     setBusy(true); setNotice(""); setLog([]); setProgress({ done: 0, total: actionable.length, current: "准备核对活动" });
@@ -152,21 +156,21 @@ export function RepriceDialog({ skus, warningMargin, onClose, onChanged }: { sku
   };
 
   return <div className="pi-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
-    <section className="pi-modal" role="dialog" aria-modal="true" aria-label="预警商品改价试算">
-      <header><div><h2>预警商品改价试算</h2><p>先看目标价和活动处理方案，再选择逐项手动提交或按建议价批量执行。</p></div><button disabled={busy} onClick={onClose}>关闭</button></header>
-      <div className="pi-modal-note">仅跨境店使用人民币利润模型；目标利润率须高于 {warningMargin}%。活动区间、币种或活动清单无法核对时，不执行自动改价。多个 API 步骤不是事务，部分成功后需人工核查。</div>
+    <section className="pi-modal" role="dialog" aria-modal="true" aria-label={mode === "manual" ? "商品手动调价" : "预警商品改价试算"}>
+      <header><div><h2>{mode === "manual" ? "商品手动调价" : "预警商品改价试算"}</h2><p>核对目标价与活动方案后再提交；普通售价先更新成功，才会退出促销。</p></div><button disabled={busy} onClick={onClose}>关闭</button></header>
+      <div className="pi-modal-note">仅跨境店使用人民币利润模型；预警线为 {warningMargin}%，手动调价可自行决定目标利润率。活动区间、币种或活动清单无法核对时，不执行改价。多个 API 步骤不是事务，部分成功后需人工核查。</div>
       {notice && <div className="sync-message">{notice}</div>}
       {loading ? <p>正在读取活动及商品价格限制…</p> : <div className="pi-reprice-list">{suggestions.map((item) => {
         const plan = plans[item.sku];
         return <article key={item.sku}>
           <div className="pi-reprice-title"><strong>{item.offerId || item.sku}</strong><span>当前 {item.currentPriceCny == null ? "—" : money(item.currentPriceCny)} · 建议 {item.suggestedPriceCny == null ? "无法试算" : money(item.suggestedPriceCny)} · 预计利润率 {item.projectedMargin == null ? "—" : `${(item.projectedMargin * 100).toFixed(2)}%`}</span></div>
-          <div className="pi-reprice-target"><label>目标售价（CNY） <input type="number" min="0.01" step="0.01" value={targets[item.sku] ?? ""} onChange={(e) => setTargets((old) => ({ ...old, [item.sku]: e.target.value }))}/></label><button disabled={busy || !plan || plan.kind === "blocked" || item.suggestedPriceCny == null} onClick={() => run([item], false)}>按此价格提交</button></div>
+          <div className="pi-reprice-target"><label>目标售价（CNY） <input type="number" min="0.01" step="0.01" value={targets[item.sku] ?? ""} onChange={(e) => setTargets((old) => ({ ...old, [item.sku]: e.target.value }))}/></label><button disabled={busy || !plan || plan.kind === "blocked"} onClick={() => run([item], false)}>按此价格提交</button></div>
           <small>{plan?.kind === "blocked" ? `暂不能自动处理：${plan.reason}` : `${plan?.reason}；${plan?.steps.join(" → ") || item.reason}`}</small>
         </article>;
       })}</div>}
       {log.length > 0 && <div className="pi-reprice-log" aria-live="polite">{log.map((line, index) => <p key={index}>{line}</p>)}</div>}
       {progress && <div className="pi-progress" aria-live="polite"><div><strong>{progress.current}</strong><span>{progress.done}/{progress.total}</span><button disabled={stopRequested.current} onClick={() => { stopRequested.current = true; }}>完成当前件后停止</button></div><progress max={progress.total} value={progress.done}/></div>}
-      <footer><span>自动模式按建议售价执行；修改输入框后可逐项提交。</span><button disabled={busy || loading} onClick={() => run(suggestions, true)}>{busy ? "正在执行…" : "按建议价自动处理可执行商品"}</button></footer>
+      <footer><span>不会自动抬高目标价；自动模式还会跳过涨幅超过 20% 的商品。</span>{mode === "warning" && <button disabled={busy || loading} onClick={() => run(suggestions, true)}>{busy ? "正在执行…" : "按建议价自动处理可执行商品"}</button>}</footer>
     </section>
   </div>;
 }

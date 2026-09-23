@@ -51,6 +51,7 @@ export interface DateRange {
   to: string;
 }
 export interface CompetitorShopProduct { id:number;shopName:string;sku:string;title:string;imageUrl:string;listingUrl:string;brand:string;category:string;salesMethod:string;price:number;sales:number;revenue:number;salesGrowth:number;revenueGrowth:number;grossMargin:number;totalImpressions:number;impressions:number;productViews:number;viewToCart:number;searchToCart:number;averageDiscount:number;promoSalesShare:number;impressionToOrder:number;orderConversion:number;adCostShare:number;estimatedAdCost:number;returnCancelRate:number;lostRevenue:number;rating:number;ratingCount:number;sellerType:string;fulfillment:string;weightKg:number|null;launchAge:string;updatedAt:string }
+export interface CompetitorSeerfarCapture { productId:number;sku:string;sellerPriceRub:number|null;weightG:number|null;dimensionsMm:string;category:string;stock:number|null;seller:string;listingDate:string;imageUrl:string;capturedAt:string }
 export interface CompetitorShopImportResult { shopName:string;imported:number;updated:number;sourceFile:string }
 
 export interface SelectionCategory { id:number; name:string; note:string; itemCount:number }

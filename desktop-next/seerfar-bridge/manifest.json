@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Ozon ERP Seerfar Bridge",
+  "version": "0.1.0",
+  "description": "仅在 Ozon ERP 打开带一次性采集标记的商品页时，读取页面上可见的 Seerfar 面板并回填到本机。",
+  "permissions": [],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    { "matches": ["https://www.ozon.ru/product/*", "https://ozon.ru/product/*"], "js": ["content.js"], "run_at": "document_idle" }
+  ]
+}

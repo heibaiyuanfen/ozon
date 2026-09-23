@@ -1531,7 +1531,7 @@ export function App() {
                 initialTab="cross"
               />
             )}{" "}
-            {page === "price_intelligence" && <PriceIntelligencePage key={activeShop?.id} />}{" "}
+            {page === "price_intelligence" && <PriceIntelligencePage key={activeShop?.id} shops={shops} activeShop={activeShop} onSelectShop={changeShop} />}{" "}
             {page === "ai" && <AiPage range={range} />}{" "}
             {page === "growth_center" && <GrowthCenterPage range={range} currency={currency} shopName={activeShop?.name || "当前店铺"} />}{" "}
             {page === "product_analysis" && <ProductAnalysisPage currency={currency} shopId={activeShop?.id || ""} />}{" "}

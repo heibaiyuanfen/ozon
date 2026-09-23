@@ -16,6 +16,7 @@ mod ad_experiments;
 mod ad_history;
 mod ad_series;
 mod competitor_shop;
+mod competitor_capture;
 mod contracts;
 mod daily_tasks;
 mod freight_quotes;
@@ -1308,6 +1309,7 @@ pub(crate) fn db(state: &AppState) -> Result<Connection, String> {
     contracts::ensure(&c)?;
     selection_library::ensure(&c)?;
     competitor_shop::ensure(&c)?;
+    competitor_capture::ensure(&c)?;
     ad_attribution::ensure(&c)?;
     Ok(c)
 }
@@ -13296,6 +13298,8 @@ pub fn run() {
             competitor_shop::competitor_feishu_target,
             competitor_shop::save_competitor_feishu_target,
             competitor_shop::test_competitor_feishu_target,
+            competitor_capture::start_competitor_seerfar_capture,
+            competitor_capture::competitor_seerfar_captures,
             sync_inventory,
             inventory_alert_state,
             save_inventory_alert_settings,
