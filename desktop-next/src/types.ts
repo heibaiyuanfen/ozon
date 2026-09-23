@@ -14,6 +14,7 @@ export type PageKey =
   | "monthly_profit"
   | "weekly_report"
   | "cross_profit"
+  | "price_intelligence"
   | "cross_border_ops"
   | "ai"
   | "growth_center"
@@ -87,6 +88,7 @@ export interface OzonPromotionProduct {
   price: number;
   actionPrice: number;
   maxActionPrice: number;
+  minActionPrice: number;
   stock: number;
   minStock: number;
   addMode: string;
@@ -1222,4 +1224,30 @@ export interface MlAnalytics {
   averageOrderValue: number | null;
   currencyId: string;
   daily: MlAnalyticsDay[];
+}
+
+export interface PriceProfitRow {
+  sku: string; offerId: string; productId: string; productName: string; currencyCode: string;
+  frontendPrice: number | null; promotionPrice: number | null; originalPrice: number | null;
+  finalPricing: number | null; subsidyAmount: number | null; subsidyRate: number | null;
+  purchaseCostCny: number | null; firstMileCny: number | null; crossBorderFreightCny: number | null; freightCny: number | null;
+  volumeL: number | null; weightKg: number | null; finalPricingCny: number | null;
+  commissionRate: number | null; advertisingCny: number | null; damageCny: number | null;
+  commissionCny: number | null; logisticsCommissionCny: number | null; labelFeeCny: number | null;
+  profitCny: number | null; profitMargin: number | null; warning: boolean;
+  missingFields: string[]; syncedAt: string;
+}
+export interface RepriceSuggestion {
+  sku: string; offerId: string; productId: string;
+  currentPriceCny: number | null; suggestedPriceCny: number | null;
+  projectedMargin: number | null; reason: string;
+}
+export interface PriceIntelligenceData {
+  rows: PriceProfitRow[]; isCrossBorder: boolean; rubPerCny: number; warningMargin: number;
+  advertisingRate: number; damageRate: number; labelFeeCny: number;
+  lowCommissionRate: number; highCommissionRate: number; logisticsCommissionRate: number;
+  commissionThresholdCny: number;
+}
+export interface PriceIntelligenceRefreshResult {
+  requested: number; refreshed: number; failed: number; errors: string[]; data: PriceIntelligenceData;
 }

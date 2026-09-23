@@ -43,17 +43,18 @@ pub struct ProductDetail {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductPrice {
-    sku: String,
-    offer_id: String,
-    product_id: String,
-    currency_code: String,
-    price: f64,
-    old_price: f64,
-    min_price: f64,
-    marketing_seller_price: Option<f64>,
-    retail_price: Option<f64>,
-    net_price: Option<f64>,
-    synced_at: String,
+    pub(crate) sku: String,
+    pub(crate) offer_id: String,
+    pub(crate) product_id: String,
+    pub(crate) currency_code: String,
+    pub(crate) price: f64,
+    pub(crate) old_price: f64,
+    pub(crate) min_price: f64,
+    pub(crate) marketing_price: Option<f64>,
+    pub(crate) marketing_seller_price: Option<f64>,
+    pub(crate) retail_price: Option<f64>,
+    pub(crate) net_price: Option<f64>,
+    pub(crate) synced_at: String,
 }
 
 #[derive(Serialize)]
@@ -398,8 +399,24 @@ pub fn product_analysis(
     Ok(rows)
 }
 
-fn ensure(c: &Connection) -> Result<(), String> {
-    c.execute_batch("CREATE TABLE IF NOT EXISTS product_series(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS product_series_members(series_id INTEGER NOT NULL,sku TEXT NOT NULL,PRIMARY KEY(series_id,sku),FOREIGN KEY(series_id)REFERENCES product_series(id)ON DELETE CASCADE);CREATE TABLE IF NOT EXISTS product_cluster_weights(sku TEXT NOT NULL,cluster_name TEXT NOT NULL,weight REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(sku,cluster_name));CREATE INDEX IF NOT EXISTS idx_series_members_sku ON product_series_members(sku);CREATE TABLE IF NOT EXISTS product_price_cache(sku TEXT PRIMARY KEY,offer_id TEXT NOT NULL DEFAULT '',product_id TEXT NOT NULL DEFAULT '',currency_code TEXT NOT NULL DEFAULT 'RUB',price REAL NOT NULL DEFAULT 0,old_price REAL NOT NULL DEFAULT 0,min_price REAL NOT NULL DEFAULT 0,marketing_seller_price REAL,retail_price REAL,net_price REAL,raw_json TEXT NOT NULL DEFAULT '',synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS product_price_action_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,sku TEXT NOT NULL,offer_id TEXT NOT NULL DEFAULT '',before_price REAL NOT NULL DEFAULT 0,requested_price REAL NOT NULL,requested_old_price REAL NOT NULL DEFAULT 0,requested_min_price REAL NOT NULL DEFAULT 0,currency_code TEXT NOT NULL DEFAULT 'RUB',status TEXT NOT NULL DEFAULT 'pending',message TEXT NOT NULL DEFAULT '',response_json TEXT NOT NULL DEFAULT '',verified_price REAL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,verified_at TEXT NOT NULL DEFAULT '');CREATE INDEX IF NOT EXISTS idx_product_price_logs_sku ON product_price_action_logs(sku,created_at DESC);").map_err(|e|e.to_string())
+pub(crate) fn ensure(c: &Connection) -> Result<(), String> {
+    c.execute_batch("CREATE TABLE IF NOT EXISTS product_series(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS product_series_members(series_id INTEGER NOT NULL,sku TEXT NOT NULL,PRIMARY KEY(series_id,sku),FOREIGN KEY(series_id)REFERENCES product_series(id)ON DELETE CASCADE);CREATE TABLE IF NOT EXISTS product_cluster_weights(sku TEXT NOT NULL,cluster_name TEXT NOT NULL,weight REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_series_members_sku ON product_series_members(sku);CREATE TABLE IF NOT EXISTS product_price_cache(sku TEXT PRIMARY KEY,offer_id TEXT NOT NULL DEFAULT '',product_id TEXT NOT NULL DEFAULT '',currency_code TEXT NOT NULL DEFAULT 'RUB',price REAL NOT NULL DEFAULT 0,old_price REAL NOT NULL DEFAULT 0,min_price REAL NOT NULL DEFAULT 0,marketing_price REAL,marketing_seller_price REAL,retail_price REAL,net_price REAL,raw_json TEXT NOT NULL DEFAULT '',synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS product_price_action_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,sku TEXT NOT NULL,offer_id TEXT NOT NULL DEFAULT '',before_price REAL NOT NULL DEFAULT 0,requested_price REAL NOT NULL,requested_old_price REAL NOT NULL DEFAULT 0,requested_min_price REAL NOT NULL DEFAULT 0,currency_code TEXT NOT NULL DEFAULT 'RUB',status TEXT NOT NULL DEFAULT 'pending',message TEXT NOT NULL DEFAULT '',response_json TEXT NOT NULL DEFAULT '',verified_price REAL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,verified_at TEXT NOT NULL DEFAULT '');CREATE INDEX IF NOT EXISTS idx_product_price_logs_sku ON product_price_action_logs(sku,created_at DESC);").map_err(|e|e.to_string())?;
+    let has_marketing_price = c
+        .prepare("PRAGMA table_info(product_price_cache)")
+        .and_then(|mut s| {
+            Ok(s.query_map([], |r| r.get::<_, String>(1))?
+                .filter_map(Result::ok)
+                .any(|name| name == "marketing_price"))
+        })
+        .map_err(|e| e.to_string())?;
+    if !has_marketing_price {
+        c.execute(
+            "ALTER TABLE product_price_cache ADD COLUMN marketing_price REAL",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn number(value: Option<&serde_json::Value>) -> Option<f64> {
@@ -409,18 +426,91 @@ fn number(value: Option<&serde_json::Value>) -> Option<f64> {
     })
 }
 
-fn cached_price(c: &Connection, sku: &str) -> Option<ProductPrice> {
-    c.query_row("SELECT sku,offer_id,product_id,currency_code,price,old_price,min_price,marketing_seller_price,retail_price,net_price,synced_at FROM product_price_cache WHERE sku=?1",[sku],|r|Ok(ProductPrice{sku:r.get(0)?,offer_id:r.get(1)?,product_id:r.get(2)?,currency_code:r.get(3)?,price:r.get(4)?,old_price:r.get(5)?,min_price:r.get(6)?,marketing_seller_price:r.get(7)?,retail_price:r.get(8)?,net_price:r.get(9)?,synced_at:r.get(10)?})).ok()
+pub(crate) fn cached_price(c: &Connection, sku: &str) -> Option<ProductPrice> {
+    c.query_row("SELECT sku,offer_id,product_id,currency_code,price,old_price,min_price,marketing_price,marketing_seller_price,retail_price,net_price,synced_at FROM product_price_cache WHERE sku=?1",[sku],|r|Ok(ProductPrice{sku:r.get(0)?,offer_id:r.get(1)?,product_id:r.get(2)?,currency_code:r.get(3)?,price:r.get(4)?,old_price:r.get(5)?,min_price:r.get(6)?,marketing_price:r.get(7)?,marketing_seller_price:r.get(8)?,retail_price:r.get(9)?,net_price:r.get(10)?,synced_at:r.get(11)?})).ok()
 }
 
 fn price_logs(c: &Connection, sku: &str) -> Vec<ProductPriceLog> {
     c.prepare("SELECT id,before_price,requested_price,verified_price,status,message,created_at FROM product_price_action_logs WHERE sku=?1 ORDER BY id DESC LIMIT 20").and_then(|mut s|s.query_map([sku],|r|Ok(ProductPriceLog{id:r.get(0)?,before_price:r.get(1)?,requested_price:r.get(2)?,verified_price:r.get(3)?,status:r.get(4)?,message:r.get(5)?,created_at:r.get(6)?}))?.collect()).unwrap_or_default()
 }
 
-fn refresh_price(c: &Connection, sku: &str) -> Result<ProductPrice, String> {
+// The price monitor uses this bulk path: one price request and (where allowed)
+// one Price Details request per batch, instead of two requests for every SKU.
+pub(crate) fn refresh_prices_batch(c: &Connection, skus: &[String]) -> Result<(usize, Vec<String>), String> {
+    if skus.is_empty() { return Ok((0, Vec::new())); }
+    let mut known = Vec::new();
+    let mut errors = Vec::new();
+    for sku in skus {
+        match c.query_row("SELECT COALESCE(offer_id,''),COALESCE(product_id,'') FROM products WHERE sku=?1", [sku], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?))) {
+            Ok((offer, product)) if !offer.is_empty() || !product.is_empty() => known.push((sku.clone(), offer, product)),
+            _ => errors.push(format!("{sku}: 缺少本地商品标识，请先同步 Seller 商品资料")),
+        }
+    }
+    let offers: Vec<String> = known.iter().filter(|(_, offer, _)| !offer.is_empty()).map(|(_, offer, _)| offer.clone()).collect();
+    let product_ids: Vec<i64> = known.iter().filter(|(_, offer, _)| offer.is_empty()).filter_map(|(_, _, product)| product.parse().ok()).collect();
+    let mut items = Vec::new();
+    for filter in [serde_json::json!({"offer_id":offers}), serde_json::json!({"product_id":product_ids})] {
+        if filter.as_object().is_some_and(|m| m.values().all(|v| v.as_array().is_some_and(|a| a.is_empty()))) { continue; }
+        let payload = seller_post(c,"/v5/product/info/prices",&serde_json::json!({"filter":filter,"cursor":"","limit":100}))?;
+        if let Some(batch) = payload.get("items").or_else(||payload.pointer("/result/items")).and_then(|v|v.as_array()) {
+            items.extend(batch.iter().cloned());
+        }
+    }
+    let numeric_skus: Vec<i64> = skus.iter().filter_map(|sku|sku.parse().ok()).collect();
+    let details_response = if numeric_skus.is_empty() { None } else {
+        Some(seller_post(c,"/v1/product/prices/details",&serde_json::json!({"skus":numeric_skus})))
+    };
+    if let Some(Err(error)) = &details_response {
+        // Permission denial is a stable limitation: cache the public price
+        // without inventing a storefront price. Transient failures remain
+        // uncached so the user can retry later.
+        if !error.contains("HTTP 401") && !error.contains("HTTP 403") { return Err(error.clone()); }
+    }
+    let details = details_response.and_then(Result::ok).and_then(|v|v.get("prices").and_then(|p|p.as_array()).cloned()).unwrap_or_default();
+    let mut refreshed = 0;
+    for (sku, offer, product) in known {
+        let item = items.iter().find(|item| {
+            item.get("sku").is_some_and(|v| v.as_str().map(str::to_string).unwrap_or_else(||v.to_string()) == sku)
+                || item.get("offer_id").and_then(|v|v.as_str()) == Some(offer.as_str()) && !offer.is_empty()
+                || item.get("product_id").is_some_and(|v| v.as_str().map(str::to_string).unwrap_or_else(||v.to_string()) == product) && !product.is_empty()
+        });
+        let Some(item) = item else { errors.push(format!("{sku}: Ozon 未返回价格")); continue; };
+        let detailed = details.iter().find(|v|v.get("sku").is_some_and(|x| x.as_str().map(str::to_string).unwrap_or_else(||x.to_string()) == sku));
+        match cache_price_response(c, &sku, &offer, &product, item, detailed) {
+            Ok(_) => refreshed += 1,
+            Err(e) => errors.push(format!("{sku}: {e}")),
+        }
+    }
+    Ok((refreshed, errors))
+}
+
+fn cache_price_response(c: &Connection, sku: &str, offer_id: &str, product_id: &str, item: &serde_json::Value, detailed: Option<&serde_json::Value>) -> Result<ProductPrice, String> {
+    let price_obj = item.get("price").unwrap_or(item);
+    let customer_price = detailed.and_then(|v|v.pointer("/customer_price/amount")).and_then(|v|number(Some(v)));
+    let detailed_promotion_price = detailed.and_then(|v|v.pointer("/price/amount")).and_then(|v|number(Some(v)));
+    let current = ProductPrice {
+        sku: sku.to_string(),
+        offer_id: item.get("offer_id").and_then(|v|v.as_str()).unwrap_or(offer_id).to_string(),
+        product_id: item.get("product_id").map(|v|v.as_str().map(str::to_string).unwrap_or_else(||v.to_string())).unwrap_or_else(||product_id.to_string()),
+        currency_code: price_obj.get("currency_code").or_else(||item.get("currency_code")).and_then(|v|v.as_str()).unwrap_or("RUB").to_string(),
+        price: number(price_obj.get("price")).or_else(||number(price_obj.get("marketing_seller_price"))).unwrap_or(0.0),
+        old_price: number(price_obj.get("old_price")).unwrap_or(0.0),
+        min_price: number(price_obj.get("min_price")).unwrap_or(0.0),
+        marketing_price: customer_price.or_else(||number(price_obj.get("marketing_price"))),
+        marketing_seller_price: detailed_promotion_price.or_else(||number(price_obj.get("marketing_seller_price"))),
+        retail_price: number(price_obj.get("retail_price")),
+        net_price: number(price_obj.get("net_price")),
+        synced_at: chrono::Local::now().to_rfc3339(),
+    };
+    let raw_json = serde_json::json!({"priceInfo":item,"priceDetails":detailed}).to_string();
+    c.execute("INSERT INTO product_price_cache(sku,offer_id,product_id,currency_code,price,old_price,min_price,marketing_price,marketing_seller_price,retail_price,net_price,raw_json,synced_at)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,CURRENT_TIMESTAMP)ON CONFLICT(sku)DO UPDATE SET offer_id=excluded.offer_id,product_id=excluded.product_id,currency_code=excluded.currency_code,price=excluded.price,old_price=excluded.old_price,min_price=excluded.min_price,marketing_price=excluded.marketing_price,marketing_seller_price=excluded.marketing_seller_price,retail_price=excluded.retail_price,net_price=excluded.net_price,raw_json=excluded.raw_json,synced_at=CURRENT_TIMESTAMP",params![current.sku,current.offer_id,current.product_id,current.currency_code,current.price,current.old_price,current.min_price,current.marketing_price,current.marketing_seller_price,current.retail_price,current.net_price,raw_json]).map_err(|e|e.to_string())?;
+    cached_price(c, sku).ok_or("价格缓存写入失败".into())
+}
+
+pub(crate) fn refresh_price(c: &Connection, sku: &str) -> Result<ProductPrice, String> {
     let (offer_id, product_id): (String, String) = c
         .query_row(
-            "SELECT COALESCE(offer_id,''),COALESCE(product_id,'') FROM products WHERE sku=?1",
+            "SELECT COALESCE(NULLIF(p.offer_id,''),pp.offer_id,''),COALESCE(NULLIF(p.product_id,''),pp.product_id,'') FROM (SELECT ?1 AS sku) k LEFT JOIN products p ON p.sku=k.sku LEFT JOIN product_price_cache pp ON pp.sku=k.sku",
             [sku],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -445,6 +535,34 @@ fn refresh_price(c: &Connection, sku: &str) -> Result<ProductPrice, String> {
         .and_then(|v| v.first())
         .ok_or("Ozon 未返回该产品的价格；请检查商品标识与 API 权限")?;
     let price_obj = item.get("price").unwrap_or(item);
+    // Ozon removed `marketing_price` (the actual buyer-facing storefront price)
+    // from /v5/product/info/prices. Premium Pro exposes it as
+    // /v1/product/prices/details -> customer_price.amount.
+    let detailed_response = seller_post(
+        c,
+        "/v1/product/prices/details",
+        &serde_json::json!({"skus":[sku]}),
+    );
+    if let Err(error) = &detailed_response {
+        if error.contains("限频") || error.contains("HTTP 429") {
+            return Err(error.clone());
+        }
+    }
+    let detailed = detailed_response.ok().and_then(|payload| {
+        payload
+            .get("prices")
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first())
+            .cloned()
+    });
+    let customer_price = detailed
+        .as_ref()
+        .and_then(|v| v.pointer("/customer_price/amount"))
+        .and_then(|v| number(Some(v)));
+    let detailed_promotion_price = detailed
+        .as_ref()
+        .and_then(|v| v.pointer("/price/amount"))
+        .and_then(|v| number(Some(v)));
     let current = ProductPrice {
         sku: sku.to_string(),
         offer_id: item
@@ -471,29 +589,44 @@ fn refresh_price(c: &Connection, sku: &str) -> Result<ProductPrice, String> {
             .unwrap_or(0.0),
         old_price: number(price_obj.get("old_price")).unwrap_or(0.0),
         min_price: number(price_obj.get("min_price")).unwrap_or(0.0),
-        marketing_seller_price: number(price_obj.get("marketing_seller_price")),
+        marketing_price: customer_price.or_else(|| number(price_obj.get("marketing_price"))),
+        marketing_seller_price: detailed_promotion_price
+            .or_else(|| number(price_obj.get("marketing_seller_price"))),
         retail_price: number(price_obj.get("retail_price")),
         net_price: number(price_obj.get("net_price")),
         synced_at: chrono::Local::now().to_rfc3339(),
     };
-    c.execute("INSERT INTO product_price_cache(sku,offer_id,product_id,currency_code,price,old_price,min_price,marketing_seller_price,retail_price,net_price,raw_json,synced_at)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,CURRENT_TIMESTAMP)ON CONFLICT(sku)DO UPDATE SET offer_id=excluded.offer_id,product_id=excluded.product_id,currency_code=excluded.currency_code,price=excluded.price,old_price=excluded.old_price,min_price=excluded.min_price,marketing_seller_price=excluded.marketing_seller_price,retail_price=excluded.retail_price,net_price=excluded.net_price,raw_json=excluded.raw_json,synced_at=CURRENT_TIMESTAMP",params![current.sku,current.offer_id,current.product_id,current.currency_code,current.price,current.old_price,current.min_price,current.marketing_seller_price,current.retail_price,current.net_price,item.to_string()]).map_err(|e|e.to_string())?;
+    let raw_json = serde_json::json!({"priceInfo":item,"priceDetails":detailed}).to_string();
+    c.execute("INSERT INTO product_price_cache(sku,offer_id,product_id,currency_code,price,old_price,min_price,marketing_price,marketing_seller_price,retail_price,net_price,raw_json,synced_at)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,CURRENT_TIMESTAMP)ON CONFLICT(sku)DO UPDATE SET offer_id=excluded.offer_id,product_id=excluded.product_id,currency_code=excluded.currency_code,price=excluded.price,old_price=excluded.old_price,min_price=excluded.min_price,marketing_price=excluded.marketing_price,marketing_seller_price=excluded.marketing_seller_price,retail_price=excluded.retail_price,net_price=excluded.net_price,raw_json=excluded.raw_json,synced_at=CURRENT_TIMESTAMP",params![current.sku,current.offer_id,current.product_id,current.currency_code,current.price,current.old_price,current.min_price,current.marketing_price,current.marketing_seller_price,current.retail_price,current.net_price,raw_json]).map_err(|e|e.to_string())?;
     cached_price(c, sku).ok_or("价格缓存写入失败".into())
 }
 
 #[tauri::command]
-pub fn refresh_product_price(sku: String, state: State<AppState>) -> Result<ProductPrice, String> {
-    let c = db(&state)?;
+pub async fn refresh_product_price(sku: String, state: State<'_, AppState>) -> Result<ProductPrice, String> {
+    let snapshot = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || refresh_product_price_blocking(sku, &snapshot))
+        .await.map_err(|e| format!("价格读取任务异常：{e}"))?
+}
+
+fn refresh_product_price_blocking(sku: String, state: &AppState) -> Result<ProductPrice, String> {
+    let c = db(state)?;
     ensure(&c)?;
     refresh_price(&c, sku.trim())
 }
 
 #[tauri::command]
-pub fn update_product_price(
+pub async fn update_product_price(
     form: ProductPriceUpdate,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<ProductPrice, String> {
+    let snapshot = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || update_product_price_blocking(form, &snapshot))
+        .await.map_err(|e| format!("商品改价任务异常：{e}"))?
+}
+
+fn update_product_price_blocking(form: ProductPriceUpdate, state: &AppState) -> Result<ProductPrice, String> {
     validate_price_update(&form)?;
-    let c = db(&state)?;
+    let c = db(state)?;
     ensure(&c)?;
     let before = refresh_price(&c, form.sku.trim()).or_else(|_| {
         cached_price(&c, form.sku.trim()).ok_or_else(|| "无法取得改价前价格".to_string())
@@ -570,7 +703,7 @@ pub fn update_product_price(
     c.execute("UPDATE product_price_action_logs SET status=?1,message=?2,response_json=?3,verified_price=?4,verified_at=CASE WHEN ?4 IS NULL THEN '' ELSE CURRENT_TIMESTAMP END WHERE id=?5",params![status,message,response.to_string(),verified_price,log_id]).map_err(|e|e.to_string())?;
     if status == "verified" {
         if let Err(error) = super::ad_experiments::capture_operation(
-            &state,
+            state,
             vec![form.sku.clone()],
             "price_change",
             serde_json::json!({"price":before.price}),

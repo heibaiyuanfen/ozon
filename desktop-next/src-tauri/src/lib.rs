@@ -25,6 +25,7 @@ mod mercadolibre;
 mod ozon_monthly;
 mod packing;
 mod price_center;
+mod price_intelligence;
 mod product_master;
 mod product_worker;
 mod purchase_orders;
@@ -100,6 +101,15 @@ fn update_competitor_task(id: i64, update: impl FnOnce(&mut CompetitorCollection
 pub(crate) struct AppState {
     pub(crate) data_dir: PathBuf,
     active_shop_id: Mutex<String>,
+}
+
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        Self {
+            data_dir: self.data_dir.clone(),
+            active_shop_id: Mutex::new(self.active_shop_id.lock().unwrap().clone()),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1320,7 +1330,7 @@ fn setting(conn: &Connection, key: &str) -> String {
     .unwrap_or_default()
 }
 
-fn active_shop_kind(state: &AppState) -> Result<String, String> {
+pub(crate) fn active_shop_kind(state: &AppState) -> Result<String, String> {
     let registry = read_registry(&state.data_dir)?;
     let id = state
         .active_shop_id
@@ -1402,9 +1412,13 @@ pub(crate) fn seller_post(
     let url = format!("https://api-seller.ozon.ru{path}");
     let body_text = body.to_string();
     let mut response = None;
-    let max_attempts = if path == "/v1/analytics/data" { 2 } else { 4 };
+    // Price scans run in small UI batches. Return rate limits promptly so the
+    // scanner can stop, rather than sleeping for minutes inside one command.
+    let price_scan = matches!(path, "/v5/product/info/prices" | "/v1/product/prices/details");
+    let max_attempts = if price_scan { 1 } else if path == "/v1/analytics/data" { 2 } else { 4 };
     for attempt in 0..max_attempts {
         match ureq::post(&url)
+            .timeout(std::time::Duration::from_secs(if price_scan { 25 } else { 60 }))
             .set("Client-Id", &client_id)
             .set("Api-Key", &api_key)
             .set("Content-Type", "application/json")
@@ -1554,7 +1568,7 @@ fn seller_get(c: &Connection, path: &str) -> Result<serde_json::Value, String> {
 }
 
 fn promotion_number(value: &serde_json::Value, key: &str) -> f64 {
-    value.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0)
+    value.get(key).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0.0)
 }
 
 fn promotion_text(value: &serde_json::Value, key: &str) -> String {
@@ -1566,8 +1580,14 @@ fn promotion_text(value: &serde_json::Value, key: &str) -> String {
 }
 
 #[tauri::command]
-fn ozon_promotions(refresh: bool, state: State<AppState>) -> Result<serde_json::Value, String> {
-    let c = db(&state)?;
+async fn ozon_promotions(refresh: bool, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let snapshot = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || ozon_promotions_blocking(refresh, &snapshot))
+        .await.map_err(|e| format!("促销查询任务异常：{e}"))?
+}
+
+fn ozon_promotions_blocking(refresh: bool, state: &AppState) -> Result<serde_json::Value, String> {
+    let c = db(state)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS ozon_promotion_cache(cache_key TEXT PRIMARY KEY,payload TEXT NOT NULL,saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e| e.to_string())?;
     if !refresh {
         if let Ok((payload, saved_at)) = c.query_row(
@@ -1619,12 +1639,18 @@ fn ozon_promotions(refresh: bool, state: State<AppState>) -> Result<serde_json::
 }
 
 #[tauri::command]
-fn ozon_promotion_products(
+async fn ozon_promotion_products(
     action_id: i64,
     mode: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let c = db(&state)?;
+    let snapshot = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || ozon_promotion_products_blocking(action_id, mode, &snapshot))
+        .await.map_err(|e| format!("活动商品查询任务异常：{e}"))?
+}
+
+fn ozon_promotion_products_blocking(action_id: i64, mode: String, state: &AppState) -> Result<serde_json::Value, String> {
+    let c = db(state)?;
     let path = if mode == "candidates" {
         "/v1/actions/candidates"
     } else {
@@ -1652,6 +1678,7 @@ fn ozon_promotion_products(
                 "price": promotion_number(item,"price"),
                 "actionPrice": promotion_number(item,"action_price"),
                 "maxActionPrice": promotion_number(item,"max_action_price"),
+                "minActionPrice": promotion_number(item,"min_action_price"),
                 "stock": promotion_number(item,"stock") as i64,
                 "minStock": promotion_number(item,"min_stock") as i64,
                 "addMode": promotion_text(item,"add_mode")
@@ -1666,15 +1693,21 @@ fn ozon_promotion_products(
 }
 
 #[tauri::command]
-fn ozon_promotion_product_action(
+async fn ozon_promotion_product_action(
     action_id: i64,
     action: String,
     product_id: i64,
     action_price: Option<f64>,
     stock: Option<i64>,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let c = db(&state)?;
+    let snapshot = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || ozon_promotion_product_action_blocking(action_id, action, product_id, action_price, stock, &snapshot))
+        .await.map_err(|e| format!("促销改价任务异常：{e}"))?
+}
+
+fn ozon_promotion_product_action_blocking(action_id: i64, action: String, product_id: i64, action_price: Option<f64>, stock: Option<i64>, state: &AppState) -> Result<serde_json::Value, String> {
+    let c = db(state)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS ozon_promotion_action_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,action_id INTEGER NOT NULL,product_id INTEGER NOT NULL,action TEXT NOT NULL,action_price REAL,stock INTEGER,status TEXT NOT NULL,message TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e| e.to_string())?;
     let (path, body) = if action == "deactivate" {
         (
@@ -6899,7 +6932,7 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
     business_report_blocking(range, &state)
 }
 
-fn cross_border_shipping(price: f64, weight: f64) -> Option<f64> {
+pub(crate) fn cross_border_shipping(price: f64, weight: f64) -> Option<f64> {
     if price < 0.0 || weight < 0.0 {
         return None;
     }
@@ -13420,7 +13453,13 @@ pub fn run() {
             insights::product_detail,
             insights::refresh_product_price,
             insights::update_product_price,
-            insights::save_product_cluster_weights
+            insights::save_product_cluster_weights,
+            price_intelligence::price_intelligence,
+            price_intelligence::price_reprice_suggestions,
+            price_intelligence::resolve_reprice_product_ids,
+            price_intelligence::price_reprice_validate,
+            price_intelligence::refresh_price_intelligence,
+            price_intelligence::save_profit_monitor_settings
         ])
         .run(tauri::generate_context!())
         .expect("failed to run app")

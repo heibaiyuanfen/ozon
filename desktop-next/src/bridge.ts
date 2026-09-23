@@ -933,6 +933,24 @@ export async function refreshProductPrice(
 ): Promise<import("./types").ProductPrice> {
   return invoke("refresh_product_price", { sku });
 }
+export async function priceIntelligence(): Promise<import("./types").PriceIntelligenceData> {
+    return invoke("price_intelligence");
+}
+export async function priceRepriceSuggestions(skus: string[]): Promise<import("./types").RepriceSuggestion[]> {
+    return invoke("price_reprice_suggestions", { skus });
+}
+export async function resolveRepriceProductIds(skus: string[]): Promise<Record<string, string>> {
+    return invoke("resolve_reprice_product_ids", { skus });
+}
+export async function priceRepriceValidate(sku: string, priceCny: number): Promise<number> {
+    return invoke("price_reprice_validate", { sku, priceCny });
+}
+export async function refreshPriceIntelligence(skus: string[]): Promise<import("./types").PriceIntelligenceRefreshResult> {
+  return invoke("refresh_price_intelligence", { skus });
+}
+export async function saveProfitMonitorSettings(warningMargin: number): Promise<import("./types").PriceIntelligenceData> {
+  return invoke("save_profit_monitor_settings", { form: { warningMargin } });
+}
 export async function updateProductPrice(
   form: import("./types").ProductPriceUpdate,
 ): Promise<import("./types").ProductPrice> {
