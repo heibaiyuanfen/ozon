@@ -1826,3 +1826,58 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 插件实际售价、重量、体积、类目、库存、卖家、上架日期及商品图独立保存到 `competitor_shop_seerfar_capture`，不覆盖 Excel 售价或其他原始字段。前端独立显示补全结果及采集时间；未收到数据时提示超时，不将缺失字段写为零。
 - `cargo check --locked`、`cargo test --locked competitor_capture::tests`（2 项通过）、`pnpm build`、`desktop-next/scripts/build-tauri-release.cmd` 均通过。Release 与根目录 `ozon-analytics-next.exe` 均为 33,568,256 bytes，修改时间 `2026-09-23 22:43:58`，SHA-256 均为 `D6C9CBB133E41EAA172A0A0E7C75E9395F695620256A93637FE5D8848F685F5C`。
 - 用户截图证实 Ozon 商品页面可打开且 Seerfar 面板可见；但默认本土店数据库的真实回传记录仍为 0 条。辅助扩展的安装状态尚未核实，未完成真实浏览器到 ERP 的端到端验收。上一轮尝试桌面可见验收时用户按 Escape 停止 Computer Use，故不能声称正式程序 UI 或真实采集已验收。
+
+## 2026-09-24：拉取更新后的正式启动器重建
+
+- 对当前提交 `32f1bfb` 执行 `cargo check --locked`、`cargo test --locked`（197 passed、5 ignored）及 `pnpm build`，均通过；再用 `desktop-next/scripts/build-tauri-release.cmd` 完成正式 Release 构建。
+- 将 Release 产物覆盖到唯一用户入口 `Ozon ERP.exe`，未新增根目录第二份 ERP EXE。两者均为 33,557,504 bytes，SHA-256 均为 `EAF2B4858776C4597D333A54CAC2952456BCD221345DCD1B0C5FDF680F446831`。
+- 可见验收：启动后 Ozon ERP 窗口正常加载「价格与利润监控」，Web 内容地址为内嵌 `http://tauri.localhost/`，并非开发服务器 `localhost:1420`。未运行真实 Ozon 改价或数据同步。
+- 清理核对：根目录只有 `Ozon ERP.exe` 这个 ERP 启动器；`competitor-collector.exe` 是独立竞品采集工具，构建目录 EXE/旧安装包是产物而非额外启动器。因此没有安全可确认的旧 ERP 启动器需要删除，本次未删除文件。
+
+## 2026-09-24：Seerfar 补全扩展的慢加载兼容性
+
+- 浏览器辅助扩展允许面板使用全角 `SKU：` 标签；监听 DOM 文本变更，并每 2 秒重试一次，以覆盖面板先渲染容器后填充文字、以及开放式 Shadow DOM 未触发页面观察器的情形。等待时长与本机一次性接收窗口统一为 90 秒。仍不读取跨源 iframe、closed Shadow DOM 或其他扩展的私有数据。
+- 新增 `seerfar-bridge/content.test.cjs`：验证全角 SKU 标签可回传字段，且不匹配的 SKU 不回传。`node --test` 2 项通过；`cargo check --locked`、`cargo test --locked competitor_capture::tests`（2 项通过）、`pnpm build` 及正式 `build-tauri-release.cmd` 均通过。
+- Release 产物 SHA-256 为 `D486E5BA44B34A64979A3BF08EB8B3A483F5E5877F139B06E2462CE318BBFBB7`。旧 `Ozon ERP.exe` 进程仍在运行，正常关闭请求未生效；为避免丢失用户未保存工作，本轮尚未强制结束进程、覆盖根目录入口或完成新版启动器可见验收。等待用户退出软件后继续交付。
+- 已安装的浏览器扩展不会随 ERP 启动器自动更新，需用户在 Chrome/Edge 扩展管理页手动重新加载。真实 Seerfar 面板采集到 SQLite 的端到端流程仍待验收。
+- 用户退出旧版后，已将正式 Release 产物覆盖根目录唯一用户入口 `Ozon ERP.exe`。两者均为 33,557,504 bytes，SHA-256 均为 `D486E5BA44B34A64979A3BF08EB8B3A483F5E5877F139B06E2462CE318BBFBB7`。启动后主界面“经营总览”加载正常，Web 地址为内嵌 `http://tauri.localhost/`。继续导航至“竞品店铺拆解”时检测到用户正在操作窗口，按 Computer Use 安全流程停止自动输入；该页面与真实 Seerfar 回传未作可见验收。
+
+## 2026-09-24：Seerfar 采集失败可见诊断
+
+- 用户已在 Chrome 为 `127.0.0.1` 与两个 Ozon 域名开启访问权限，但仍反馈无反应、无回填。本机只读核对：默认本土店数据库有 97 条竞品商品、跨境店 36 条、另一店 0 条；三个数据库的 `competitor_shop_seerfar_capture` 记录均为 0。现有信息尚不足以判定是采集标记丢失、面板解析失败还是本机回传失败。
+- 浏览器辅助扩展在识别到 ERP 一次性采集链接时于 Ozon 页面右上角显示状态条，分别提示等待面板、SKU 不一致、售价未识别、回填中、本机错误和成功；普通商品页不显示。状态条只写本地 DOM，不上传额外数据。扩展需在 `chrome://extensions` 手动重新加载后生效。
+- `node --test desktop-next/seerfar-bridge/content.test.cjs` 2 项通过；`cargo check --locked`、`cargo test --locked competitor_capture::tests`（2 项通过）、`pnpm build` 与正式 `build-tauri-release.cmd` 均通过。新 Release SHA-256 为 `F9FBB7A983DE5772CFE86ABEAFF7AB3EE086EF43F6FFB5B927F6C43028FD6358`。
+- 此轮未修改 ERP 本体源码；旧 `Ozon ERP.exe` 仍在运行，未强制关闭、未覆盖根目录 EXE。待用户保存并退出后按交付规则覆盖与验收；真实 Seerfar 端到端回传仍未验收。
+- 用户随后关闭 ERP 后，已覆盖根目录唯一入口 `Ozon ERP.exe`；正式产物与根目录均为 33,557,504 bytes、SHA-256 `F9FBB7A983DE5772CFE86ABEAFF7AB3EE086EF43F6FFB5B927F6C43028FD6358`。启动后确认主界面从内嵌 `http://tauri.localhost/` 加载，且可见“竞品店铺拆解”导航入口；进一步点击时用户按 Escape 停止 Computer Use，故未执行该页面的可见验收或真实采集验收。
+
+## 2026-09-24：Seerfar 面板可见却采集超时的读取修正
+
+- 用户截图同时显示 ERP 的“等待超时”及 Ozon 商品页右上角由本扩展产生的“采集超时”状态条，页面上 Seerfar 面板和目标 SKU、实际售价肉眼可见。由此确认 ERP 已发起采集、扩展已识别一次性链接；故障在面板 DOM 读取阶段，不能再归因于扩展未安装或网站访问权限。
+- 扩展优先扫描同页可见 `innerText` 中目标 SKU 与“卖家实际售价”，并将祖先搜索深度由 9 层扩至 24 层、放宽文本长度限制；仍严格核对商品 SKU，避免误把别的商品数据回填。超时提示区分目标 SKU 不匹配、字段识别失败以及售价标签不在可读取 DOM（可能为其他扩展的隔离 iframe 或封闭 Shadow DOM）。不尝试跨越浏览器隔离边界。
+- 扩展测试 4 项通过（含深层 DOM、分支文本与错误 SKU），`cargo check --locked`、`cargo test --locked competitor_capture::tests`（2 项通过）、`pnpm build` 和正式 `build-tauri-release.cmd` 均通过。新 Release SHA-256 为 `02890B9CBD69EA4FF61CFD3BC170AE368C5A30E22354AC532025D1798333B53F`。
+- 当前 ERP 进程仍在运行，本轮未强制关闭或覆盖根目录 `Ozon ERP.exe`；浏览器扩展源码可经 `chrome://extensions` 手动重新加载立即测试。待用户关闭 ERP 后完成根目录 EXE 覆盖与可见验收。真实 Seerfar 数据回填尚未确认成功。
+- 用户关闭 ERP 后，已将正式 Release 覆盖根目录唯一用户入口 `Ozon ERP.exe`；根目录与 Release 产物均为 33,557,504 bytes、SHA-256 `02890B9CBD69EA4FF61CFD3BC170AE368C5A30E22354AC532025D1798333B53F`。启动后“经营总览”正常加载，Web 内容地址为内嵌 `http://tauri.localhost/`，不是开发服务器。此轮未执行真实 Seerfar 补全；Chrome 辅助扩展仍需手动重新加载，并以实际回填结果验收。
+
+## 2026-09-24：Seerfar 同 SKU 误报修正
+
+- 用户截图中商品页与 Seerfar 面板都显示 SKU `4753186677`，但扩展报告“找到售价标签，未找到匹配的商品 SKU”；这是可见文本解析失败，不能视为真实 SKU 不同。ERP 顶部当时显示的卡片是另一商品，不能据此判断这次请求的目标商品。
+- 扩展读取时剔除零宽字符，兼容 SKU 标签与数字之间的换行、全角冒号及分支文本；保留目标 SKU 精确核对，错误 SKU 不发送至本机接收端。新增 2 项测试，总计 6 项通过。`cargo check --locked`、`cargo test --locked competitor_capture::tests`（2 项通过）、`pnpm build` 及正式 `build-tauri-release.cmd` 均通过。
+- 正式 Release SHA-256 为 `A5E12FC4CC82D5BC17BFB8DCDFE207A2AA680F5F6C453FBC1C2422C630B3DD3A`。根目录 `Ozon ERP.exe` 仍在运行，未强制关闭或覆盖；浏览器扩展可在 `chrome://extensions` 手动重新加载后测试。真实 Seerfar 回填仍待验收。
+
+## 2026-09-24：竞品飞书同步按筛选勾选及包装尺寸映射
+
+- 审计发现竞品数据库只保存 Excel 首条图片 URL、Seerfar 采集只保存页面 `og:image` 一条 URL，没有本地批量下载图片。商品卡图片加懒加载，避免列表打开即请求所有图片；飞书“图片链接”仍仅写一条 URL，不传图片二进制。
+- 竞品页加入售价和销量的独立或组合区间筛选、匹配数量、逐个勾选/勾选当前筛选结果/清空勾选；飞书按钮仅在有勾选时启用，提交前显示数量并确认。后端要求明确的商品 ID 集合、核对所选商品属于当前店铺，不再默认同步整店。
+- Seerfar `dimensions_mm` 按长宽高次序换算为厘米，分别写到飞书“包装长/包装宽/包装高”数值列；无有效尺寸则不填。包装重优先用 Seerfar 克重换算为千克，否则沿用 Excel 重量。既有“品名”仍写商品链接。新增尺寸解析测试。
+- `cargo check --locked`、`cargo test --locked competitor_shop::tests`（2 项通过）、`pnpm build` 均通过。正式 Release 构建通过，但随后补充了“重新导入时清空勾选”的前端改动，需重新执行正式构建。用户当前正在运行根目录 `Ozon ERP.exe`，未强制结束或覆盖，也未向飞书实际发送任何数据；可见验收与正式覆盖待关闭 ERP 后完成。
+- 补充改动后已重新执行正式 `build-tauri-release.cmd`，构建成功；最终 Release SHA-256 为 `B25C61D8B70C57726BF951223B63D9D4F2D0763ECA91DA2858EE4EBF4A5C42E5`。根目录旧 ERP 进程仍在运行，保持未覆盖状态，等待用户保存并关闭后再覆盖和可见验收。
+- 用户确认关闭后，核实旧 ERP 进程已退出；正式 Release 覆盖根目录唯一入口 `Ozon ERP.exe`，两者 SHA-256 均为 `B25C61D8B70C57726BF951223B63D9D4F2D0763ECA91DA2858EE4EBF4A5C42E5`，根目录文件大小 33,536,000 bytes。启动根目录入口后，“经营总览”页面可见并加载本地缓存数据。未实际进入“竞品店铺拆解”执行筛选，也未向飞书发送记录；真实 Seerfar 尺寸回填与飞书列映射仍待实际数据验收。
+
+## 2026-09-24：经营总览自选日期与 9 月 22 日数据差异核查
+
+- 默认本土店只读核查：`sales_daily` 2026-09-22 共 85 个 SKU、279 件、698,315 ₽，均来自 Seller Analytics API；`ad_daily` 当日 27 条活动级汇总（`sku=''`）合计 34,099.58 ₽，最后更新于本地 `2026-09-24 05:40:22`。ERP 趋势图正是对这些字段逐日求和，不是图表绘制误差。
+- Ozon 后台截图同日“按售价计算”合计 304,236 ₽、“按最低价格计算”合计 695,273 ₽；其中 GJYB001-YELLOW 的最低价格金额 75,168 ₽ 与本地 Seller API `revenue` 完全一致（27 件）。据此现有 ERP `revenue` 与后台最低价格口径高度一致，而不能标成实际售价口径；总差 3,042 ₽ 与件数 277/279 的差异仍需在平台同一快照下核对，未擅改历史数据或利润公式。
+- 广告后台截图 34,102.48 ₽ 与本地 API 快照相差 2.90 ₽；本地使用 27 条活动级日统计，总和已核对，并未同时加上 SKU 级数据造成重复。截图时间晚于本地快照，可能是平台对历史花费的后续调整；没有再次读取平台同一时点的原始 API 响应，不能断言具体是哪一条活动变化。
+- 经营总览趋势区增加自选起止日期，快捷 7 天/30 天/月份保留；选定日期驱动仪表盘从本地缓存查询该区间，不自动触发 API 同步。自选范围限定在经营总览，不影响订单和广告页面原有日期范围。`pnpm build`、`cargo check --locked`、`cargo test --locked competitor_shop::tests`（2 项）已通过；最终范围隔离调整后需重新正式构建。当前用户仍在运行 `Ozon ERP.exe`，不强制结束，待用户关闭后覆盖及可见验收。
+- 范围隔离调整后已通过正式 `build-tauri-release.cmd`，最终 Release SHA-256 为 `870589987F2FAA12A04B72927965831E84EF95E7C5987872C284C9C766E0F526`。当前根目录旧 `Ozon ERP.exe` 仍在运行（PID 25832），未覆盖或声称用户已看到新日期控件。
+- 用户确认关闭后，核实旧 ERP 进程已退出；已用正式 Release 覆盖根目录唯一入口 `Ozon ERP.exe`，文件大小 33,536,000 bytes，入口与 Release 的 SHA-256 均为 `870589987F2FAA12A04B72927965831E84EF95E7C5987872C284C9C766E0F526`。从根目录入口启动后，经营总览与趋势区自选起止日期控件可见，本地缓存数据正常加载；未执行平台重新同步或修改历史数据。

@@ -389,11 +389,15 @@ function RangeTabs({
   setDays,
   monthOffset,
   setMonthOffset,
+  customRange,
+  setCustomRange,
 }: {
   days: number;
   setDays: (days: number) => void;
   monthOffset?: number | null;
   setMonthOffset?: (offset: number | null) => void;
+  customRange?: DateRange | null;
+  setCustomRange?: (range: DateRange | null) => void;
 }) {
   return (
     <div className="range-row">
@@ -404,9 +408,10 @@ function RangeTabs({
           [90, "本季度"],
         ].map(([value, label]) => (
           <button
-            className={monthOffset == null && days === value ? "selected" : ""}
+            className={!customRange && monthOffset == null && days === value ? "selected" : ""}
             onClick={() => {
               setMonthOffset?.(null);
+              setCustomRange?.(null);
               setDays(value as number);
             }}
             key={value}
@@ -417,17 +422,21 @@ function RangeTabs({
         {setMonthOffset &&
           recentMonthChoices().map((choice) => (
             <button
-              className={monthOffset === choice.offset ? "selected" : ""}
-              onClick={() => setMonthOffset(choice.offset)}
+              className={!customRange && monthOffset === choice.offset ? "selected" : ""}
+              onClick={() => { setCustomRange?.(null); setMonthOffset(choice.offset); }}
               key={`month-${choice.offset}`}
             >
               {choice.label}
             </button>
           ))}
       </div>
+      {setCustomRange && <div className="dashboard-custom-range">
+        <label>开始<input aria-label="趋势开始日期" type="date" value={customRange?.from || ""} onChange={event => setCustomRange({from:event.target.value,to:customRange?.to || event.target.value})}/></label>
+        <label>结束<input aria-label="趋势结束日期" type="date" value={customRange?.to || ""} min={customRange?.from || undefined} onChange={event => setCustomRange({from:customRange?.from || event.target.value,to:event.target.value})}/></label>
+      </div>}
       <div className="date-pill">
         <CalendarDays size={16} />
-        {monthOffset == null ? `最近 ${days} 天` : `${calendarMonthRange(monthOffset).from} 至 ${calendarMonthRange(monthOffset).to}`}
+        {customRange ? `${customRange.from} 至 ${customRange.to}` : monthOffset == null ? `最近 ${days} 天` : `${calendarMonthRange(monthOffset).from} 至 ${calendarMonthRange(monthOffset).to}`}
       </div>
     </div>
   );
@@ -536,6 +545,8 @@ function Dashboard({
   setDays,
   monthOffset,
   setMonthOffset,
+  customRange,
+  setCustomRange,
   refreshing,
   refresh,
   range,
@@ -547,6 +558,8 @@ function Dashboard({
   setDays: (n: number) => void;
   monthOffset: number | null;
   setMonthOffset: (offset: number | null) => void;
+  customRange: DateRange | null;
+  setCustomRange: (range: DateRange | null) => void;
   refreshing: boolean;
   refresh: () => void;
   range: DateRange;
@@ -702,7 +715,7 @@ function Dashboard({
                 销量
               </button>
             </div>
-            <RangeTabs days={days} setDays={setDays} monthOffset={monthOffset} setMonthOffset={setMonthOffset} />
+            <RangeTabs days={days} setDays={setDays} monthOffset={monthOffset} setMonthOffset={setMonthOffset} customRange={customRange} setCustomRange={setCustomRange} />
           </div>
         </div>
         <div className="metric-strip">
@@ -1322,6 +1335,7 @@ export function App() {
     [shops, setShops] = useState<Shop[]>([]),
     [days, setDays] = useState(7),
     [dashboardMonthOffset, setDashboardMonthOffset] = useState<number | null>(null),
+    [dashboardCustomRange, setDashboardCustomRange] = useState<DateRange | null>(null),
     [dash, setDash] = useState(emptyDashboard),
     [orderRows, setOrderRows] = useState<OrderRow[]>([]),
     [ads, setAds] = useState(emptyAds),
@@ -1336,8 +1350,8 @@ export function App() {
   const activeShop = shops.find((s) => s.active) ?? shops[0],
     currency = activeShop?.kind === "cross_border" ? "CNY" : "RUB",
     range = useMemo(
-      () => dashboardMonthOffset == null ? rangeFor(days) : calendarMonthRange(dashboardMonthOffset),
-      [days, dashboardMonthOffset],
+      () => page === "dashboard" && dashboardCustomRange?.from && dashboardCustomRange?.to && dashboardCustomRange.from <= dashboardCustomRange.to ? dashboardCustomRange : page === "dashboard" && dashboardMonthOffset != null ? calendarMonthRange(dashboardMonthOffset) : rangeFor(days),
+      [page, days, dashboardMonthOffset, dashboardCustomRange],
     ),
     monthRange = useMemo(currentMonthRange, []),
     deferredQuery = useDeferredValue(query);
@@ -1454,6 +1468,8 @@ export function App() {
                 setDays={setDays}
                 monthOffset={dashboardMonthOffset}
                 setMonthOffset={setDashboardMonthOffset}
+                customRange={dashboardCustomRange}
+                setCustomRange={setDashboardCustomRange}
                 refreshing={refreshing}
                 refresh={load}
                 range={range}

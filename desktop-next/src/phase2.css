@@ -1791,6 +1791,10 @@
 .trend-actions .date-pill {
   white-space: nowrap;
 }
+.trend-actions .range-row{flex-wrap:wrap;justify-content:flex-end;max-width:100%}
+.dashboard-custom-range{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dashboard-custom-range label{display:flex;align-items:center;gap:4px;color:#62738c;font-size:11px}
+.dashboard-custom-range input{width:126px;padding:7px;border:1px solid #dfe6ef;border-radius:8px;background:#fff;color:#263a5a;font-size:11px}
 .inventory-sync-bar {
   display: flex;
   align-items: center;

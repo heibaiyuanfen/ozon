@@ -974,7 +974,7 @@ export async function importCompetitorShopExcel(path:string):Promise<import("./t
 export async function competitorShopNames():Promise<string[]>{return invoke("competitor_shop_names")}
 export async function competitorShopProducts(shopName:string,query:string):Promise<import("./types").CompetitorShopProduct[]>{return invoke("competitor_shop_products",{shopName,query})}
 export async function addCompetitorToSelection(id:number):Promise<number>{return invoke("add_competitor_to_selection",{id})}
-export async function syncCompetitorShopFeishu(shopName:string,targetUrl:string):Promise<string>{return invoke("sync_competitor_shop_feishu",{shopName,targetUrl})}
+export async function syncCompetitorShopFeishu(shopName:string,targetUrl:string,productIds:number[]):Promise<string>{return invoke("sync_competitor_shop_feishu",{shopName,targetUrl,productIds})}
 export async function openCompetitorProductUrl(url:string):Promise<void>{return invoke("open_competitor_product_url",{url})}
 export async function startCompetitorSeerfarCapture(productId:number):Promise<string>{return invoke("start_competitor_seerfar_capture",{productId})}
 export async function competitorSeerfarCaptures(shopName:string):Promise<import("./types").CompetitorSeerfarCapture[]>{return invoke("competitor_seerfar_captures",{shopName})}

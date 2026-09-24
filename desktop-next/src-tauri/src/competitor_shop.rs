@@ -56,6 +56,18 @@ fn web_url(value: String) -> String {
         .trim_end_matches([',', ';'])
         .to_string()
 }
+fn package_dimensions_cm(value: &str) -> Option<[f64; 3]> {
+    let numbers: Vec<f64> = value
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .filter_map(|part| part.parse::<f64>().ok())
+        .take(3)
+        .collect();
+    if numbers.len() != 3 || numbers.iter().any(|n| !n.is_finite() || *n <= 0.0) {
+        return None;
+    }
+    let divisor = if value.to_ascii_lowercase().contains("mm") || value.contains("毫米") { 10.0 } else { 1.0 };
+    Some([numbers[0] / divisor, numbers[1] / divisor, numbers[2] / divisor])
+}
 fn header_key(value: &str) -> String {
     value.trim().to_lowercase().replace([' ', '_', '-'], "")
 }
@@ -398,9 +410,19 @@ pub(crate) fn test_competitor_feishu_target(
     Ok("飞书目标表权限验证成功，可以同步竞品数据".into())
 }
 
-fn sync_feishu(shop_name: String, target_url: String, state: &AppState) -> Result<String, String> {
+fn sync_feishu(shop_name: String, target_url: String, product_ids: Vec<i64>, state: &AppState) -> Result<String, String> {
+    if product_ids.is_empty() {
+        return Err("请先筛选并勾选要同步的商品；不会自动上传全店商品".into());
+    }
     let c = db(state)?;
     ensure(&c)?;
+    let selected: std::collections::HashSet<i64> = product_ids.into_iter().collect();
+    let rows: Vec<_> = competitor_shop_rows(&c, &shop_name)?
+        .into_iter().filter(|row| selected.contains(&row.id)).collect();
+    if rows.is_empty() || rows.len() != selected.len() {
+        return Err("选择的商品已变化，请刷新列表后重新勾选".into());
+    }
+    crate::competitor_capture::ensure(&c)?;
     let token = crate::feishu_token(&c)?;
     let path = competitor_feishu_path(&c, &target_url)?;
     crate::save_setting(&c, "competitor_feishu_table_url", target_url.trim())?;
@@ -428,6 +450,9 @@ fn sync_feishu(shop_name: String, target_url: String, state: &AppState) -> Resul
         ("评分", 2),
         ("评价数量", 2),
         ("包装重", 2),
+        ("包装长", 2),
+        ("包装宽", 2),
+        ("包装高", 2),
         ("本地更新时间", 1),
     ];
     let payload = crate::feishu_raw(
@@ -463,13 +488,13 @@ fn sync_feishu(shop_name: String, target_url: String, state: &AppState) -> Resul
             remote.entry(sku).or_insert(record);
         }
     }
-    let rows = competitor_shop_rows(&c, &shop_name)?;
-    if rows.is_empty() {
-        return Err("当前竞品店铺没有可同步的商品".into());
-    }
     let mut creates = Vec::new();
     let mut updates = Vec::new();
     for x in rows {
+        let capture: Option<(String, Option<f64>)> = c.query_row(
+            "SELECT dimensions_mm,weight_g FROM competitor_shop_seerfar_capture WHERE product_id=?1",
+            [x.id], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).ok();
         let mut f = Map::new();
         f.insert("数据类型".into(), "竞品".into());
         f.insert("竞品店铺".into(), x.shop_name.clone().into());
@@ -497,7 +522,12 @@ fn sync_feishu(shop_name: String, target_url: String, state: &AppState) -> Resul
         ] {
             f.insert(n.into(), v.into());
         }
-        if let Some(v) = x.weight_kg {
+        if let Some([length, width, height]) = capture.as_ref().and_then(|(dimensions, _)| package_dimensions_cm(dimensions)) {
+            f.insert("包装长".into(), length.into());
+            f.insert("包装宽".into(), width.into());
+            f.insert("包装高".into(), height.into());
+        }
+        if let Some(v) = capture.as_ref().and_then(|(_, weight)| *weight).map(|g| g / 1000.0).or(x.weight_kg) {
             f.insert("包装重".into(), v.into());
         }
         f.insert("本地更新时间".into(), x.updated_at.into());
@@ -533,10 +563,11 @@ fn sync_feishu(shop_name: String, target_url: String, state: &AppState) -> Resul
 pub(crate) async fn sync_competitor_shop_feishu(
     shop_name: String,
     target_url: String,
+    product_ids: Vec<i64>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let owned = crate::background_state(&state)?;
-    tauri::async_runtime::spawn_blocking(move || sync_feishu(shop_name, target_url, &owned))
+    tauri::async_runtime::spawn_blocking(move || sync_feishu(shop_name, target_url, product_ids, &owned))
         .await
         .map_err(|e| format!("飞书后台同步失败：{e}"))?
 }
@@ -557,6 +588,9 @@ mod tests {
             web_url("https://www.ozon.ru/product/4753186677".into()),
             "https://www.ozon.ru/product/4753186677"
         );
+        assert_eq!(package_dimensions_cm("270×250×50mm"), Some([27.0, 25.0, 5.0]));
+        assert_eq!(package_dimensions_cm("53×53×57mm"), Some([5.3, 5.3, 5.7]));
+        assert_eq!(package_dimensions_cm("invalid"), None);
     }
 
     #[test]
