@@ -1881,3 +1881,24 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 经营总览趋势区增加自选起止日期，快捷 7 天/30 天/月份保留；选定日期驱动仪表盘从本地缓存查询该区间，不自动触发 API 同步。自选范围限定在经营总览，不影响订单和广告页面原有日期范围。`pnpm build`、`cargo check --locked`、`cargo test --locked competitor_shop::tests`（2 项）已通过；最终范围隔离调整后需重新正式构建。当前用户仍在运行 `Ozon ERP.exe`，不强制结束，待用户关闭后覆盖及可见验收。
 - 范围隔离调整后已通过正式 `build-tauri-release.cmd`，最终 Release SHA-256 为 `870589987F2FAA12A04B72927965831E84EF95E7C5987872C284C9C766E0F526`。当前根目录旧 `Ozon ERP.exe` 仍在运行（PID 25832），未覆盖或声称用户已看到新日期控件。
 - 用户确认关闭后，核实旧 ERP 进程已退出；已用正式 Release 覆盖根目录唯一入口 `Ozon ERP.exe`，文件大小 33,536,000 bytes，入口与 Release 的 SHA-256 均为 `870589987F2FAA12A04B72927965831E84EF95E7C5987872C284C9C766E0F526`。从根目录入口启动后，经营总览与趋势区自选起止日期控件可见，本地缓存数据正常加载；未执行平台重新同步或修改历史数据。
+- 2026-09-28 Ozon 促销接口迁移：按用户提供的 Ozon 官方公告截图，活动参与商品和候选商品查询切换到 `/v2/actions/products`、`/v2/actions/candidates`；活动商品价格/加入使用 `/v1/actions/products/update`（SKU、Money），优惠码强制移出使用 `/v2/actions/products/deactivate`。`/v1/actions` 活动目录在公告未列迁移，继续保留。商品列表按 `limit=100`、`last_id` 分页并拒绝不完整列表；Money 价格字段转数值供现有界面使用。普通活动不再走旧的强制移出接口，利润监控若目标高于活动上限且不是优惠码则阻止自动执行，以免普通售价先改而活动仍生效。促销页按币种显示价格。`cargo check --locked`、Rust 相关测试（含新增 v2 Money 用例）和 `pnpm build` 通过；正式 `desktop-next/scripts/build-tauri-release.cmd` 通过，Release SHA-256 `D4854E192AFAD1299AE5A213A8389CCA627685C6E2FF7312FF6EB194243A34C2`。根目录 `Ozon ERP.exe` 仍在运行（PID 32948），未强制关闭或覆盖；真实店铺写操作未执行，接口字段和平台返回仍需实际只读/受控验收。
+
+## 2026-09-28：弹性促销超过上限时的改价提交
+
+- 原因：上次接口迁移将所有非优惠码活动一律禁止自动退出。实际新版活动接口对“弹性加速/库存折扣”允许通过 `/v1/actions/products/update` 传入高于活动上限的 `action_price`，由平台自动移出；截图中的 `WZW001-forest-10` 因被一刀切拦截，提交按钮灰置。
+- 改为仅对已识别的弹性加速/库存折扣使用价格更新退出，并要求响应 `deactivated_product_ids` 包含该商品才确认成功。未知活动仍阻止；多个活动价格上限不一致且不能同时退出时仍阻止；普通售价先更新、再尝试退出，第二步失败明确提示普通售价已提交但活动可能仍生效。未对真实商品执行写入。
+- `cargo check --locked`、`cargo test --locked seller_api_error_tests::promotion_v2_money_and_response_shapes`、`pnpm build` 与正式 `desktop-next/scripts/build-tauri-release.cmd` 均通过。正式 Release、根目录 `ozon-analytics-next.exe` 和用户入口 `Ozon ERP.exe` 的 SHA-256 均为 `D270486C38A342C3123E6C8518BFE16EA6BA8BC5C97F935C34EA1BBC6300761D`，大小均为 33,538,560 bytes。启动 `Ozon ERP.exe` 后可见价格与利润监控页面，Web 内容 URL 为 `http://tauri.localhost/`（内嵌前端）。尚未在真实店铺执行改价，也未确认平台对目标商品返回的退出状态。
+
+## 2026-09-28：促销退出复核与采购单样式对齐
+
+- `WZW001-forest-10` 的普通售价 ¥117.72 有两次平台确认记录，但前一步截图的促销退出报错是本地商品 ID 到 SKU 映射失败；普通售价确认不代表促销已退出。此前已改用新版活动商品列表取得 SKU 映射，本次不对真实商品执行写操作，也不宣称平台已确认退出。
+- 采购单 Excel 导出按用户提供的 `CG-2026092802-工具腰包.xlsx` 对齐为 A–V 22 列：第一行大标题，第二行分组表头、蓝色箱数与黄色数量/金额，明细从第三行开始，随后合计和经办人行；保留数值及总价、数量、重量、体积、密度公式，并设置字体、列宽、行高、边框与横向单页宽打印。图片列仍保留原始图片链接，没有把远程图片嵌入工作簿。
+- `cargo check --locked`、`cargo test --locked purchase_orders::tests::creates_xlsx_with_formulas` 与 `pnpm build` 通过。正式构建及启动器覆盖状态见本节后续记录。
+- 用户确认关闭后，核实旧 `Ozon ERP.exe` 进程已退出。正式 `desktop-next/scripts/build-tauri-release.cmd` 构建通过，Release、根目录 `ozon-analytics-next.exe` 和 `Ozon ERP.exe` 均为 33,571,840 bytes，SHA-256 均为 `03D5308B09900A998317405B8D9FA814AD03AA895F8351B5ADCE36A5DCC28F1A`。从根目录入口启动成功（PID 20536）；未进行可见界面验收，也未对真实店铺执行促销退出。
+
+## 2026-09-28：发货装箱单上传飞书按文件夹归档
+
+- 原上传逻辑把 Excel 装箱单与 PDF 箱唛直接放进配置的“发货装箱单”父文件夹。现改为以装箱单 Excel 文件名（去除扩展名）命名子文件夹，先分页查找同名文件夹并复用，未找到再创建；两份文件上传至该子文件夹。文件夹列表不完整、创建失败或缺少 token 时明确报错，不回退到父文件夹，避免无声混放。
+- 上传成功信息显示飞书子文件夹名。原有历史文件不会自动搬迁；再次上传同一份装箱单时复用文件夹，但文件本身仍会重新上传。按飞书云空间列出文件夹及创建文件夹 API 实现，未在真实飞书云盘执行写入验收。
+- `cargo test --locked packing::tests` 四项通过，`cargo check --locked`、`pnpm build` 通过。正式 Release 构建及根目录启动器覆盖状态见后续记录。
+- 正式 `desktop-next/scripts/build-tauri-release.cmd` 构建通过。用户打开的 ERP 进程已自行退出；关闭了上一轮由本任务启动的隐藏验收进程后，根目录两个入口均由正式 Release 覆盖。Release、`ozon-analytics-next.exe`、`Ozon ERP.exe` 均为 33,399,808 bytes，SHA-256 均为 `720BC68AB015464F10C16A04AC18D3751E279ECB791939C245DB19BBD6E674FD`。根目录 `Ozon ERP.exe` 启动检查成功，随后关闭本任务测试进程；未进行可见界面或真实飞书上传验收。

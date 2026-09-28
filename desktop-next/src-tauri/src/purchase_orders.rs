@@ -329,77 +329,33 @@ fn xf(r: &str, f: &str, s: u8) -> String {
     format!(r#"<c r="{r}" s="{s}"><f>{f}</f></c>"#)
 }
 fn sheet_xml(v: &PurchaseOrderInput) -> String {
-    let hs = [
-        "中文品名",
-        "SKU",
-        "图片链接",
-        "单价",
-        "包装长 cm",
-        "包装宽 cm",
-        "包装高 cm",
-        "重量 kg",
-        "装箱率",
-        "外箱重量 kg",
-        "外箱长 cm",
-        "外箱宽 cm",
-        "外箱高 cm",
-        "箱数",
-        "数量",
-        "单位",
-        "总价",
-        "密度 kg/m³",
-        "总重 kg",
-        "体积 m³",
-        "预计出货时间",
-        "工厂地址",
-        "备注",
-    ];
-    let cs = [
-        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R",
-        "S", "T", "U", "V", "W",
-    ];
-    let mut rows = format!(
-        r#"<row r="1" ht="34" customHeight="1">{}</row><row r="2" ht="24" customHeight="1">{}</row>"#,
-        xt(
-            "A1",
-            &format!(
-                "{} - 采购清单",
-                if v.title.trim().is_empty() {
-                    "采购单"
-                } else {
-                    v.title.trim()
-                }
-            ),
-            1
-        ),
-        xt(
-            "A2",
-            &format!(
-                "采购单编号：{}    采购日期：{}    经办人：{}    领导审批：{}",
-                v.order_no, v.order_date, v.operator, v.approver
-            ),
-            2
-        )
-    );
-    let h = hs
-        .iter()
-        .enumerate()
-        .map(|(i, x)| xt(&format!("{}3", cs[i]), x, 3))
-        .collect::<String>();
-    rows.push_str(&format!(r#"<row r="3" ht="30" customHeight="1">{h}</row>"#));
+    // Match the supplied purchasing sheet: A:V, title, grouped headers, body,
+    // totals, and operator footer. All figures remain numeric/formula cells.
+    let columns = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"];
+    let title = if v.title.trim().is_empty() { v.order_no.trim().to_string() } else { format!("{}-{}", v.order_no.trim(), v.title.trim()) };
+    let (prefix, accent) = if let Some(rest) = title.strip_prefix("CG-") { ("CG-", rest) } else { ("", title.as_str()) };
+    let title_cell = format!(r#"<c r="A1" t="inlineStr" s="1"><is><r><rPr><rFont val="Microsoft YaHei"/><sz val="25"/></rPr><t>{}</t></r><r><rPr><rFont val="Microsoft YaHei"/><sz val="25"/><color rgb="FFFF2D2D"/></rPr><t>{}</t></r></is></c>"#, xml(prefix), xml(accent));
+    let mut rows = format!(r#"<row r="1" ht="42.26" customHeight="1">{title_cell}</row>"#);
+    let headers = [("A", "中文品名"), ("B", "SKU"), ("C", "图片"), ("D", "单价"), ("E", "包装规格"), ("H", "重量kg"), ("I", "外箱重"), ("J", "装箱率"), ("K", "外箱规格"), ("N", "箱数"), ("O", "数量"), ("P", "单位"), ("Q", "总价"), ("R", "总重"), ("S", "体积"), ("T", "密度"), ("U", "工厂地址"), ("V", "备注")];
+    let mut header_cells = String::new();
+    for (col, label) in headers {
+        let style = if col == "N" { 3 } else if matches!(col, "O" | "Q") { 4 } else { 2 };
+        header_cells.push_str(&xt(&format!("{col}2"), label, style));
+    }
+    rows.push_str(&format!(r#"<row r="2" ht="27.38" customHeight="1">{header_cells}</row>"#));
     for (i, x) in v.items.iter().enumerate() {
-        let r = i + 4;
-        let mut c = xt(&format!("A{r}"), &x.product_name, 4)
-            + &xt(&format!("B{r}"), &x.sku, 4)
-            + &xt(&format!("C{r}"), &x.image_url, 4);
+        let r = i + 3;
+        let mut c = xt(&format!("A{r}"), &x.product_name, 6)
+            + &xt(&format!("B{r}"), &x.sku, 6)
+            + &xt(&format!("C{r}"), &x.image_url, 6);
         for (col, val) in [
             ("D", &x.unit_price),
             ("E", &x.package_length_cm),
             ("F", &x.package_width_cm),
             ("G", &x.package_height_cm),
             ("H", &x.unit_weight_kg),
-            ("I", &x.units_per_carton),
-            ("J", &x.carton_weight_kg),
+            ("I", &x.carton_weight_kg),
+            ("J", &x.units_per_carton),
             ("K", &x.carton_length_cm),
             ("L", &x.carton_width_cm),
             ("M", &x.carton_height_cm),
@@ -408,10 +364,10 @@ fn sheet_xml(v: &PurchaseOrderInput) -> String {
             c.push_str(&xn(
                 &format!("{col}{r}"),
                 val,
-                if matches!(col, "D" | "N" | "O") { 5 } else { 4 },
+                if col == "D" { 7 } else { 5 },
             ))
         }
-        c.push_str(&xf(&format!("O{r}"), &format!("I{r}*N{r}"), 5));
+        c.push_str(&xf(&format!("O{r}"), &format!("J{r}*N{r}"), 8));
         c.push_str(&xt(
             &format!("P{r}"),
             if x.unit.trim().is_empty() {
@@ -419,57 +375,89 @@ fn sheet_xml(v: &PurchaseOrderInput) -> String {
             } else {
                 &x.unit
             },
-            4,
+            5,
         ));
-        c.push_str(&xf(&format!("Q{r}"), &format!("D{r}*O{r}"), 5));
+        c.push_str(&xf(&format!("Q{r}"), &format!("D{r}*O{r}"), 13));
         c.push_str(&xf(
             &format!("R{r}"),
-            &format!("IFERROR(J{r}/(K{r}*L{r}*M{r}/1000000),0)"),
-            4,
+            &format!("I{r}*N{r}"),
+            5,
         ));
-        c.push_str(&xf(&format!("S{r}"), &format!("J{r}*N{r}"), 4));
         c.push_str(&xf(
-            &format!("T{r}"),
+            &format!("S{r}"),
             &format!("K{r}*L{r}*M{r}/1000000*N{r}"),
-            4,
+            5,
         ));
-        c.push_str(&xt(&format!("U{r}"), &v.expected_ship_at, 4));
-        c.push_str(&xt(&format!("V{r}"), &v.factory_address, 4));
-        c.push_str(&xt(&format!("W{r}"), &x.note, 4));
+        c.push_str(&xf(&format!("T{r}"), &format!("IF(S{r}=0,\"\",R{r}/S{r})"), 5));
+        c.push_str(&xt(&format!("U{r}"), &v.factory_address, 5));
+        c.push_str(&xt(&format!("V{r}"), &x.note, 5));
         rows.push_str(&format!(
-            r#"<row r="{r}" ht="42" customHeight="1">{c}</row>"#
+            r#"<row r="{r}" ht="40.48" customHeight="1">{c}</row>"#
         ));
     }
-    let total = v.items.len() + 4;
-    let mut c = xt(&format!("A{total}"), "合计", 6);
-    for col in ["N", "O"] {
-        c.push_str(&xf(
-            &format!("{col}{total}"),
-            &format!("SUM({col}4:{col}{})", total - 1),
-            6,
-        ))
-    }
-    c.push_str(&xt(&format!("P{total}"), "个", 6));
-    for col in ["Q", "S", "T"] {
-        c.push_str(&xf(
-            &format!("{col}{total}"),
-            &format!("SUM({col}4:{col}{})", total - 1),
-            6,
-        ))
+    let total = v.items.len() + 3;
+    let mut c = String::new();
+    for col in columns {
+        let cell = format!("{col}{total}");
+        c.push_str(&match col {
+            "A" => xt(&cell, "合计", 11),
+            "D" => xf(&cell, &format!("IF(O{total}=0,\"\",Q{total}/O{total})"), 14),
+            "N" | "O" | "R" | "S" => xf(&cell, &format!("SUM({col}3:{col}{})", total - 1), 9),
+            "P" => xt(&cell, "个", 9),
+            "Q" => xf(&cell, &format!("SUM(Q3:Q{})", total - 1), 10),
+            "T" => xf(&cell, &format!("IF(S{total}=0,\"\",R{total}/S{total})"), 9),
+            _ => format!(r#"<c r="{cell}" s="5"/>"#),
+        });
     }
     rows.push_str(&format!(
-        r#"<row r="{total}" ht="26" customHeight="1">{c}</row>"#
+        r#"<row r="{total}" ht="34.52" customHeight="1">{c}</row>"#
     ));
+    let footer = total + 1;
+    let mut footer_cells = xt(&format!("A{footer}"), &format!("经办人: {}", v.operator.trim()), 12);
+    for col in &columns[1..20] { footer_cells.push_str(&format!(r#"<c r="{col}{footer}" s="5"/>"#)); }
+    footer_cells.push_str(&xt(&format!("U{footer}"), &format!("预计出货: {}", v.expected_ship_at), 6));
+    footer_cells.push_str(&xt(&format!("V{footer}"), &format!("审批: {}", v.approver), 6));
+    rows.push_str(&format!(r#"<row r="{footer}" ht="34.52" customHeight="1">{footer_cells}</row>"#));
+    let note_row = footer + 1;
+    if !v.note.trim().is_empty() {
+        rows.push_str(&format!(r#"<row r="{note_row}" ht="27.38" customHeight="1">{}</row>"#, xt(&format!("A{note_row}"), &format!("采购单备注: {}", v.note.trim()), 12)));
+    }
+    let widths = [21.01,11.10,12.0,11.10,9.07,9.07,9.07,9.07,9.07,9.07,9.07,9.07,9.07,9.07,9.07,9.07,17.07,14.03,14.03,14.03,16.06,15.04];
+    let cols = widths.iter().enumerate().map(|(i,w)| format!(r#"<col min="{n}" max="{n}" width="{w:.2}" customWidth="1"/>"#, n=i+1)).collect::<String>();
+    let extra_merge = if v.note.trim().is_empty() { String::new() } else { format!(r#"<mergeCell ref="A{note_row}:V{note_row}"/>"#) };
+    let merge_count = if extra_merge.is_empty() { 3 } else { 4 };
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="18"/><cols><col min="1" max="1" width="16" customWidth="1"/><col min="2" max="2" width="12" customWidth="1"/><col min="3" max="3" width="22" customWidth="1"/><col min="4" max="23" width="13" customWidth="1"/></cols><sheetData>{rows}</sheetData><autoFilter ref="A3:W{}"/><mergeCells count="3"><mergeCell ref="A1:W1"/><mergeCell ref="A2:W2"/><mergeCell ref="A{total}:M{total}"/></mergeCells><pageMargins left="0.2" right="0.2" top="0.35" bottom="0.35" header="0.15" footer="0.15"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>"#,
-        total - 1
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><sheetViews><sheetView showGridLines="1" workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15.48"/><cols>{cols}</cols><sheetData>{rows}</sheetData><mergeCells count="{merge_count}"><mergeCell ref="A1:V1"/><mergeCell ref="E2:G2"/><mergeCell ref="K2:M2"/>{extra_merge}</mergeCells><printOptions horizontalCentered="1"/><pageMargins left="0.2" right="0.2" top="0.35" bottom="0.35" header="0.15" footer="0.15"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>"#
     )
 }
 fn write_xlsx(path: &Path, v: &PurchaseOrderInput) -> Result<(), String> {
     let mut z = zip::ZipWriter::new(fs::File::create(path).map_err(|e| e.to_string())?);
     let o = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
-    let styles = r#"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font><sz val="10"/><name val="Microsoft YaHei"/></font><font><b/><sz val="20"/><color rgb="FFFF2D2D"/><name val="Microsoft YaHei"/></font><font><b/><sz val="10"/><name val="Microsoft YaHei"/></font></fonts><fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF4F6F9"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF36B"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="thin"/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="7"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyAlignment="1"><alignment horizontal="center"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment horizontal="center"/></xf><xf numFmtId="0" fontId="2" fillId="2" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf><xf numFmtId="4" fontId="0" fillId="0" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf><xf numFmtId="4" fontId="0" fillId="3" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="4" fontId="2" fillId="2" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#;
+    let styles = r#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;¥&quot;#,##0.00"/></numFmts>
+<fonts count="5"><font><sz val="14"/><name val="Microsoft YaHei"/></font><font><sz val="25"/><name val="Microsoft YaHei"/></font><font><b/><sz val="14"/><name val="Microsoft YaHei"/></font><font><sz val="10"/><name val="Calibri"/></font><font><b/><sz val="12"/><name val="Microsoft YaHei"/></font></fonts>
+<fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF7EDAFB"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF258"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFDADADA"/></patternFill></fill></fills>
+<borders count="2"><border/><border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="thin"/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="15">
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+<xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyFont="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="2" fillId="0" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="2" fillId="2" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="2" fillId="3" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="3" fillId="0" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="164" fontId="3" fillId="3" borderId="1" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="3" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="2" fillId="0" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="164" fontId="2" fillId="3" borderId="1" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="4" fillId="4" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="4" fillId="0" borderId="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>
+<xf numFmtId="164" fontId="0" fillId="3" borderId="1" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="164" fontId="2" fillId="0" borderId="1" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#;
     let parts=[("[Content_Types].xml",r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>"#.to_string()),("_rels/.rels",r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_string()),("xl/workbook.xml",r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="采购清单" sheetId="1" r:id="rId1"/></sheets><calcPr fullCalcOnLoad="1" forceFullCalc="1"/></workbook>"#.to_string()),("xl/_rels/workbook.xml.rels",r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_string()),("xl/styles.xml",styles.to_string()),("xl/worksheets/sheet1.xml",sheet_xml(v))];
     for (n, d) in parts {
         z.start_file(n, o).map_err(|e| e.to_string())?;
@@ -582,13 +570,14 @@ mod tests {
             .unwrap()
             .read_to_string(&mut s)
             .unwrap();
-        assert!(s.contains("D4*O4"));
-        assert!(s.contains("<c r=\"O4\" s=\"5\"><f>I4*N4</f></c>"));
-        assert!(s.contains("SUM(Q4:Q4)"));
-        assert!(
-            s.find("<autoFilter").unwrap() < s.find("<mergeCells").unwrap(),
-            "worksheet child elements must follow the OOXML schema order"
-        );
+        assert!(s.contains("<mergeCell ref=\"A1:V1\"/>"));
+        assert!(s.contains("<mergeCell ref=\"E2:G2\"/>"));
+        assert!(s.contains("<mergeCell ref=\"K2:M2\"/>"));
+        assert!(s.contains("J3*N3"));
+        assert!(s.contains("D3*O3"));
+        assert!(s.contains("SUM(Q3:Q3)"));
+        assert!(s.contains("经办人: W"));
+        assert!(s.find("<sheetData>").unwrap() < s.find("<mergeCells").unwrap());
         drop(z);
         let _ = fs::remove_file(p);
     }

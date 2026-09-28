@@ -57,6 +57,8 @@ pub struct PackingDraft {
 pub struct FeishuPackingResult {
     xlsx_file_token: String,
     pdf_file_token: String,
+    folder_name: String,
+    folder_token: String,
 }
 
 fn ensure_drafts(c: &rusqlite::Connection) -> Result<(), String> {
@@ -430,6 +432,67 @@ fn folder_token(value: &str) -> String {
         .to_string()
 }
 
+fn packing_folder_name(path: &std::path::Path) -> Result<String, String> {
+    let name = path.file_stem().and_then(|value| value.to_str()).unwrap_or("").trim();
+    if !name.starts_with("发货装箱单_") || name.len() <= "发货装箱单_".len() {
+        return Err("装箱单文件名无效，请重新生成装箱单和箱唛".into());
+    }
+    Ok(name.to_string())
+}
+
+fn feishu_json(response: Result<ureq::Response, ureq::Error>, action: &str) -> Result<serde_json::Value, String> {
+    let response = match response {
+        Ok(value) => value,
+        Err(ureq::Error::Status(status, value)) => {
+            let body = value.into_string().unwrap_or_default();
+            return Err(format!("飞书{action}失败（HTTP {status}）：{body}"));
+        }
+        Err(error) => return Err(format!("飞书{action}失败：{error}")),
+    };
+    let payload: serde_json::Value = serde_json::from_reader(response.into_reader())
+        .map_err(|e| format!("飞书{action}响应无法解析：{e}"))?;
+    if payload.get("code").and_then(|v| v.as_i64()) != Some(0) {
+        return Err(format!("飞书{action}失败：{}", payload.get("msg").and_then(|v| v.as_str()).unwrap_or("未知错误")));
+    }
+    Ok(payload)
+}
+
+fn find_or_create_packing_folder(base: &str, token: &str, parent: &str, name: &str) -> Result<String, String> {
+    let mut page_token = String::new();
+    loop {
+        let mut request = ureq::get(&format!("{base}/drive/v1/files"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .query("folder_token", parent)
+            .query("page_size", "200");
+        if !page_token.is_empty() { request = request.query("page_token", &page_token); }
+        let payload = feishu_json(request.call(), "读取装箱单文件夹")?;
+        let files = payload.pointer("/data/files").and_then(|v| v.as_array())
+            .ok_or("飞书文件夹列表响应缺少 files，已停止上传以避免重复建目录")?;
+        for file in files {
+            if file.get("type").and_then(|v| v.as_str()) == Some("folder")
+                && file.get("name").and_then(|v| v.as_str()) == Some(name)
+            {
+                return file.get("token").and_then(|v| v.as_str()).filter(|v| !v.is_empty())
+                    .map(str::to_string).ok_or("飞书已有文件夹缺少 token".into());
+            }
+        }
+        let has_more = payload.pointer("/data/has_more").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !has_more { break; }
+        let next = payload.pointer("/data/next_page_token").and_then(|v| v.as_str()).unwrap_or("");
+        if next.is_empty() || next == page_token { return Err("飞书文件夹列表分页不完整，已停止上传以避免重复建目录".into()); }
+        page_token = next.to_string();
+    }
+    let payload = feishu_json(
+        ureq::post(&format!("{base}/drive/v1/files/create_folder"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Content-Type", "application/json")
+            .send_string(&serde_json::json!({"name": name, "folder_token": parent}).to_string()),
+        "创建装箱单文件夹",
+    )?;
+    payload.pointer("/data/token").and_then(|v| v.as_str()).filter(|v| !v.is_empty())
+        .map(str::to_string).ok_or("飞书创建文件夹响应缺少 token".into())
+}
+
 fn upload_file(
     base: &str,
     token: &str,
@@ -579,11 +642,15 @@ pub fn upload_packing_documents_to_feishu(
     if !xlsx.is_file() || !pdf.is_file() {
         return Err("本地装箱单或箱唛文件不存在，请重新生成".into());
     }
-    let xlsx_file_token = upload_file(&base, &token, &folder, xlsx)?;
-    let pdf_file_token = upload_file(&base, &token, &folder, pdf)?;
+    let folder_name = packing_folder_name(xlsx)?;
+    let child_folder = find_or_create_packing_folder(&base, &token, &folder, &folder_name)?;
+    let xlsx_file_token = upload_file(&base, &token, &child_folder, xlsx)?;
+    let pdf_file_token = upload_file(&base, &token, &child_folder, pdf)?;
     Ok(FeishuPackingResult {
         xlsx_file_token,
         pdf_file_token,
+        folder_name,
+        folder_token: child_folder,
     })
 }
 
@@ -603,6 +670,13 @@ mod tests {
             "AbCd123"
         );
         assert_eq!(folder_token("AbCd123"), "AbCd123");
+    }
+
+    #[test]
+    fn names_cloud_folder_after_shipping_packing_list() {
+        let path = std::path::Path::new("发货装箱单_CZ7046-OZ-0928-26.xlsx");
+        assert_eq!(packing_folder_name(path).unwrap(), "发货装箱单_CZ7046-OZ-0928-26");
+        assert!(packing_folder_name(std::path::Path::new("箱唛_CZ7046-OZ-0928-26.pdf")).is_err());
     }
 
     #[test]

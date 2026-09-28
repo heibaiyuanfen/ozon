@@ -1570,15 +1570,39 @@ fn seller_get(c: &Connection, path: &str) -> Result<serde_json::Value, String> {
 }
 
 fn promotion_number(value: &serde_json::Value, key: &str) -> f64 {
-    value.get(key).and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0.0)
+    let field = value.get(key);
+    field.and_then(|v| v.get("amount").or(Some(v)))
+        .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(0.0)
+}
+
+fn promotion_result<'a>(response: &'a serde_json::Value) -> &'a serde_json::Value {
+    response.get("result").unwrap_or(response)
+}
+
+fn promotion_product_id(value: &serde_json::Value) -> i64 {
+    value.get("id").or_else(|| value.get("product_id"))
+        .and_then(|v| v.as_i64()).unwrap_or(0)
 }
 
 fn promotion_text(value: &serde_json::Value, key: &str) -> String {
     value
         .get(key)
-        .and_then(|v| v.as_str())
+        .map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| if v.is_number() { v.to_string() } else { String::new() }))
         .unwrap_or_default()
-        .to_string()
+}
+
+fn promotion_supports_price_exit(action: &serde_json::Value) -> bool {
+    let label = format!("{} {}", promotion_text(action, "title"), promotion_text(action, "action_type")).to_lowercase();
+    label.contains("эластичн") || label.contains("elastic") || label.contains("скидка на сток") || label.contains("stock discount")
+}
+
+fn promotion_action_sku(listing: &serde_json::Value, product_id: i64) -> Option<i64> {
+    listing.get("products")?.as_array()?.iter()
+        .find(|item| promotion_product_id(item) == product_id)
+        .and_then(|item| item.get("sku"))
+        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse::<i64>().ok()))
+        .filter(|sku| *sku > 0)
 }
 
 #[tauri::command]
@@ -1653,44 +1677,43 @@ async fn ozon_promotion_products(
 
 fn ozon_promotion_products_blocking(action_id: i64, mode: String, state: &AppState) -> Result<serde_json::Value, String> {
     let c = db(state)?;
+    let default_currency = if active_shop_kind(state)? == "cross_border" { "CNY" } else { "RUB" };
     let path = if mode == "candidates" {
-        "/v1/actions/candidates"
+        "/v2/actions/candidates"
     } else {
-        "/v1/actions/products"
+        "/v2/actions/products"
     };
-    let response = seller_post(
-        &c,
-        path,
-        &serde_json::json!({"action_id":action_id,"limit":1000,"offset":0}),
-    )?;
-    let result = response
-        .get("result")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    let source = result
-        .get("products")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let products = source
-        .iter()
-        .map(|item| {
+    let mut products = Vec::new();
+    let mut last_id = String::new();
+    let mut total = 0;
+    for _ in 0..100 {
+        let response = seller_post(&c, path, &serde_json::json!({"action_id":action_id,"limit":100,"last_id":last_id}))?;
+        let result = promotion_result(&response);
+        let source = result.get("products").and_then(|v| v.as_array())
+            .ok_or_else(|| format!("Ozon {path} 未返回商品列表；已停止，避免误判为零商品"))?;
+        total = result.get("total_items").or_else(|| result.get("total"))
+            .and_then(|v| v.as_i64()).unwrap_or((products.len() + source.len()) as i64);
+        products.extend(source.iter().map(|item| {
             serde_json::json!({
-                "id": promotion_number(item,"id") as i64,
+                "id": promotion_product_id(item),
+                "sku": promotion_text(item,"sku"),
                 "price": promotion_number(item,"price"),
                 "actionPrice": promotion_number(item,"action_price"),
                 "maxActionPrice": promotion_number(item,"max_action_price"),
                 "minActionPrice": promotion_number(item,"min_action_price"),
                 "stock": promotion_number(item,"stock") as i64,
                 "minStock": promotion_number(item,"min_stock") as i64,
-                "addMode": promotion_text(item,"add_mode")
+                "addMode": promotion_text(item,"add_mode"),
+                "currencyCode": item.get("price").and_then(|v| v.get("currency_code")).and_then(|v| v.as_str()).unwrap_or(default_currency)
             })
-        })
-        .collect::<Vec<_>>();
-    let total = result
-        .get("total")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(products.len() as i64);
+        }));
+        let next = result.get("last_id").and_then(|v| v.as_str()).unwrap_or_default();
+        if source.is_empty() || next.is_empty() || next == last_id { break; }
+        last_id = next.to_string();
+    }
+    if total > products.len() as i64 {
+        return Err(format!("Ozon {path} 返回 {total} 件，但只读取到 {} 件；不允许用不完整活动清单自动改价", products.len()));
+    }
     Ok(serde_json::json!({"products":products,"total":total}))
 }
 
@@ -1711,28 +1734,48 @@ async fn ozon_promotion_product_action(
 fn ozon_promotion_product_action_blocking(action_id: i64, action: String, product_id: i64, action_price: Option<f64>, stock: Option<i64>, state: &AppState) -> Result<serde_json::Value, String> {
     let c = db(state)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS ozon_promotion_action_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,action_id INTEGER NOT NULL,product_id INTEGER NOT NULL,action TEXT NOT NULL,action_price REAL,stock INTEGER,status TEXT NOT NULL,message TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e| e.to_string())?;
+    if !matches!(action.as_str(), "activate" | "deactivate" | "exit_by_price") { return Err("未知的促销操作".into()); }
+    let current_actions = seller_get(&c, "/v1/actions")?;
+    let selected = promotion_result(&current_actions).as_array()
+        .and_then(|items| items.iter().find(|item| promotion_number(item, "id") as i64 == action_id))
+        .ok_or("Ozon 当前活动列表未包含该活动，未提交更改")?;
+    let voucher = selected.get("is_voucher_action").and_then(|v| v.as_bool()).unwrap_or(false);
+    if action == "exit_by_price" && (voucher || !promotion_supports_price_exit(selected)) {
+        return Err("该活动不支持通过提高活动价自动退出；未提交更改".into());
+    }
+    // The promotion listing is the authoritative product ID -> numeric SKU mapping.
+    // The local product catalog may have a missing product_id even when the
+    // already-verified promotion membership and price cache are complete.
+    let sku_number = if action == "deactivate" { None } else {
+        let participating = ozon_promotion_products_blocking(action_id, "participating".into(), state)?;
+        let mut sku = promotion_action_sku(&participating, product_id);
+        if sku.is_none() && action == "activate" {
+            let candidates = ozon_promotion_products_blocking(action_id, "candidates".into(), state)?;
+            sku = promotion_action_sku(&candidates, product_id);
+        }
+        Some(sku.ok_or("Ozon 当前活动商品清单中找不到对应的数字 SKU；未提交促销更改")?)
+    };
     let (path, body) = if action == "deactivate" {
+        if !voucher { return Err("新版 Ozon 仅允许对优惠码活动强制移出商品；其他活动需先通过新版价格更新接口调整到活动上限以上，当前未自动退出".into()); }
         (
-            "/v1/actions/products/deactivate",
+            "/v2/actions/products/deactivate",
             serde_json::json!({"action_id":action_id,"product_ids":[product_id]}),
         )
     } else {
         let price = action_price
             .filter(|value| *value > 0.0)
             .ok_or("活动价必须大于 0")?;
-        let quantity = stock
-            .filter(|value| *value >= 0)
-            .ok_or("活动数量不能小于 0")?;
+        let quantity = if action == "exit_by_price" { None } else { Some(stock.filter(|value| *value >= 0).ok_or("活动数量不能小于 0")?) };
+        let currency = if active_shop_kind(state)? == "cross_border" { "CNY" } else { "RUB" };
+        let mut product = serde_json::json!({"sku":sku_number.ok_or("缺少活动商品 SKU")?,"action_price":{"amount":format!("{price:.2}"),"currency_code":currency}});
+        if voucher { product["stock"] = serde_json::json!(quantity.ok_or("优惠码活动必须提供活动数量")?); }
         (
-            "/v1/actions/products/activate",
-            serde_json::json!({"action_id":action_id,"products":[{"product_id":product_id,"action_price":price,"stock":quantity}]}),
+            "/v1/actions/products/update",
+            serde_json::json!({"action_id":action_id,"products":[product]}),
         )
     };
     let response = seller_post(&c, path, &body)?;
-    let result = response
-        .get("result")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
+    let result = promotion_result(&response);
     let rejected = result
         .get("rejected")
         .and_then(|value| value.as_array())
@@ -1745,13 +1788,13 @@ fn ozon_promotion_product_action_blocking(action_id: i64, action: String, produc
         .unwrap_or_default()
         .to_string();
     let accepted = result
-        .get("product_ids")
+        .get(if action == "deactivate" { "product_ids" } else if action == "exit_by_price" { "deactivated_product_ids" } else { "active_product_ids" })
         .and_then(|value| value.as_array())
         .map(|items| items.iter().any(|item| item.as_i64() == Some(product_id)))
         .unwrap_or(false);
     let success = rejection.is_empty() && accepted;
     let message = if success {
-        if action == "deactivate" {
+        if action == "deactivate" || action == "exit_by_price" {
             "商品已移出促销".to_string()
         } else {
             "商品促销价格与数量已提交".to_string()
@@ -1787,10 +1830,27 @@ fn seller_error_detail(raw: &str) -> String {
 mod seller_api_error_tests {
     use super::{
         finance_accrual_type_name, finance_timestamp, normalize_finance_accrual,
+        promotion_action_sku, promotion_number, promotion_product_id, promotion_result, promotion_supports_price_exit,
         repair_finance_accrual_attribution, seller_error_detail, DateRange,
     };
     use rusqlite::{params, Connection};
     use std::collections::HashMap;
+
+    #[test]
+    fn promotion_v2_money_and_response_shapes() {
+        let response = serde_json::json!({"result":{"products":[{"id":321,"price":{"amount":"123.45","currency_code":"CNY"}}]}});
+        let product = &promotion_result(&response)["products"][0];
+        assert_eq!(promotion_product_id(product), 321);
+        assert_eq!(promotion_number(product, "price"), 123.45);
+        assert_eq!(promotion_number(&serde_json::json!({"price":99}), "price"), 99.0);
+        assert_eq!(promotion_result(&serde_json::json!({"product_ids":[321]}))["product_ids"][0], 321);
+        assert_eq!(promotion_result(&serde_json::json!({"deactivated_product_ids":[321]}))["deactivated_product_ids"][0], 321);
+        assert!(promotion_supports_price_exit(&serde_json::json!({"title":"Эластичный бустинг. Без ограничения срока действия"})));
+        assert!(!promotion_supports_price_exit(&serde_json::json!({"title":"Промокоды"})));
+        let listing = serde_json::json!({"products":[{"id":321,"sku":"2483087902"}]});
+        assert_eq!(promotion_action_sku(&listing, 321), Some(2483087902));
+        assert_eq!(promotion_action_sku(&listing, 999), None);
+    }
 
     #[test]
     fn preserves_json_error_detail_and_normalizes_whitespace() {

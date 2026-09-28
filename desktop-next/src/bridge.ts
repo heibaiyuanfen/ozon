@@ -188,7 +188,7 @@ export async function ozonPromotionProducts(
 
 export async function ozonPromotionProductAction(input: {
   actionId: number;
-  action: "activate" | "deactivate";
+  action: "activate" | "deactivate" | "exit_by_price";
   productId: number;
   actionPrice?: number;
   stock?: number;
@@ -760,7 +760,7 @@ export async function exportPackingDocuments(input: PackingExportInput): Promise
 export async function packingDrafts(): Promise<PackingDraft[]> { return invoke("packing_drafts"); }
 export async function savePackingDraft(id: number | null, name: string, payload: PackingExportInput): Promise<number> { return invoke("save_packing_draft", { id, name, payload }); }
 export async function deletePackingDraft(id: number): Promise<void> { return invoke("delete_packing_draft", { id }); }
-export async function uploadPackingDocumentsToFeishu(xlsxPath: string, pdfPath: string): Promise<{xlsxFileToken:string;pdfFileToken:string}> { return invoke("upload_packing_documents_to_feishu", { xlsxPath, pdfPath }); }
+export async function uploadPackingDocumentsToFeishu(xlsxPath: string, pdfPath: string): Promise<{xlsxFileToken:string;pdfFileToken:string;folderName:string;folderToken:string}> { return invoke("upload_packing_documents_to_feishu", { xlsxPath, pdfPath }); }
 export async function importProductCostsCsv(path: string): Promise<number> {
   return invoke("import_product_costs_csv", { path });
 }

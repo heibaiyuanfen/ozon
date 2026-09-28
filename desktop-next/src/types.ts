@@ -86,6 +86,8 @@ export interface OzonPromotionsData {
 
 export interface OzonPromotionProduct {
   id: number;
+  sku: string;
+  currencyCode: string;
   price: number;
   actionPrice: number;
   maxActionPrice: number;
