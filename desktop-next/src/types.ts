@@ -991,6 +991,25 @@ export interface SupplyOrderItem {
   cargoMarks: string[];
   quantity: number;
 }
+export interface SupplyCargoSupply {
+  supplyId: number;
+  clusterId: string;
+  items: Array<{ sku: string; offerId: string; name: string; quantity: number; barcode: string }>;
+  cargoCount: number | null;
+  cargoStatusError: string;
+  readError: string;
+}
+export interface SupplyCargoBox {
+  items: Array<{ sku: string; quantity: number }>;
+}
+export interface SupplyCargoSubmitResult {
+  operationId: string;
+  message: string;
+}
+export interface SupplyCargoOperationStatus {
+  status: string;
+  message: string;
+}
 export interface SupplyOrderItemsResult {
   rows: SupplyOrderItem[];
   warning: string;

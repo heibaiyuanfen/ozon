@@ -1403,6 +1403,31 @@
 .cost-missing { color:#bd6b00; font-size:12px; }
 .supply-tariff-note { display:flex; gap:7px; align-items:flex-start; margin:10px 2px 0; color:#7a6640; font-size:12px; line-height:1.6; }
 .supply-orders-card .table-actions { display:flex; gap:6px; flex-wrap:nowrap; }
+.supply-cargo-modal { width:min(900px,94vw); max-height:90vh; overflow:auto; }
+.supply-cargo-selector { display:flex; align-items:center; gap:10px; margin:14px 0; font-size:13px; }
+.supply-cargo-selector select,.supply-cargo-table input,.supply-cargo-box select,.supply-cargo-box input { min-height:34px; border:1px solid #cfdaea; border-radius:8px; padding:5px 8px; background:#fff; }
+.supply-cargo-note { color:#697b94; font-size:12px; }
+.supply-cargo-table { overflow:auto; }
+.supply-cargo-table table { width:100%; border-collapse:collapse; }
+.supply-cargo-table td,.supply-cargo-table th { padding:9px; border-bottom:1px solid #e0e8f4; text-align:left; }
+.supply-cargo-table td small { display:block; color:#8190a5; }
+.supply-cargo-table input { width:95px; }
+.supply-cargo-actions { display:flex; align-items:center; gap:12px; margin:15px 0; }
+.supply-cargo-boxes { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:8px; max-height:300px; overflow:auto; }
+.supply-cargo-box { display:flex; align-items:center; gap:6px; padding:8px; border:1px solid #dbe6f6; border-radius:9px; }
+.supply-cargo-box select { flex:1; min-width:75px; }
+.supply-cargo-box input { width:65px; }
+.supply-cargo-box button { border:0; background:transparent; cursor:pointer; font-size:18px; }
+.supply-cargo-clusters { display:grid; grid-template-columns:repeat(auto-fill,minmax(255px,1fr)); gap:8px; max-height:240px; overflow:auto; }
+.supply-cargo-cluster { display:grid; grid-template-columns:auto 1fr; align-items:start; gap:4px 9px; padding:10px; border:1px solid #dbe6f6; border-radius:10px; background:#fff; }
+.supply-cargo-cluster.active { border-color:#6fa4ef; background:#f7fbff; }
+.supply-cargo-cluster>input { margin-top:6px; }
+.supply-cargo-cluster>button { border:0; background:transparent; padding:0; text-align:left; cursor:pointer; }
+.supply-cargo-cluster b,.supply-cargo-cluster small { display:block; }
+.supply-cargo-cluster small { color:#71839c; font-size:11px; overflow-wrap:anywhere; }
+.supply-cargo-cluster em,.supply-cargo-cluster span { grid-column:2; font-size:11px; font-style:normal; color:#3172d0; }
+.supply-cargo-detail { margin-top:15px; padding:12px; border:1px solid #dbe6f6; border-radius:10px; }
+.supply-cargo-detail h3 { margin:0 0 9px; font-size:14px; }
 .supply-orders-card .table-actions button { padding:7px 9px; white-space:nowrap; font-size:11px; }
 .supply-orders-card table { min-width:880px; }
 .supply-orders-card th:nth-child(1) { width:17%; }

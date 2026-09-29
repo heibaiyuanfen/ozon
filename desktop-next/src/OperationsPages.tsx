@@ -107,6 +107,9 @@ import {
   shipmentSettlement,
   settleShipment,
   supplyOrders,
+  supplyCargoSupplies,
+  createSupplyCargoBoxes,
+  supplyCargoOperationStatus,
   supplyOrderItems,
   supplyOrderItemsProgress,
   exportSupplyCargoMarks,
@@ -164,6 +167,8 @@ import type {
   ShipmentSkuOption,
   ShipmentSettlementItem,
   SupplyOrder,
+  SupplyCargoSupply,
+  SupplyCargoBox,
   SupplyOrderItem,
   SupplyOrderItemsProgress,
   SupplyClusterPlan,
@@ -3993,6 +3998,7 @@ export function SupplyPage() {
     [lastMonitorAt, setLastMonitorAt] = useState(""),
     [selected, setSelected] = useState<SupplyOrder | null>(null),
     [itemOrder, setItemOrder] = useState<SupplyOrder | null>(null),
+    [cargoOrder, setCargoOrder] = useState<SupplyOrder | null>(null),
     [orderItems, setOrderItems] = useState<SupplyOrderItem[]>([]),
     [itemWarning, setItemWarning] = useState(""),
     [itemsCachedAt, setItemsCachedAt] = useState(""),
@@ -4546,6 +4552,7 @@ export function SupplyPage() {
                       <button className="outline-button" onClick={() => findItems(row)} disabled={itemsBusy === row.orderId}>
                         {itemsBusy === row.orderId ? "读取中" : "货品 / 箱唛"}
                       </button>
+                      <button className="outline-button" onClick={() => setCargoOrder(row)}>指定货位</button>
                     </div>
                   </td>
                 </tr>
@@ -4641,8 +4648,140 @@ export function SupplyPage() {
           </footer>
         </section>
       </div>}
+      {cargoOrder && <SupplyCargoPlanner order={cargoOrder} onClose={() => setCargoOrder(null)} />}
     </>
   );
+}
+
+function SupplyCargoPlanner({ order, onClose }: { order: SupplyOrder; onClose: () => void }) {
+  const [supplies, setSupplies] = useState<SupplyCargoSupply[]>([]);
+  const [activeId, setActiveId] = useState(0);
+  const [selected, setSelected] = useState<Record<number, boolean>>({});
+  const [packSizes, setPackSizes] = useState<Record<string, string>>({});
+  const [boxesBySupply, setBoxesBySupply] = useState<Record<number, SupplyCargoBox[]>>({});
+  const [progress, setProgress] = useState<Record<number, { phase: string; message: string; operationId?: string }>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const active = supplies.find((row) => row.supplyId === activeId);
+  const uniqueProducts = [...new Map(supplies.flatMap((row) => row.items).map((item) => [item.sku, item])).values()];
+  const available = (row: SupplyCargoSupply) => !row.readError && row.items.length > 0 && row.cargoCount !== null;
+  const load = async (initial = false) => {
+    setBusy(true); setError("");
+    try {
+      const next = await supplyCargoSupplies(order.orderId);
+      setSupplies(next);
+      setActiveId((old) => next.some((row) => row.supplyId === old) ? old : (next[0]?.supplyId ?? 0));
+      if (initial) setSelected(Object.fromEntries(next.map((row) => [row.supplyId, available(row) && row.cargoCount === 0])));
+      const pending = Object.entries(progress).filter(([, value]) => value.operationId && value.phase !== "完成" && value.phase !== "失败");
+      await Promise.all(pending.map(async ([id, value]) => {
+        try {
+          const result = await supplyCargoOperationStatus(value.operationId!);
+          const phase = result.status === "SUCCESS" ? "完成" : result.status === "FAILED" ? "失败" : "平台处理中";
+          setProgress((old) => ({ ...old, [Number(id)]: { ...value, phase, message: result.message || phase } }));
+        } catch (e) { setProgress((old) => ({ ...old, [Number(id)]: { ...value, message: `状态读取失败：${String(e)}` } })); }
+      }));
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { void load(true); }, [order.orderId]);
+  const chosen = supplies.filter((row) => selected[row.supplyId] && !["完成", "平台处理中", "提交中"].includes(progress[row.supplyId]?.phase || ""));
+  const generateAll = () => {
+    if (!chosen.length) { setError("请至少勾选一个未完成的集群供货"); return; }
+    const next: Record<number, SupplyCargoBox[]> = { ...boxesBySupply };
+    for (const supply of chosen) {
+      if (!available(supply)) { setError(`供货 ${supply.supplyId} 的商品或货位状态尚未读取成功`); return; }
+      const boxes: SupplyCargoBox[] = [];
+      for (const item of supply.items) {
+        const size = Number(packSizes[item.sku]);
+        if (!Number.isInteger(size) || size <= 0) { setError(`请填写 ${item.offerId || item.sku} 的每货位件数`); return; }
+        for (let remaining = item.quantity; remaining > 0; remaining -= size) {
+          boxes.push({ items: [{ sku: item.sku, quantity: Math.min(size, remaining) }] });
+        }
+      }
+      if (boxes.length > 30) { setError(`集群 ${supply.clusterId} 需要 ${boxes.length} 箱，超过 Ozon 单次最多 30 箱的限制`); return; }
+      next[supply.supplyId] = boxes;
+    }
+    setBoxesBySupply(next); setError("");
+    setMessage(`已为 ${chosen.length} 个集群供货生成 ${chosen.reduce((sum, row) => sum + next[row.supplyId].length, 0)} 个货位；可选择集群检查每箱商品`);
+  };
+  const allocated = (boxes: SupplyCargoBox[]) => boxes.reduce((map, box) => {
+    box.items.forEach((item) => { map[item.sku] = (map[item.sku] || 0) + item.quantity; }); return map;
+  }, {} as Record<string, number>);
+  const balanced = (supply: SupplyCargoSupply) => {
+    const boxes = boxesBySupply[supply.supplyId] || [];
+    if (!boxes.length || boxes.length > 30 || boxes.some((box) => !box.items.length || box.items.some((item) => !Number.isInteger(item.quantity) || item.quantity <= 0))) return false;
+    const counts = allocated(boxes);
+    return supply.items.every((item) => counts[item.sku] === item.quantity)
+      && Object.keys(counts).every((sku) => supply.items.some((item) => item.sku === sku));
+  };
+  const allReady = chosen.length > 0 && chosen.every((row) => available(row) && balanced(row) && !["完成", "平台处理中", "提交中", "失败或待核对"].includes(progress[row.supplyId]?.phase || ""));
+  const submitAll = async () => {
+    if (!allReady) { setError("请先为所有勾选的集群生成货位，并核对每个 SKU 的分配总数"); return; }
+    const replacing = chosen.filter((row) => (row.cargoCount || 0) > 0).length;
+    const totalBoxes = chosen.reduce((sum, row) => sum + boxesBySupply[row.supplyId].length, 0);
+    const confirmation = window.prompt(`即将为 ${chosen.length} 个集群供货提交 ${totalBoxes} 个货位。${replacing ? `其中 ${replacing} 个供货已有货位，将被替换。` : ""}每个供货只提交一次，失败或响应不明时不会自动重试。\n请输入“确认提交货位”：`);
+    if (confirmation !== "确认提交货位") return;
+    setBusy(true); setError(""); setMessage(`正在提交 0 / ${chosen.length} 个集群供货，请保持窗口打开`);
+    let cursor = 0, finished = 0;
+    const worker = async () => {
+      while (cursor < chosen.length) {
+        const supply = chosen[cursor++];
+        setProgress((old) => ({ ...old, [supply.supplyId]: { phase: "提交中", message: "正在写入 Ozon" } }));
+        try {
+          const result = await createSupplyCargoBoxes(order.orderId, supply.supplyId, boxesBySupply[supply.supplyId], confirmation);
+          setProgress((old) => ({ ...old, [supply.supplyId]: { phase: "平台处理中", message: result.message, operationId: result.operationId } }));
+          try {
+            const status = await supplyCargoOperationStatus(result.operationId);
+            const phase = status.status === "SUCCESS" ? "完成" : status.status === "FAILED" ? "失败" : "平台处理中";
+            setProgress((old) => ({ ...old, [supply.supplyId]: { phase, message: status.message || result.message, operationId: result.operationId } }));
+          } catch { /* 平台可能仍在处理，保留操作 ID 供手动刷新 */ }
+        } catch (e) { setProgress((old) => ({ ...old, [supply.supplyId]: { phase: "失败或待核对", message: String(e) } })); }
+        finished++;
+        setMessage(`已处理 ${finished} / ${chosen.length} 个集群供货；请查看各行结果`);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(2, chosen.length) }, () => worker()));
+    setBusy(false);
+  };
+  return <div className="modal-backdrop" onMouseDown={(e) => { if (!busy && e.target === e.currentTarget) onClose(); }}>
+    <section className="cost-modal supply-cargo-modal">
+      <button className="modal-close" disabled={busy} onClick={onClose} aria-label="关闭">×</button>
+      <header><span className="eyebrow">CARGO BOXES</span><h2>批量指定集群货位</h2><p>供应单 {order.orderNumber || order.orderId} · 一次读取、生成并提交所有勾选集群</p></header>
+      {error && <div className="error-banner"><AlertTriangle size={17}/>{error}</div>}
+      {message && <div className="supply-monitor-state"><CheckCircle2 size={17}/>{message}</div>}
+      <div className="supply-cargo-actions"><span>共 {supplies.length} 个集群供货 · 待处理 {chosen.length} 个</span><button className="outline-button" disabled={busy} onClick={() => void load()}>刷新全部集群及已有货位</button></div>
+      {busy && !supplies.length && <div className="empty">正在读取 Ozon 供应单商品…</div>}
+      {!!supplies.length && <>
+        <div className="supply-cargo-clusters">{supplies.map((row) => <label key={row.supplyId} className={`supply-cargo-cluster ${activeId === row.supplyId ? "active" : ""}`}>
+          <input type="checkbox" disabled={busy || !available(row) || progress[row.supplyId]?.phase === "完成" || progress[row.supplyId]?.phase === "平台处理中"} checked={!!selected[row.supplyId]} onChange={(e) => setSelected((old) => ({ ...old, [row.supplyId]: e.target.checked }))}/>
+          <button type="button" onClick={() => setActiveId(row.supplyId)}><b>集群 {row.clusterId || "未返回"}</b><small>供货 {row.supplyId} · {row.items.length} 个 SKU · {row.items.reduce((sum, item) => sum + item.quantity, 0)} 件</small></button>
+          <em>{row.cargoCount === null ? "货位状态未知" : row.cargoCount > 0 ? `已提交 ${row.cargoCount} 个货位` : "未提交货位"}</em>
+          {boxesBySupply[row.supplyId]?.length ? <span>{boxesBySupply[row.supplyId].length} 个待提交</span> : null}
+          {progress[row.supplyId] && <small>{progress[row.supplyId].phase} · {progress[row.supplyId].message}</small>}
+          {row.readError && <small className="cost-missing">商品读取失败：{row.readError}</small>}
+          {row.cargoStatusError && <small className="cost-missing">货位状态读取失败：{row.cargoStatusError}</small>}
+        </label>)}</div>
+        <p className="supply-cargo-note">已有货位的集群默认跳过。勾选已有货位的集群会在提交时替换该供货的货位。每个商品只需填写一次装箱数量。</p>
+        <div className="supply-cargo-table"><table><thead><tr><th>商品</th><th>每货位件数</th><th>涉及集群</th></tr></thead><tbody>{uniqueProducts.map((item) => <tr key={item.sku}>
+          <td><b>{item.offerId || item.sku}</b><small>{item.name} · SKU {item.sku}</small></td>
+          <td><input type="number" min="1" step="1" disabled={busy} value={packSizes[item.sku] ?? ""} onChange={(e) => setPackSizes((old) => ({ ...old, [item.sku]: e.target.value }))} placeholder="例如 20"/></td>
+          <td>{supplies.filter((row) => row.items.some((product) => product.sku === item.sku)).length}</td>
+        </tr>)}</tbody></table></div>
+        <div className="supply-cargo-actions"><button className="outline-button" disabled={busy || !chosen.length} onClick={generateAll}>为勾选集群批量生成货位</button><strong>共 {chosen.reduce((sum, row) => sum + (boxesBySupply[row.supplyId]?.length || 0), 0)} 个待提交货位</strong></div>
+        {active && <section className="supply-cargo-detail"><h3>集群 {active.clusterId} · 供货 {active.supplyId}</h3>
+          <div className="supply-cargo-table"><table><thead><tr><th>商品</th><th>供应数量</th><th>已分配</th></tr></thead><tbody>{active.items.map((item) => <tr key={item.sku}><td>{item.offerId || item.sku}</td><td>{item.quantity}</td><td className={boxesBySupply[active.supplyId]?.length && allocated(boxesBySupply[active.supplyId])[item.sku] !== item.quantity ? "cost-missing" : ""}>{allocated(boxesBySupply[active.supplyId] || [])[item.sku] || 0} / {item.quantity}</td></tr>)}</tbody></table></div>
+          {!!boxesBySupply[active.supplyId]?.length && <><div className="supply-cargo-actions"><strong>{boxesBySupply[active.supplyId].length} 个货位</strong><button className="outline-button" disabled={busy || boxesBySupply[active.supplyId].length >= 30} onClick={() => setBoxesBySupply((old) => ({ ...old, [active.supplyId]: [...old[active.supplyId], { items: [{ sku: active.items[0].sku, quantity: 1 }] }] }))}>添加货位</button></div><div className="supply-cargo-boxes">{boxesBySupply[active.supplyId].map((box, index) => <div key={index} className="supply-cargo-box"><b>货位 {index + 1}</b>
+            <select disabled={busy} value={box.items[0]?.sku || ""} onChange={(e) => setBoxesBySupply((old) => ({ ...old, [active.supplyId]: old[active.supplyId].map((value, i) => i === index ? { items: [{ sku: e.target.value, quantity: value.items[0]?.quantity || 1 }] } : value) }))}>{active.items.map((item) => <option key={item.sku} value={item.sku}>{item.offerId || item.sku}</option>)}</select>
+            <input type="number" min="1" step="1" disabled={busy} value={box.items[0]?.quantity ?? 1} onChange={(e) => setBoxesBySupply((old) => ({ ...old, [active.supplyId]: old[active.supplyId].map((value, i) => i === index ? { items: [{ sku: value.items[0]?.sku || "", quantity: Number(e.target.value) || 0 }] } : value) }))}/><span>件</span>
+            <button type="button" disabled={busy} onClick={() => setBoxesBySupply((old) => ({ ...old, [active.supplyId]: old[active.supplyId].filter((_, i) => i !== index) }))}>×</button>
+          </div>)}</div></>}
+        </section>}
+        <footer className="modal-actions"><button className="outline-button" disabled={busy} onClick={() => void load()}>刷新处理结果</button><button className="dark-button" disabled={busy || !allReady} onClick={() => void submitAll()}>{busy ? "处理中" : `批量提交 ${chosen.length} 个集群`}</button></footer>
+      </>}
+      {!supplies.length && !busy && <div className="empty">Ozon 尚未返回可配置的集群供货和商品。</div>}
+    </section>
+  </div>;
 }
 
 export function SyncPage({ range }: { range: DateRange }) {

@@ -796,6 +796,51 @@ struct SupplyOrderItemRow {
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SupplyCargoSupply {
+    supply_id: i64,
+    cluster_id: String,
+    items: Vec<SupplyCargoItem>,
+    cargo_count: Option<usize>,
+    cargo_status_error: String,
+    read_error: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyCargoItem {
+    sku: String,
+    offer_id: String,
+    name: String,
+    quantity: i64,
+    barcode: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyCargoBox {
+    items: Vec<SupplyCargoBoxItem>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyCargoBoxItem {
+    sku: String,
+    quantity: i64,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyCargoSubmitResult {
+    operation_id: String,
+    message: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyCargoOperationStatus {
+    status: String,
+    message: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SupplyOrderItemsResult {
     rows: Vec<SupplyOrderItemRow>,
     warning: String,
@@ -11685,6 +11730,201 @@ fn supply_bundle_items(c: &Connection, bundle_id: &str) -> Result<Vec<serde_json
     Ok(rows)
 }
 
+fn supply_cargo_counts(payload: &serde_json::Value, supply_ids: &[i64]) -> Option<std::collections::BTreeMap<i64, usize>> {
+    let mut counts: std::collections::BTreeMap<i64, usize> = supply_ids.iter().map(|id| (*id, 0)).collect();
+    let rows = payload.get("supplies_cargoes")
+        .or_else(|| payload.pointer("/result/supplies_cargoes"))
+        .or_else(|| payload.get("supply"))
+        .or_else(|| payload.pointer("/result/supply"))
+        .and_then(|v| v.as_array())?;
+    for row in rows {
+        let supply_id = supply_json_i64(row.get("supply_id"));
+        if !counts.contains_key(&supply_id) { continue; }
+        let direct = row.get("cargoes_without_transport_cargoes")
+            .or_else(|| row.get("cargoes"))
+            .and_then(|v| v.as_array()).map(Vec::len).unwrap_or(0);
+        let transport: usize = row.get("transport_cargoes").and_then(|v| v.as_array())
+            .into_iter().flatten().map(|v| v.get("cargoes").and_then(|v| v.as_array()).map(Vec::len).unwrap_or(0)).sum();
+        counts.insert(supply_id, direct + transport);
+    }
+    Some(counts)
+}
+
+#[cfg(test)]
+mod supply_cargo_count_tests {
+    use super::supply_cargo_counts;
+
+    #[test]
+    fn counts_direct_and_transport_boxes_and_preserves_empty_supplies() {
+        let response = serde_json::json!({"supplies_cargoes":[
+            {"supply_id":11,"cargoes_without_transport_cargoes":[{"cargo_id":1}],"transport_cargoes":[{"cargoes":[{"cargo_id":2},{"cargo_id":3}]}]},
+            {"supply_id":99,"cargoes_without_transport_cargoes":[{"cargo_id":9}]}
+        ]});
+        let counts = supply_cargo_counts(&response, &[11, 12]);
+        assert_eq!(counts.as_ref().and_then(|v| v.get(&11)), Some(&3));
+        assert_eq!(counts.as_ref().and_then(|v| v.get(&12)), Some(&0));
+        assert!(!counts.unwrap().contains_key(&99));
+    }
+
+    #[test]
+    fn supports_legacy_cargoes_get_shape() {
+        let response = serde_json::json!({"result":{"supply":[{"supply_id":22,"cargoes":[{},{}]}]}});
+        assert_eq!(supply_cargo_counts(&response, &[22]).and_then(|v| v.get(&22).copied()), Some(2));
+    }
+}
+
+fn supply_cargo_supplies_blocking(state: &AppState, order_id: i64) -> Result<Vec<SupplyCargoSupply>, String> {
+    if order_id <= 0 { return Err("供应单 ID 无效".into()); }
+    let c = db(state)?;
+    let payload = seller_post(&c, "/v3/supply-order/get", &serde_json::json!({"order_ids":[order_id]}))?;
+    let order = payload.get("orders").and_then(|v| v.as_array()).and_then(|v| v.first())
+        .ok_or("Ozon 未返回此供应单")?;
+    let sources = order.get("supplies").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let ids: Vec<i64> = sources.iter().map(|s| supply_json_i64(s.get("supply_id"))).filter(|id| *id > 0).collect();
+    let status = seller_post(&c, "/v1/cargoes/supplies/get", &serde_json::json!({"supply_ids":ids}));
+    let status = status.or_else(|_| seller_post(&c, "/v1/cargoes/get", &serde_json::json!({"supply_ids":ids})));
+    let (counts, cargo_status_error) = match status {
+        Ok(payload) => match supply_cargo_counts(&payload, &ids) {
+            Some(counts) => (Some(counts), String::new()),
+            None => (None, "Ozon 货位接口未返回可识别的供货列表".into()),
+        },
+        Err(error) => (None, error),
+    };
+    let mut source_defs = Vec::new();
+    for supply in &sources {
+        let supply_id = supply_json_i64(supply.get("supply_id"));
+        let bundle_id = supply_identifier(supply.get("bundle_id"));
+        if supply_id <= 0 || bundle_id.is_empty() { continue; }
+        source_defs.push((supply_id, supply_identifier(supply.get("macrolocal_cluster_id")), bundle_id));
+    }
+    let mut result = Vec::new();
+    // Read up to three independent bundle pages at once. Each worker owns its
+    // SQLite connection; the UI remains responsive while Ozon answers.
+    for chunk in source_defs.chunks(3) {
+        let rows = std::thread::scope(|scope| -> Result<Vec<SupplyCargoSupply>, String> {
+            let mut handles = Vec::new();
+            for (supply_id, cluster_id, bundle_id) in chunk.iter().cloned() {
+                let counts = counts.as_ref();
+                let cargo_status_error = cargo_status_error.clone();
+                handles.push(scope.spawn(move || {
+                    let mut items = Vec::new();
+                    let mut read_error = String::new();
+                    let bundle_items = db(state).and_then(|connection| supply_bundle_items(&connection, &bundle_id));
+                    match bundle_items {
+                        Ok(bundle_items) => for item in bundle_items {
+                            let sku = supply_identifier(item.get("sku"));
+                            let offer_id = supply_identifier(item.get("offer_id").or_else(|| item.get("contractor_item_code")));
+                            let quantity = supply_json_i64(item.get("quantity"));
+                            if sku.is_empty() || offer_id.is_empty() || quantity <= 0 { continue; }
+                            items.push(SupplyCargoItem {
+                                sku, offer_id, name: json_text(item.get("name")), quantity,
+                                barcode: supply_identifier(item.get("barcode")),
+                            });
+                        },
+                        Err(error) => read_error = error,
+                    }
+                    SupplyCargoSupply {
+                        supply_id, cluster_id, items,
+                        cargo_count: counts.and_then(|rows| rows.get(&supply_id).copied()),
+                        cargo_status_error,
+                        read_error,
+                    }
+                }));
+            }
+            handles.into_iter().map(|handle| handle.join().map_err(|_| "读取集群商品的后台线程异常".into())).collect()
+        })?;
+        result.extend(rows);
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn supply_cargo_supplies(order_id: i64, state: State<'_, AppState>) -> Result<Vec<SupplyCargoSupply>, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || supply_cargo_supplies_blocking(&owned, order_id))
+        .await.map_err(|e| format!("读取货位商品后台任务失败：{e}"))?
+}
+
+fn supply_cargo_one_blocking(c: &Connection, order_id: i64, supply_id: i64) -> Result<SupplyCargoSupply, String> {
+    let payload = seller_post(c, "/v3/supply-order/get", &serde_json::json!({"order_ids":[order_id]}))?;
+    let supply = payload.get("orders").and_then(|v| v.as_array()).and_then(|v| v.first())
+        .and_then(|v| v.get("supplies")).and_then(|v| v.as_array()).into_iter().flatten()
+        .find(|v| supply_json_i64(v.get("supply_id")) == supply_id)
+        .ok_or("供应单中没有该供货 ID")?;
+    let bundle_id = supply_identifier(supply.get("bundle_id"));
+    if bundle_id.is_empty() { return Err("Ozon 未返回该供货的商品组成 ID".into()); }
+    let mut items = Vec::new();
+    for item in supply_bundle_items(c, &bundle_id)? {
+        let sku = supply_identifier(item.get("sku"));
+        let offer_id = supply_identifier(item.get("offer_id").or_else(|| item.get("contractor_item_code")));
+        let quantity = supply_json_i64(item.get("quantity"));
+        if sku.is_empty() || offer_id.is_empty() || quantity <= 0 { continue; }
+        items.push(SupplyCargoItem { sku, offer_id, name: json_text(item.get("name")), quantity,
+            barcode: supply_identifier(item.get("barcode")) });
+    }
+    Ok(SupplyCargoSupply { supply_id, cluster_id: supply_identifier(supply.get("macrolocal_cluster_id")),
+        items, cargo_count: None, cargo_status_error: String::new(), read_error: String::new() })
+}
+
+#[tauri::command]
+async fn create_supply_cargo_boxes(
+    order_id: i64, supply_id: i64, boxes: Vec<SupplyCargoBox>, confirmation: String,
+    state: State<'_, AppState>,
+) -> Result<SupplyCargoSubmitResult, String> {
+    if confirmation != "确认提交货位" { return Err("必须输入“确认提交货位”后才能写入 Ozon".into()); }
+    if boxes.is_empty() || boxes.len() > 30 { return Err("每次必须提交 1 至 30 个箱式货位".into()); }
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let c = db(&owned)?;
+        let supply = supply_cargo_one_blocking(&c, order_id, supply_id)?;
+        let expected: std::collections::BTreeMap<String, i64> = supply.items.iter()
+            .map(|item| (item.sku.clone(), item.quantity)).collect();
+        let mut actual = std::collections::BTreeMap::<String, i64>::new();
+        let mut cargoes = Vec::new();
+        for (index, cargo) in boxes.iter().enumerate() {
+            if cargo.items.is_empty() { return Err(format!("货位 {} 没有商品", index + 1)); }
+            let mut payload_items = Vec::new();
+            for item in &cargo.items {
+                if item.quantity <= 0 { return Err(format!("货位 {} 的商品数量必须大于 0", index + 1)); }
+                let product = supply.items.iter().find(|p| p.sku == item.sku)
+                    .ok_or_else(|| format!("货位 {} 的 SKU {} 不在当前供货中", index + 1, item.sku))?;
+                *actual.entry(item.sku.clone()).or_default() += item.quantity;
+                let mut entry = serde_json::json!({"offer_id":product.offer_id,"quantity":item.quantity});
+                if !product.barcode.is_empty() { entry["barcode"] = serde_json::json!(product.barcode); }
+                payload_items.push(entry);
+            }
+            cargoes.push(serde_json::json!({"key":format!("box-{:03}", index + 1),"value":{"type":"BOX","items":payload_items}}));
+        }
+        if actual != expected { return Err(format!("货位分配总数与 Ozon 当前供货数量不一致：应为 {:?}，实际 {:?}", expected, actual)); }
+        let payload = seller_post_once(&c, "/v1/cargoes/create", &serde_json::json!({
+            "supply_id":supply_id,"delete_current_version":true,"cargoes":cargoes
+        }))?;
+        let reasons = payload.pointer("/errors/error_reasons").and_then(|v| v.as_array())
+            .map(|rows| rows.iter().map(|v| json_text(Some(v))).filter(|v| !v.is_empty() && v != "UNSPECIFIED").collect::<Vec<_>>())
+            .unwrap_or_default();
+        if !reasons.is_empty() { return Err(format!("Ozon 拒绝货位：{}", reasons.join("；"))); }
+        let operation = supply_identifier(payload.get("operation_id"));
+        if operation.is_empty() { return Err("货位请求已提交，但 Ozon 未返回操作 ID。请先在后台核对，系统不会自动重试".into()); }
+        Ok(SupplyCargoSubmitResult { operation_id: operation.clone(), message: format!("Ozon 已接收 {} 个货位，操作 ID：{}", boxes.len(), operation) })
+    }).await.map_err(|e| format!("提交货位后台任务失败：{e}"))?
+}
+
+#[tauri::command]
+async fn supply_cargo_operation_status(operation_id: String, state: State<'_, AppState>) -> Result<SupplyCargoOperationStatus, String> {
+    if operation_id.trim().is_empty() { return Err("缺少货位操作 ID".into()); }
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let c = db(&owned)?;
+        let payload = seller_post(&c, "/v2/cargoes/create/info", &serde_json::json!({"operation_id":operation_id}))?;
+        let status = json_text(payload.get("status").or_else(|| payload.pointer("/result/status")));
+        let reasons = payload.pointer("/errors/error_reasons").and_then(|v| v.as_array())
+            .map(|rows| rows.iter().map(|v| json_text(Some(v))).filter(|v| !v.is_empty() && v != "ERROR_REASON_UNSPECIFIED").collect::<Vec<_>>())
+            .unwrap_or_default();
+        let message = if reasons.is_empty() { status.clone() } else { reasons.join("；") };
+        Ok(SupplyCargoOperationStatus { status, message })
+    }).await.map_err(|e| format!("读取货位处理状态后台任务失败：{e}"))?
+}
+
 fn supply_order_items_blocking(
     order_id: i64,
     refresh: bool,
@@ -13424,6 +13664,9 @@ pub fn run() {
             missing_cost_rows,
             supply_orders,
             supply_order_items,
+            supply_cargo_supplies,
+            create_supply_cargo_boxes,
+            supply_cargo_operation_status,
             supply_order_items_progress,
             export_supply_cargo_marks,
             download_supply_cargo_labels,

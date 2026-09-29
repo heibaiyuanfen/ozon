@@ -41,6 +41,10 @@ import type {
   ShipmentSettlementItem,
   Shop,
   SupplyOrder,
+  SupplyCargoSupply,
+  SupplyCargoBox,
+  SupplyCargoSubmitResult,
+  SupplyCargoOperationStatus,
   SupplyOrderItemsResult,
   SupplyOrderItemsProgress,
   SupplyClusterPlan,
@@ -556,6 +560,15 @@ export async function aiAnalysis(
 }
 export async function supplyOrders(): Promise<SupplyOrder[]> {
   return isTauri() ? invoke("supply_orders") : [];
+}
+export async function supplyCargoSupplies(orderId: number): Promise<SupplyCargoSupply[]> {
+  return isTauri() ? invoke("supply_cargo_supplies", { orderId }) : [];
+}
+export async function createSupplyCargoBoxes(orderId: number, supplyId: number, boxes: SupplyCargoBox[], confirmation: string): Promise<SupplyCargoSubmitResult> {
+  return invoke("create_supply_cargo_boxes", { orderId, supplyId, boxes, confirmation });
+}
+export async function supplyCargoOperationStatus(operationId: string): Promise<SupplyCargoOperationStatus> {
+  return invoke("supply_cargo_operation_status", { operationId });
 }
 export async function supplyOrderItems(orderId: number, refresh = false): Promise<SupplyOrderItemsResult> {
   return isTauri() ? invoke("supply_order_items", { orderId, refresh }) : { rows: [], warning: "", fromCache: false, cachedAt: "" };

@@ -1902,3 +1902,16 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 上传成功信息显示飞书子文件夹名。原有历史文件不会自动搬迁；再次上传同一份装箱单时复用文件夹，但文件本身仍会重新上传。按飞书云空间列出文件夹及创建文件夹 API 实现，未在真实飞书云盘执行写入验收。
 - `cargo test --locked packing::tests` 四项通过，`cargo check --locked`、`pnpm build` 通过。正式 Release 构建及根目录启动器覆盖状态见后续记录。
 - 正式 `desktop-next/scripts/build-tauri-release.cmd` 构建通过。用户打开的 ERP 进程已自行退出；关闭了上一轮由本任务启动的隐藏验收进程后，根目录两个入口均由正式 Release 覆盖。Release、`ozon-analytics-next.exe`、`Ozon ERP.exe` 均为 33,399,808 bytes，SHA-256 均为 `720BC68AB015464F10C16A04AC18D3751E279ECB791939C245DB19BBD6E674FD`。根目录 `Ozon ERP.exe` 启动检查成功，随后关闭本任务测试进程；未进行可见界面或真实飞书上传验收。
+# 2026-09-29 · 供应单箱式货位分配
+
+- 在“约仓计划 → 供应单预约”增加“指定货位”。按 Ozon 当前供货的 SKU 数量和用户填写的每货位件数生成箱式货位，余数单独成箱，支持逐箱修改 SKU 和件数。
+- 提交前逐 SKU 校验分配总量与平台供应单一致，并限制每次最多 30 箱；提交到 `/v1/cargoes/create`，写请求不自动重试，明确提示替换该供货已有货位。
+- 验证：`cargo check --locked`、`cargo test --locked`（199 通过、5 忽略）、`pnpm build` 均通过。使用 `desktop-next/scripts/build-tauri-release.cmd` 构建 Release，覆盖根目录 EXE；两者大小均为 33,613,312 字节，SHA-256 均为 `E4863B93850C1C1D2B904B57FC77ADB53536835D32197A9D201F7F8C7B79709D`。
+- 已启动根目录 EXE，窗口加载 `http://tauri.localhost/` 内嵌前端。约仓页面可见交互与 Ozon 真实货位提交尚未验收：界面检查时用户正在操作窗口，未继续点击或提交真实供应单。
+# 2026-09-29 · 批量集群货位
+
+- “供应单预约 → 指定货位”改为整单读取所有集群供货。平台已有货位数随商品一同读取，已有货位默认不参与批量提交；状态未知的供货禁止勾选。
+- 每个 SKU 统一填写每货位件数，批量生成全部勾选集群的货位，逐集群核对并可修改每箱 SKU 与数量。提交前按供货逐 SKU 校验总量与 Ozon 当前供应数量一致。
+- 读取商品组成在后台线程中以最多 3 个并发请求进行；批量写入最多 2 个供货并发，按供货显示结果与操作 ID，查询 `/v2/cargoes/create/info` 验证平台处理状态。写请求不自动重试；已有货位的供货需显式勾选并在总确认中提示替换。
+- 验证：`cargo check --locked`、`cargo test --locked`（201 通过、5 忽略）、`pnpm build` 均通过。使用 `desktop-next/scripts/build-tauri-release.cmd` 构建 Release，覆盖根目录 EXE；两者大小均为 33,758,720 字节，SHA-256 均为 `993284241BBC424C254F114F22B42CF21E3503A366DEA71D4FE7FBBCB26FB9D4`。
+- 已启动根目录 EXE 并确认约仓页面从 `http://tauri.localhost/` 内嵌前端加载。当前打开的是无活动供应单的默认本土店，用户同时操作窗口，故未继续切换店铺或执行真实货位提交；批量弹窗的可见验收与 Ozon 远程处理结果仍待实际供应单验证。
