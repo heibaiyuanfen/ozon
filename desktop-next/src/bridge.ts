@@ -217,6 +217,9 @@ export async function campaignControl(
 ): Promise<string> {
   return invoke("campaign_control", { input });
 }
+export async function campaignInventory(): Promise<import("./types").CampaignInventoryRow[]> {
+  return invoke("campaign_inventory");
+}
 
 export async function campaignAiAnalysis(campaignId: string): Promise<string> {
   return invoke("campaign_ai_analysis", { campaignId });
@@ -594,8 +597,8 @@ export async function searchSupplyDropoffs(search: string): Promise<SupplyDropof
 export async function createSupplyWorkflowDrafts(mode: "DIRECT" | "CROSSDOCK", groups: SupplyDraftGroupInput[], dropoffWarehouseId: number | null, dropoffWarehouseType: string | null, confirmation: string): Promise<SupplyDraftCreated[]> {
   return invoke("create_supply_workflow_drafts", { mode, groups, dropoffWarehouseId, dropoffWarehouseType, confirmation });
 }
-export async function supplyWorkflowDraftStatus(draftIds: number[]): Promise<SupplyDraftStatus[]> {
-  return isTauri() ? invoke("supply_workflow_draft_status", { draftIds }) : [];
+export async function supplyWorkflowDraftStatus(draftIds: number[], currentPlan: SupplyDraftGroupInput[] = []): Promise<SupplyDraftStatus[]> {
+  return isTauri() ? invoke("supply_workflow_draft_status", { draftIds, currentPlan }) : [];
 }
 export async function supplyWorkflowDraftTimeslots(draftId: number, mode: "DIRECT" | "CROSSDOCK" | "MULTI_CLUSTER", selectedClusterWarehouses: SupplyClusterWarehouseInput[], dateFrom: string, dateTo: string): Promise<SupplyTimeslot[]> {
   return isTauri() ? invoke("supply_workflow_draft_timeslots", { draftId, mode, selectedClusterWarehouses, dateFrom, dateTo }) : [];
@@ -961,8 +964,8 @@ export async function priceRepriceValidate(sku: string, priceCny: number): Promi
 export async function refreshPriceIntelligence(skus: string[]): Promise<import("./types").PriceIntelligenceRefreshResult> {
   return invoke("refresh_price_intelligence", { skus });
 }
-export async function saveProfitMonitorSettings(warningMargin: number): Promise<import("./types").PriceIntelligenceData> {
-  return invoke("save_profit_monitor_settings", { form: { warningMargin } });
+export async function saveProfitMonitorSettings(form: import("./types").ProfitMonitorSettings): Promise<import("./types").PriceIntelligenceData> {
+  return invoke("save_profit_monitor_settings", { form });
 }
 export async function updateProductPrice(
   form: import("./types").ProductPriceUpdate,

@@ -53,10 +53,17 @@ pub struct PriceIntelligenceData {
     commission_threshold_cny: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfitMonitorSettings {
     warning_margin: f64,
+    advertising_rate: f64,
+    damage_rate: f64,
+    label_fee_cny: f64,
+    low_commission_rate: f64,
+    high_commission_rate: f64,
+    logistics_commission_rate: f64,
+    commission_threshold_cny: f64,
 }
 
 #[derive(Serialize)]
@@ -89,6 +96,48 @@ const HIGH_COMMISSION: f64 = 0.15;
 const LOGISTICS_COMMISSION: f64 = 0.02;
 const COMMISSION_THRESHOLD: f64 = 134.0;
 
+impl Default for ProfitMonitorSettings {
+    fn default() -> Self {
+        Self { warning_margin: 15.0, advertising_rate: AD_RATE, damage_rate: DAMAGE_RATE,
+            label_fee_cny: LABEL_FEE, low_commission_rate: LOW_COMMISSION,
+            high_commission_rate: HIGH_COMMISSION, logistics_commission_rate: LOGISTICS_COMMISSION,
+            commission_threshold_cny: COMMISSION_THRESHOLD }
+    }
+}
+
+fn monitor_settings(c: &Connection) -> ProfitMonitorSettings {
+    let mut s = ProfitMonitorSettings::default();
+    for (key, target) in [
+        ("cross_profit_warning_margin", &mut s.warning_margin),
+        ("cross_profit_advertising_rate", &mut s.advertising_rate),
+        ("cross_profit_damage_rate", &mut s.damage_rate),
+        ("cross_profit_label_fee_cny", &mut s.label_fee_cny),
+        ("cross_profit_low_commission_rate", &mut s.low_commission_rate),
+        ("cross_profit_high_commission_rate", &mut s.high_commission_rate),
+        ("cross_profit_logistics_commission_rate", &mut s.logistics_commission_rate),
+        ("cross_profit_commission_threshold_cny", &mut s.commission_threshold_cny),
+    ] {
+        if let Ok(value) = c.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| r.get::<_, String>(0)) {
+            if let Ok(parsed) = value.parse::<f64>() { if parsed.is_finite() { *target = parsed; } }
+        }
+    }
+    s
+}
+
+fn validate_settings(s: &ProfitMonitorSettings) -> Result<(), String> {
+    if !s.warning_margin.is_finite() || !(-100.0..=100.0).contains(&s.warning_margin) {
+        return Err("利润率预警值必须在 -100% 到 100% 之间".into());
+    }
+    for (label, value) in [("广告费率", s.advertising_rate), ("货损率", s.damage_rate),
+        ("低档佣金率", s.low_commission_rate), ("高档佣金率", s.high_commission_rate),
+        ("物流佣金率", s.logistics_commission_rate)] {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) { return Err(format!("{label}必须在 0% 到 100% 之间")); }
+    }
+    if !s.label_fee_cny.is_finite() || !(0.0..=10_000.0).contains(&s.label_fee_cny) { return Err("贴单费必须在 ¥0 到 ¥10000 之间".into()); }
+    if !s.commission_threshold_cny.is_finite() || !(0.0..=22_524.99).contains(&s.commission_threshold_cny) { return Err("佣金分界价必须在 ¥0 到 ¥22524.99 之间".into()); }
+    Ok(())
+}
+
 fn ensure(c: &Connection) -> Result<(), String> {
     insights::ensure(c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS price_profit_monitor_cache(sku TEXT PRIMARY KEY,payload TEXT NOT NULL DEFAULT '{}',synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);")
@@ -113,50 +162,66 @@ fn cross_border_freight(price_cny: Option<f64>, weight_kg: Option<f64>) -> Optio
         .and_then(|(price, weight)| cross_border_shipping(price, weight))
 }
 
-fn projected_margin(price: f64, cost: f64, weight: f64) -> Option<f64> {
+fn projected_margin(price: f64, cost: f64, weight: f64, s: &ProfitMonitorSettings) -> Option<f64> {
     let freight = cross_border_shipping(price, weight)?;
-    let commission = if price > COMMISSION_THRESHOLD { HIGH_COMMISSION } else { LOW_COMMISSION };
-    let damage = (cost + LABEL_FEE + freight) * DAMAGE_RATE;
-    Some((price - cost - price * AD_RATE - damage - freight - price * commission
-        - price * LOGISTICS_COMMISSION - LABEL_FEE) / price)
+    let commission = if price > s.commission_threshold_cny { s.high_commission_rate } else { s.low_commission_rate };
+    let damage = (cost + s.label_fee_cny + freight) * s.damage_rate;
+    Some((price - cost - price * s.advertising_rate - damage - freight - price * commission
+        - price * s.logistics_commission_rate - s.label_fee_cny) / price)
 }
 
-fn minimum_price_for_margin(cost: f64, weight: f64, current: f64, warning_percent: f64) -> Option<(f64, f64)> {
+fn minimum_price_for_margin(cost: f64, weight: f64, current: f64, warning_percent: f64, s: &ProfitMonitorSettings) -> Option<(f64, f64)> {
     if !(cost > 0.0 && weight > 0.0 && current > 0.0 && warning_percent.is_finite()) { return None; }
     let target = warning_percent / 100.0;
     let start = (current * 100.0).ceil().max(1.0) as i64;
     // Shipping and commission are constant-form within these price bands.
-    for (band_start, band_end) in [(1, 13_400), (13_401, 13_499), (13_500, 63_499), (63_500, 2_252_499)] {
+    let mut boundaries = vec![0, 13_400, 13_499, 63_499, 2_252_499, (s.commission_threshold_cny * 100.0).floor() as i64];
+    boundaries.sort_unstable(); boundaries.dedup();
+    for pair in boundaries.windows(2) {
+        let (band_start, band_end) = (pair[0] + 1, pair[1]);
         let mut low = start.max(band_start);
         if low > band_end { continue; }
         let mut high = band_end;
-        if !projected_margin(high as f64 / 100.0, cost, weight).is_some_and(|m| m * 100.0 > warning_percent) { continue; }
+        if !projected_margin(high as f64 / 100.0, cost, weight, s).is_some_and(|m| m * 100.0 > warning_percent) { continue; }
         while low < high {
             let mid = low + (high - low) / 2;
-            if projected_margin(mid as f64 / 100.0, cost, weight).is_some_and(|m| m > target) { high = mid; }
+            if projected_margin(mid as f64 / 100.0, cost, weight, s).is_some_and(|m| m > target) { high = mid; }
             else { low = mid + 1; }
         }
         let price = low as f64 / 100.0;
-        if let Some(margin) = projected_margin(price, cost, weight) { return Some((price, margin)); }
+        if let Some(margin) = projected_margin(price, cost, weight, s) { return Some((price, margin)); }
     }
     None
 }
 
 #[cfg(test)]
 mod reprice_tests {
-    use super::{catalog_id, minimum_price_for_margin, projected_margin};
+    use super::{catalog_id, minimum_price_for_margin, projected_margin, ProfitMonitorSettings};
     use rusqlite::Connection;
 
     #[test]
     fn suggested_price_exceeds_warning_and_uses_full_cross_border_freight() {
-        let (price, margin) = minimum_price_for_margin(22.5, 0.6, 95.0, 15.0).unwrap();
+        let settings = ProfitMonitorSettings::default();
+        let (price, margin) = minimum_price_for_margin(22.5, 0.6, 95.0, 15.0, &settings).unwrap();
         assert!(margin > 0.15);
-        assert!(projected_margin(price - 0.01, 22.5, 0.6).is_none_or(|previous| previous <= 0.15));
+        assert!(projected_margin(price - 0.01, 22.5, 0.6, &settings).is_none_or(|previous| previous <= 0.15));
     }
 
     #[test]
     fn unsupported_freight_weight_has_no_suggestion() {
-        assert!(minimum_price_for_margin(20.0, 30.0, 95.0, 15.0).is_none());
+        assert!(minimum_price_for_margin(20.0, 30.0, 95.0, 15.0, &ProfitMonitorSettings::default()).is_none());
+    }
+
+    #[test]
+    fn custom_ad_rate_changes_margin_and_reprice_suggestion() {
+        let standard = ProfitMonitorSettings::default();
+        let costly = ProfitMonitorSettings { advertising_rate: 0.25, commission_threshold_cny: 200.0, ..standard };
+        let standard_margin = projected_margin(150.0, 22.5, 0.6, &standard).unwrap();
+        let costly_margin = projected_margin(150.0, 22.5, 0.6, &costly).unwrap();
+        assert!(costly_margin < standard_margin);
+        let normal_price = minimum_price_for_margin(22.5, 0.6, 95.0, 15.0, &standard).unwrap().0;
+        let costly_price = minimum_price_for_margin(22.5, 0.6, 95.0, 15.0, &costly).unwrap().0;
+        assert!(costly_price > normal_price);
     }
 
     #[test]
@@ -184,11 +249,12 @@ pub async fn price_reprice_suggestions(skus: Vec<String>, state: State<'_, AppSt
 fn price_reprice_suggestions_blocking(skus: Vec<String>, state: &AppState) -> Result<Vec<RepriceSuggestion>, String> {
     let c = db(state)?;
     let data = build_data(&c, state)?;
+    let settings = monitor_settings(&c);
     if !data.is_cross_border { return Err("当前利润试算仅支持跨境模型；本土店不能套用跨境运费公式".into()); }
     let selected: std::collections::HashSet<&str> = skus.iter().map(String::as_str).collect();
     Ok(data.rows.into_iter().filter(|row| selected.contains(row.sku.as_str())).map(|row| {
         let result = row.purchase_cost_cny.zip(row.weight_kg).zip(row.final_pricing_cny)
-            .and_then(|((cost, weight), current)| minimum_price_for_margin(cost, weight, current, data.warning_margin));
+            .and_then(|((cost, weight), current)| minimum_price_for_margin(cost, weight, current, data.warning_margin, &settings));
         let reason = if !row.warning { "当前利润率未低于预警线" }
             else if row.purchase_cost_cny.filter(|v| *v > 0.0).is_none() { "缺少采购成本" }
             else if row.weight_kg.filter(|v| *v > 0.0).is_none() { "缺少重量" }
@@ -269,25 +335,15 @@ fn price_reprice_validate_blocking(sku: String, price_cny: f64, state: &AppState
     let row = data.rows.iter().find(|row| row.sku == sku).ok_or("商品未找到")?;
     Ok(row.purchase_cost_cny.filter(|v| *v > 0.0)
         .zip(row.weight_kg.filter(|v| *v > 0.0))
-        .and_then(|(cost, weight)| projected_margin(price_cny, cost, weight)))
-}
-
-fn warning_margin(c: &Connection) -> f64 {
-    c.query_row(
-        "SELECT value FROM settings WHERE key='cross_profit_warning_margin'",
-        [],
-        |r| r.get::<_, String>(0),
-    )
-    .ok()
-    .and_then(|v| v.parse::<f64>().ok())
-    .unwrap_or(15.0)
+        .and_then(|(cost, weight)| projected_margin(price_cny, cost, weight, &monitor_settings(&c))))
 }
 
 fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData, String> {
     ensure(c)?;
     let is_cross_border = active_shop_kind(state)? == "cross_border";
     let rate = rub_per_cny_for(state, c)?;
-    let limit = warning_margin(c);
+    let settings = monitor_settings(c);
+    let limit = settings.warning_margin;
     // products belongs to the selected shop database. Cost and price caches may
     // contain historical imports; they cannot introduce extra shop products.
     let mut stmt = c.prepare("SELECT p.sku,COALESCE(NULLIF(p.offer_id,''),pp.offer_id,''),COALESCE(p.name,''),COALESCE(pp.currency_code,'RUB'),pp.price,pp.old_price,pp.marketing_price,pp.marketing_seller_price,pp.retail_price,pc.unit_cost_cny,COALESCE(pc.first_mile_cost_cny,CASE WHEN pc.first_mile_cost IS NULL THEN NULL ELSE pc.first_mile_cost/?1 END),pc.length_cm,pc.width_cm,pc.height_cm,pc.weight_kg,COALESCE(pp.synced_at,''),COALESCE(NULLIF(p.product_id,''),NULLIF(pp.product_id,''),'') FROM products p LEFT JOIN product_price_cache pp ON pp.sku=p.sku LEFT JOIN product_costs pc ON pc.sku=p.sku ORDER BY CASE WHEN pc.unit_cost_cny>0 AND pc.weight_kg>0 AND pc.length_cm>0 AND pc.width_cm>0 AND pc.height_cm>0 THEN 0 ELSE 1 END,p.offer_id").map_err(|e|e.to_string())?;
@@ -361,17 +417,17 @@ fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData,
             // Price-based fees are useful even when the product has no cost or
             // weight data. Damage and profit use the cross-border freight only.
             let pricing = if is_cross_border { final_cny } else { None };
-            let commission_rate = pricing.map(|a| if a > COMMISSION_THRESHOLD { HIGH_COMMISSION } else { LOW_COMMISSION });
-            let advertising = pricing.map(|a| a * AD_RATE);
+            let commission_rate = pricing.map(|a| if a > settings.commission_threshold_cny { settings.high_commission_rate } else { settings.low_commission_rate });
+            let advertising = pricing.map(|a| a * settings.advertising_rate);
             let commission = pricing.zip(commission_rate).map(|(a, rate)| a * rate);
-            let logistics = pricing.map(|a| a * LOGISTICS_COMMISSION);
+            let logistics = pricing.map(|a| a * settings.logistics_commission_rate);
             let damage = purchase.filter(|x| *x > 0.0).zip(freight)
-                .map(|(cost, shipping)| (cost + LABEL_FEE + shipping) * DAMAGE_RATE);
+                .map(|(cost, shipping)| (cost + settings.label_fee_cny + shipping) * settings.damage_rate);
             let profit = pricing.zip(purchase.filter(|x| *x > 0.0)).zip(freight).zip(damage)
                 .map(|(((a, cost), shipping), loss)| {
-                    a - cost - a * AD_RATE - loss - shipping
-                        - a * commission_rate.unwrap_or(LOW_COMMISSION)
-                        - a * LOGISTICS_COMMISSION - LABEL_FEE
+                    a - cost - a * settings.advertising_rate - loss - shipping
+                        - a * commission_rate.unwrap_or(settings.low_commission_rate)
+                        - a * settings.logistics_commission_rate - settings.label_fee_cny
                 });
             let margin = profit.zip(pricing).map(|(value, a)| value / a);
             Ok(PriceProfitRow {
@@ -398,7 +454,7 @@ fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData,
                 damage_cny: damage,
                 commission_cny: commission,
                 logistics_commission_cny: logistics,
-                label_fee_cny: is_cross_border.then_some(LABEL_FEE),
+                label_fee_cny: is_cross_border.then_some(settings.label_fee_cny),
                 profit_cny: profit,
                 profit_margin: margin,
                 warning: margin.is_some_and(|m| m * 100.0 < limit),
@@ -414,13 +470,13 @@ fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData,
         is_cross_border,
         rub_per_cny: rate,
         warning_margin: limit,
-        advertising_rate: AD_RATE,
-        damage_rate: DAMAGE_RATE,
-        label_fee_cny: LABEL_FEE,
-        low_commission_rate: LOW_COMMISSION,
-        high_commission_rate: HIGH_COMMISSION,
-        logistics_commission_rate: LOGISTICS_COMMISSION,
-        commission_threshold_cny: COMMISSION_THRESHOLD,
+        advertising_rate: settings.advertising_rate,
+        damage_rate: settings.damage_rate,
+        label_fee_cny: settings.label_fee_cny,
+        low_commission_rate: settings.low_commission_rate,
+        high_commission_rate: settings.high_commission_rate,
+        logistics_commission_rate: settings.logistics_commission_rate,
+        commission_threshold_cny: settings.commission_threshold_cny,
     })
 }
 
@@ -499,14 +555,23 @@ pub fn save_profit_monitor_settings(
     form: ProfitMonitorSettings,
     state: State<AppState>,
 ) -> Result<PriceIntelligenceData, String> {
-    if !form.warning_margin.is_finite()
-        || form.warning_margin < -100.0
-        || form.warning_margin > 100.0
-    {
-        return Err("利润率预警值必须在 -100% 到 100% 之间".into());
+    if active_shop_kind(&state)? != "cross_border" { return Err("仅跨境店可修改此利润模型".into()); }
+    validate_settings(&form)?;
+    let mut c = db(&state)?;
+    let tx = c.transaction().map_err(|e| e.to_string())?;
+    for (key, value) in [
+        ("cross_profit_warning_margin", form.warning_margin),
+        ("cross_profit_advertising_rate", form.advertising_rate),
+        ("cross_profit_damage_rate", form.damage_rate),
+        ("cross_profit_label_fee_cny", form.label_fee_cny),
+        ("cross_profit_low_commission_rate", form.low_commission_rate),
+        ("cross_profit_high_commission_rate", form.high_commission_rate),
+        ("cross_profit_logistics_commission_rate", form.logistics_commission_rate),
+        ("cross_profit_commission_threshold_cny", form.commission_threshold_cny),
+    ] {
+        tx.execute("INSERT INTO settings(key,value)VALUES(?1,?2)ON CONFLICT(key)DO UPDATE SET value=excluded.value",params![key,value.to_string()]).map_err(|e|e.to_string())?;
     }
-    let c = db(&state)?;
-    c.execute("INSERT INTO settings(key,value)VALUES('cross_profit_warning_margin',?1)ON CONFLICT(key)DO UPDATE SET value=excluded.value",[form.warning_margin.to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     build_data(&c, &state)
 }
 

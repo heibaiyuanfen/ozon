@@ -7,7 +7,6 @@ type Check = { memberships: Membership[]; incomplete: boolean };
 type Plan = { kind: "promotion" | "base" | "blocked"; price: number; steps: string[]; reason: string };
 const money = (value: number) => `¥${value.toFixed(2)}`;
 const close = (a: number, b: number) => Math.abs(a - b) <= Math.max(0.05, b * 0.005);
-const supportsPriceExit = (action: OzonPromotion) => /эластичн|elastic|скидка на сток|stock discount/i.test(`${action.title} ${action.actionType}`);
 
 export function RepriceDialog({ skus, warningMargin, mode, onClose, onChanged }: { skus: string[]; warningMargin: number; mode: "manual" | "warning"; onClose: () => void; onChanged: () => void }) {
   const [suggestions, setSuggestions] = useState<RepriceSuggestion[]>([]);
@@ -79,9 +78,7 @@ export function RepriceDialog({ skus, warningMargin, mode, onClose, onChanged }:
       return { kind: "promotion", price: target, steps: check.memberships.map(({ action }) => `将「${action.title}」活动价改为 ${money(target)}`), reason: "目标位于活动允许区间" };
     }
     if (check.memberships.some(({ product }) => product.maxActionPrice >= target)) return { kind: "blocked", price: target, steps: [], reason: "多项活动的价格上限不同，目标价不能使所有活动退出；请逐项核对" };
-    const unsupported = check.memberships.find(({ action }) => !action.isVoucherAction && !supportsPriceExit(action));
-    if (unsupported) return { kind: "blocked", price: target, steps: [], reason: `「${unsupported.action.title}」不支持已核实的自动退出方式；请在 Ozon 后台手动处理` };
-    return { kind: "base", price: target, steps: [`先修改普通售价至 ${money(target)}`, ...check.memberships.map(({ action }) => action.isVoucherAction ? `再退出「${action.title}」` : `再通过活动价格更新退出「${action.title}」并核对结果`)], reason: `目标超过活动上限 ${money(upper)}` };
+    return { kind: "base", price: target, steps: [`先修改普通售价至 ${money(target)}`, ...check.memberships.map(({ action }) => `再申请移出「${action.title}」并回读成员确认；若平台拒绝，需后台手动移出`)], reason: `目标超过活动上限 ${money(upper)}` };
   };
 
   const plans = useMemo(() => Object.fromEntries(suggestions.map((item) => [item.sku, planFor(item, Number(targets[item.sku]), checks[item.sku])])), [suggestions, targets, checks]);
@@ -115,7 +112,7 @@ export function RepriceDialog({ skus, warningMargin, mode, onClose, onChanged }:
         setLog((old) => [...old, `已提交普通售价 ${money(plan.price)}`]);
       }
       for (const { action, product } of fresh.memberships) {
-        const result = await ozonPromotionProductAction({ actionId: action.id, action: action.isVoucherAction ? "deactivate" : "exit_by_price", productId: product.id, actionPrice: action.isVoucherAction ? undefined : plan.price });
+        const result = await ozonPromotionProductAction({ actionId: action.id, action: "deactivate", productId: product.id });
         if (!result.success) throw new Error(`${action.title}：${result.message}；普通售价已提交，活动仍可能生效`);
         setLog((old) => [...old, `已退出「${action.title}」`]);
       }

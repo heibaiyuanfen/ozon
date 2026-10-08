@@ -1189,6 +1189,15 @@
   padding: 22px;
   margin-top: 18px;
 }
+.connection-transfer {
+  padding: 22px;
+  margin-top: 18px;
+}
+.connection-transfer h2 { margin: 0 0 6px; }
+.connection-transfer p { margin: 0 0 16px; color: #708099; }
+.connection-transfer > div { display: flex; flex-wrap: wrap; gap: 10px; }
+.connection-transfer input { flex: 1 1 340px; min-width: 0; padding: 10px; border: 1px solid #dce4ef; border-radius: 9px; }
+.connection-transfer button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
 .credentials-editor > h2 {
   margin: 0 0 5px;
 }
@@ -1320,6 +1329,7 @@
 .supply-created-drafts small { margin-top:3px; color:#7890ae; font-size:10px; }
 .supply-draft-refresh { justify-self:start; display:inline-flex; align-items:center; gap:6px; }
 .supply-draft-statuses { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; }
+.supply-product-checks{margin:12px 0;padding:12px;border:1px solid #dce5f3;border-radius:10px;background:#fff}.supply-product-checks>small{display:block;margin:5px 0;color:#74849b;font-size:11px}.supply-product-check-table{overflow:auto;max-height:380px}.supply-product-check-table table{width:100%;min-width:850px;border-collapse:collapse;font-size:12px}.supply-product-check-table th,.supply-product-check-table td{padding:9px;border-bottom:1px solid #e7edf5;text-align:left;vertical-align:top}.supply-product-check-table th{background:#f0f5fc;position:sticky;top:0}.supply-product-check-table td small{display:block;color:#8090a6;margin-top:3px}.supply-product-check-table .warning-row{background:#fff8eb}.supply-product-check-table td:last-child{min-width:220px;max-width:400px;overflow-wrap:anywhere}.supply-draft-statuses:has(.supply-product-checks){grid-template-columns:minmax(0,1fr)}
 .supply-draft-statuses article { padding:12px; border:1px solid #dfe7f2; border-radius:11px; background:#fbfcff; }
 .supply-draft-statuses header { display:flex; align-items:center; justify-content:space-between; gap:9px; margin-bottom:8px; }
 .supply-draft-statuses header b,.supply-draft-statuses header small { display:block; }

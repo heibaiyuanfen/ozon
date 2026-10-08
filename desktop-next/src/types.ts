@@ -281,7 +281,9 @@ export interface CampaignControlInput {
   action: "activate" | "deactivate" | "budget";
   weeklyBudget?: number;
   confirmation: string;
+  expectedShopId?: string;
 }
+export interface CampaignInventoryRow { id: string; name: string; state: string; }
 
 export interface ProductRow {
   sku: string;
@@ -1061,6 +1063,8 @@ export interface SupplyDraftStatus {
   clusterCount: number;
   clustersWithoutWarehouses: string[];
   errorReasons: string[];
+  planSource: string;
+  productChecks: Array<{ sku: string; offerId: string; productName: string; clusterId: string; clusterName: string; plannedQuantity: number | null; acceptedQuantity: number | null; shortageQuantity: number | null; status: string; reason: string }>;
 }
 export interface SupplyClusterPlan {
   sku: string;
@@ -1270,6 +1274,9 @@ export interface PriceIntelligenceData {
   lowCommissionRate: number; highCommissionRate: number; logisticsCommissionRate: number;
   commissionThresholdCny: number;
 }
+export type ProfitMonitorSettings = Pick<PriceIntelligenceData,
+  "warningMargin" | "advertisingRate" | "damageRate" | "labelFeeCny" |
+  "lowCommissionRate" | "highCommissionRate" | "logisticsCommissionRate" | "commissionThresholdCny">;
 export interface PriceIntelligenceRefreshResult {
   requested: number; refreshed: number; failed: number; errors: string[]; data: PriceIntelligenceData;
 }

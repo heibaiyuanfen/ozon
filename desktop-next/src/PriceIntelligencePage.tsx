@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Calculator, RefreshCw, Search, Tags } from "lucide-react";
 import { priceIntelligence, refreshPriceIntelligence, saveProfitMonitorSettings } from "./bridge";
-import type { PriceIntelligenceData, Shop } from "./types";
+import type { PriceIntelligenceData, ProfitMonitorSettings, Shop } from "./types";
 import { RepriceDialog } from "./RepriceDialog";
 import "./price-intelligence.css";
 
@@ -17,7 +17,8 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
   const [progress, setProgress] = useState<{ done: number; total: number; refreshed: number; failed: number } | null>(null);
   const stopRequested = useRef(false);
   const [message, setMessage] = useState("");
-  const [warning, setWarning] = useState("15");
+  const [settings, setSettings] = useState<ProfitMonitorSettings | null>(null);
+  const [settingsDraft, setSettingsDraft] = useState<Record<keyof ProfitMonitorSettings, string> | null>(null);
   const [repriceSkus, setRepriceSkus] = useState<string[] | null>(null);
   const [repriceMode, setRepriceMode] = useState<"manual" | "warning">("manual");
   const currentKind = activeShop?.kind ?? "local";
@@ -29,7 +30,7 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
     try { await onSelectShop(target.id); }
     catch (error) { setMessage(`切换店铺失败：${String(error)}`); }
   };
-  const load = () => priceIntelligence().then((value) => { setData(value); setWarning(String(value.warningMargin)); }).catch((e) => setMessage(String(e)));
+  const load = () => priceIntelligence().then((value) => { setData(value); setSettings({ warningMargin: value.warningMargin, advertisingRate: value.advertisingRate, damageRate: value.damageRate, labelFeeCny: value.labelFeeCny, lowCommissionRate: value.lowCommissionRate, highCommissionRate: value.highCommissionRate, logisticsCommissionRate: value.logisticsCommissionRate, commissionThresholdCny: value.commissionThresholdCny }); setSettingsDraft({ warningMargin: String(value.warningMargin), advertisingRate: String(value.advertisingRate * 100), damageRate: String(value.damageRate * 100), labelFeeCny: String(value.labelFeeCny), lowCommissionRate: String(value.lowCommissionRate * 100), highCommissionRate: String(value.highCommissionRate * 100), logisticsCommissionRate: String(value.logisticsCommissionRate * 100), commissionThresholdCny: String(value.commissionThresholdCny) }); }).catch((e) => setMessage(String(e)));
   useEffect(() => { void load(); }, []);
   const rows = useMemo(() => (data?.rows ?? []).filter((row) => `${row.sku} ${row.offerId} ${row.productName}`.toLowerCase().includes(query.trim().toLowerCase())), [data, query]);
   const refresh = async (chosen: string[]) => {
@@ -75,9 +76,13 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
     } finally { setBusy(false); }
   };
   const saveLimit = async () => {
-    try { const value = await saveProfitMonitorSettings(Number(warning)); setData(value); setMessage("利润率预警线已保存"); }
+    if (!settingsDraft) return;
+    const parsed = Object.fromEntries(Object.entries(settingsDraft).map(([key, raw]) => [key, Number(raw) / (["advertisingRate", "damageRate", "lowCommissionRate", "highCommissionRate", "logisticsCommissionRate"].includes(key) ? 100 : 1)])) as unknown as ProfitMonitorSettings;
+    if (Object.values(settingsDraft).some((raw) => raw.trim() === "") || Object.values(parsed).some((value) => !Number.isFinite(value))) { setMessage("请填写有效的利润参数"); return; }
+    try { const value = await saveProfitMonitorSettings(parsed); setData(value); setSettings(parsed); setMessage("利润预估参数已保存，商品利润和预警已重新计算"); }
     catch (e) { setMessage(String(e)); }
   };
+  const settingField = (key: keyof ProfitMonitorSettings, label: string, rate = false) => <label key={key}>{label}<input type="number" step={rate ? "0.1" : "0.01"} value={settingsDraft?.[key] ?? ""} onChange={(event) => setSettingsDraft((old) => old && ({ ...old, [key]: event.target.value }))}/>{rate ? "%" : "¥"}</label>;
   const complete = data?.rows.filter((r) => r.profitMargin != null).length ?? 0;
   const warnings = data?.rows.filter((r) => r.warning).length ?? 0;
   const shownPrice = (value: number | null, currencyCode: string) => {
@@ -108,12 +113,21 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
       <label className="pi-search"><Search size={16}/><input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="搜索 SKU、货号或商品名"/></label>
       <button disabled={!selected.size || busy} onClick={()=>refresh([...selected])}>更新所选（{selected.size}）</button>
       {data?.isCrossBorder && <><button disabled={busy || !selected.size} onClick={() => { setRepriceMode("manual"); setRepriceSkus([...selected]); }}>手动调价所选（{selected.size}）</button><button disabled={busy || ![...selected].some((sku) => data.rows.some((row) => row.sku === sku && row.warning))} onClick={() => { setRepriceMode("warning"); setRepriceSkus([...selected].filter((sku) => data.rows.some((row) => row.sku === sku && row.warning))); }}>预警商品试算</button><button disabled={!warnings || busy} onClick={() => setSelected(new Set(data.rows.filter((row) => row.warning).map((row) => row.sku)))}>选择全部预警</button></>}
-      {data?.isCrossBorder && <div className="pi-limit"><label>利润率低于</label><input type="number" value={warning} onChange={(e)=>setWarning(e.target.value)}/><span>% 时预警</span><button onClick={saveLimit}>保存</button></div>}
     </section>
     {message && <div className="sync-message">{message}</div>}
     <section className="pi-assumptions">
-      {data?.isCrossBorder ? <><b>跨境预估规则</b><span>阶梯跨境运费已包含全部运费，不加头程</span><span>货损 (成本 + 贴单 + 跨境运费) × 3%</span><span>广告 10%</span><span>贴单 ¥2</span><span>佣金 ≤¥134：13%，&gt;¥134：15%</span><span>物流佣金 2%</span></> : <><b>本土店</b><span>不使用跨境运费阶梯；物流费用以本土实际结算为准</span></>}
+      {data?.isCrossBorder ? <><b>跨境预估规则</b><span>阶梯跨境运费已包含全部运费，不加头程</span><span>货损 (成本 + 贴单 + 跨境运费) × {((settings?.damageRate ?? data.damageRate) * 100).toFixed(1)}%</span><span>广告 {((settings?.advertisingRate ?? data.advertisingRate) * 100).toFixed(1)}%</span><span>贴单 ¥{settings?.labelFeeCny ?? data.labelFeeCny}</span><span>佣金 ≤¥{settings?.commissionThresholdCny ?? data.commissionThresholdCny}：{((settings?.lowCommissionRate ?? data.lowCommissionRate) * 100).toFixed(1)}%，&gt;：{((settings?.highCommissionRate ?? data.highCommissionRate) * 100).toFixed(1)}%</span><span>物流佣金 {((settings?.logisticsCommissionRate ?? data.logisticsCommissionRate) * 100).toFixed(1)}%</span></> : <><b>本土店</b><span>不使用跨境运费阶梯；物流费用以本土实际结算为准</span></>}
     </section>
+    {data?.isCrossBorder && settings && <section className="card pi-settings"><h2>利润预估参数</h2><p>当前店铺单独保存；保存后会重新计算商品利润、预警和调价试算。</p><div className="pi-settings-grid">
+      {settingField("warningMargin", "低利润预警线", true)}
+      {settingField("advertisingRate", "广告费率", true)}
+      {settingField("damageRate", "货损率", true)}
+      {settingField("labelFeeCny", "贴单费")}
+      {settingField("commissionThresholdCny", "佣金分界价")}
+      {settingField("lowCommissionRate", "低档平台佣金", true)}
+      {settingField("highCommissionRate", "高档平台佣金", true)}
+      {settingField("logisticsCommissionRate", "物流佣金", true)}
+    </div><button className="primary" onClick={() => void saveLimit()}>保存并重新计算</button></section>}
     <section className="card pi-table-wrap"><table className="pi-table"><thead><tr>
       <th><input type="checkbox" checked={!!rows.length && rows.every(r=>selected.has(r.sku))} onChange={(e)=>setSelected(e.target.checked?new Set(rows.map(r=>r.sku)):new Set())}/></th><th>商品</th><th>前台价<br/><small>补贴后</small></th><th>促销价</th><th>设置原价</th><th>最终定价</th><th>Ozon 补贴</th><th>成本资料</th>{data?.isCrossBorder && <><th>费用拆解</th><th>利润 / 利润率</th></>}<th>状态</th>
     </tr></thead><tbody>{rows.map((row)=><tr key={row.sku} className={row.warning?"warning-row":""}>

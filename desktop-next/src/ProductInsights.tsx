@@ -331,6 +331,18 @@ function ProductDetailModal({
   const recent = data.trend.slice(-7).reduce((s, x) => s + x.units, 0),
     previous = data.trend.slice(-14, -7).reduce((s, x) => s + x.units, 0),
     change = previous ? ((recent - previous) / previous) * 100 : null;
+  const periodTotals = (days: number) =>
+    data.trend.slice(-days).reduce(
+      (total, day) => ({
+        revenue: total.revenue + day.revenue,
+        adSpend: total.adSpend + day.adSpend,
+      }),
+      { revenue: 0, adSpend: 0 },
+    );
+  const monthTotals = periodTotals(30);
+  const adShare = monthTotals.revenue > 0
+    ? `${(monthTotals.adSpend / monthTotals.revenue * 100).toFixed(2)}%`
+    : "—";
   const save = async () => {
     await saveProductClusterWeights(data.sku, weights);
     setMessage("权重已归一化保存，将用于该产品的集群配送费估算。");
@@ -447,6 +459,14 @@ function ProductDetailModal({
             {priceLogs.slice(0,5).map((log)=><div key={log.id}><time>{log.createdAt}</time><span>₽{log.beforePrice} → ₽{log.requestedPrice}</span><b className={log.status}>{log.status}</b><small>{log.message}</small></div>)}
             {!priceLogs.length && <p>暂无 ERP 改价记录。</p>}
           </div>
+        </section>
+        <section className="product-ad-share-panel">
+          <div>
+            <h3>单品广告占比 · 近 30 天</h3>
+            <p>广告花费 ÷ 单品销售额；仅统计可归属此 SKU 的广告花费。</p>
+          </div>
+          <strong>{adShare}</strong>
+          <span>广告花费 {cash(monthTotals.adSpend, currency)} / 销售额 {cash(monthTotals.revenue, currency)}</span>
         </section>
         <div className="product-detail-charts">
           <section>

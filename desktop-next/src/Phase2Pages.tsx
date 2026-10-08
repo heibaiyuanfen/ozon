@@ -6,6 +6,7 @@ import {
   CircleAlert,
   Database,
   Download,
+  Upload,
   KeyRound,
   PackageCheck,
   Pencil,
@@ -22,10 +23,13 @@ import {
 import {
   createShop,
   deleteShop,
+  exportApiBundle,
   exportProductCosts,
   exportProductBarcodes,
   loadCredentialsForm,
   getInventoryAlertState,
+  importApiBundle,
+  connectionStatus,
   matchProductCosts,
   removeInventoryAlertProduct,
   saveCredentialsForm,
@@ -1145,11 +1149,16 @@ function ConnectionCard({
 }
 export function SettingsPage({ status }: { status: ConnectionStatus | null }) {
   const [form, setForm] = useState<CredentialsForm | null>(null),
-    [message, setMessage] = useState("");
+    [message, setMessage] = useState(""),
+    [transferMessage, setTransferMessage] = useState(""),
+    [apiPath, setApiPath] = useState(""),
+    [transferBusy, setTransferBusy] = useState(false),
+    [currentStatus, setCurrentStatus] = useState<ConnectionStatus | null>(status);
+  useEffect(() => setCurrentStatus(status), [status]);
   useEffect(() => {
     loadCredentialsForm().then(setForm);
   }, []);
-  if (!status) return <div className="empty">正在读取连接状态…</div>;
+  if (!currentStatus) return <div className="empty">正在读取连接状态…</div>;
   const field = (key: keyof CredentialsForm, label: string, secret = false) => (
     <label>
       {label}
@@ -1165,12 +1174,40 @@ export function SettingsPage({ status }: { status: ConnectionStatus | null }) {
     if (!form) return;
     try {
       await saveCredentialsForm(form);
+      setCurrentStatus(await connectionStatus());
       window.dispatchEvent(new Event("report-settings-changed"));
       setMessage(
         "配置已保存；汇率、税率和回款手续费已清除旧报表缓存并将按新参数计算。",
       );
     } catch (error) {
       setMessage(String(error));
+    }
+  };
+  const exportConfig = async () => {
+    setTransferBusy(true);
+    try {
+      setTransferMessage(`配置已导出：${await exportApiBundle()}`);
+    } catch (error) {
+      setTransferMessage(`导出失败：${String(error)}`);
+    } finally {
+      setTransferBusy(false);
+    }
+  };
+  const importConfig = async () => {
+    if (!apiPath.trim()) return;
+    if (!window.confirm("导入将覆盖当前店铺配置包中对应的连接设置和财务参数。确定继续吗？")) return;
+    setTransferBusy(true);
+    try {
+      await importApiBundle(apiPath.trim());
+      const [nextForm, nextStatus] = await Promise.all([loadCredentialsForm(), connectionStatus()]);
+      setForm(nextForm);
+      setCurrentStatus(nextStatus);
+      window.dispatchEvent(new Event("report-settings-changed"));
+      setTransferMessage("配置导入成功，当前店铺设置已刷新。密钥已在本机重新加密。");
+    } catch (error) {
+      setTransferMessage(`导入失败：${String(error)}`);
+    } finally {
+      setTransferBusy(false);
     }
   };
   return (
@@ -1184,40 +1221,50 @@ export function SettingsPage({ status }: { status: ConnectionStatus | null }) {
         <ConnectionCard
           icon={<Server />}
           title="Ozon Seller API"
-          configured={status.sellerApiConfigured}
+          configured={currentStatus.sellerApiConfigured}
           lines={[
-            `Client ID：${status.sellerClientId || "未填写"}`,
-            `最近同步：${status.lastSuccessfulSync || "尚未同步"}`,
+            `Client ID：${currentStatus.sellerClientId || "未填写"}`,
+            `最近同步：${currentStatus.lastSuccessfulSync || "尚未同步"}`,
           ]}
         />
         <ConnectionCard
           icon={<Database />}
           title="Performance API"
-          configured={status.performanceApiConfigured}
+          configured={currentStatus.performanceApiConfigured}
           lines={[
-            `Client ID：${status.performanceClientId || "未填写"}`,
+            `Client ID：${currentStatus.performanceClientId || "未填写"}`,
             "用于广告活动与日报同步",
           ]}
         />
         <ConnectionCard
           icon={<ShieldCheck />}
           title="AI 分析"
-          configured={status.aiConfigured}
+          configured={currentStatus.aiConfigured}
           lines={[
-            `服务地址：${status.aiBaseUrl || "未填写"}`,
-            `模型：${status.aiModel || "未填写"}`,
+            `服务地址：${currentStatus.aiBaseUrl || "未填写"}`,
+            `模型：${currentStatus.aiModel || "未填写"}`,
           ]}
         />
         <ConnectionCard
           icon={<CheckCircle2 />}
           title="飞书同步"
-          configured={status.feishuConfigured}
+          configured={currentStatus.feishuConfigured}
           lines={[
             "多维表格与机器人状态",
-            status.feishuConfigured ? "应用凭证已保存" : "尚未保存完整凭证",
+            currentStatus.feishuConfigured ? "应用凭证已保存" : "尚未保存完整凭证",
           ]}
         />
       </div>
+      <section className="card connection-transfer">
+        <h2>配置导出与导入</h2>
+        <p>导出当前店铺的 API、飞书、AI 连接与汇率等参数。配置包包含明文密钥，请妥善保管；导入时密钥会在本机重新加密。</p>
+        <div>
+          <input value={apiPath} onChange={(event) => setApiPath(event.target.value)} placeholder="粘贴 .ozon-api.json 文件的完整路径" aria-label="配置包文件路径" />
+          <button className="outline-button" disabled={transferBusy} onClick={exportConfig}><Download size={15} />导出当前配置</button>
+          <button className="dark-button" disabled={transferBusy || !apiPath.trim()} onClick={importConfig}><Upload size={15} />导入配置</button>
+        </div>
+        {transferMessage && <p role="status" className="connection-transfer-message">{transferMessage}</p>}
+      </section>
       {form && (
         <section className="card credentials-editor">
           <h2>编辑连接凭证</h2>

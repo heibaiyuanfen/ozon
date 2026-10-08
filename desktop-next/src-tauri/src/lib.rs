@@ -350,7 +350,11 @@ struct CampaignControlInput {
     action: String,
     weekly_budget: Option<f64>,
     confirmation: String,
+    expected_shop_id: Option<String>,
 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CampaignInventoryRow { id: String, name: String, state: String }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProductRow {
@@ -861,13 +865,13 @@ struct SupplyTimeslot {
     from: String,
     to: String,
 }
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SupplyDraftItemInput {
     sku: String,
     quantity: i64,
 }
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SupplyDraftGroupInput {
     macrolocal_cluster_id: String,
@@ -913,6 +917,16 @@ struct SupplyDraftStatusRow {
     cluster_count: usize,
     clusters_without_warehouses: Vec<String>,
     error_reasons: Vec<String>,
+    product_checks: Vec<SupplyDraftProductCheck>,
+    plan_source: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupplyDraftProductCheck {
+    sku: String, offer_id: String, product_name: String,
+    cluster_id: String, cluster_name: String,
+    planned_quantity: Option<i64>, accepted_quantity: Option<i64>, shortage_quantity: Option<i64>,
+    status: String, reason: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1627,7 +1641,7 @@ fn promotion_result<'a>(response: &'a serde_json::Value) -> &'a serde_json::Valu
 
 fn promotion_product_id(value: &serde_json::Value) -> i64 {
     value.get("id").or_else(|| value.get("product_id"))
-        .and_then(|v| v.as_i64()).unwrap_or(0)
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok())).unwrap_or(0)
 }
 
 fn promotion_text(value: &serde_json::Value, key: &str) -> String {
@@ -1637,17 +1651,49 @@ fn promotion_text(value: &serde_json::Value, key: &str) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn promotion_supports_price_exit(action: &serde_json::Value) -> bool {
     let label = format!("{} {}", promotion_text(action, "title"), promotion_text(action, "action_type")).to_lowercase();
     label.contains("эластичн") || label.contains("elastic") || label.contains("скидка на сток") || label.contains("stock discount")
 }
 
+#[cfg(test)]
 fn promotion_action_sku(listing: &serde_json::Value, product_id: i64) -> Option<i64> {
     listing.get("products")?.as_array()?.iter()
         .find(|item| promotion_product_id(item) == product_id)
         .and_then(|item| item.get("sku"))
         .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse::<i64>().ok()))
         .filter(|sku| *sku > 0)
+}
+
+#[cfg(test)]
+fn promotion_catalog_sku(response: &serde_json::Value, product_id: i64) -> Result<i64, String> {
+    let items = response.get("items").or_else(|| response.pointer("/result/items"))
+        .and_then(|v| v.as_array()).ok_or("Ozon 商品信息接口未返回商品列表；未提交促销更改")?;
+    let matched: Vec<_> = items.iter().filter(|item| promotion_product_id(item) == product_id).collect();
+    if matched.len() != 1 { return Err("Ozon 商品信息接口无法唯一核对该商品 ID；未提交促销更改".into()); }
+    let item = matched[0];
+    let mut skus = std::collections::BTreeSet::new();
+    let positive_sku = |value: &serde_json::Value| value.as_i64().or_else(|| value.as_str()?.parse().ok()).filter(|v| *v > 0);
+    if let Some(sku) = item.get("sku").and_then(positive_sku) { skus.insert(sku); }
+    if skus.is_empty() {
+        if let Some(sources) = item.get("sources").and_then(|v| v.as_array()) {
+            for source in sources { if let Some(sku) = source.get("sku").and_then(positive_sku) { skus.insert(sku); } }
+        }
+    }
+    if skus.len() != 1 { return Err("Ozon 商品信息接口未返回唯一数字 SKU；未提交促销更改".into()); }
+    Ok(*skus.first().unwrap())
+}
+
+fn promotion_update_product(product_id: i64, price: f64, currency: &str) -> Result<serde_json::Value, String> {
+    if product_id <= 0 { return Err("促销商品 Product ID 必须大于 0".into()); }
+    if !price.is_finite() || price <= 0.0 { return Err("活动价必须是有效正数".into()); }
+    Ok(serde_json::json!({"product_id":product_id,"action_price":{"amount":format!("{price:.2}"),"currency_code":currency}}))
+}
+
+fn promotion_removal_body(action_id: i64, product_id: i64) -> Result<serde_json::Value, String> {
+    if action_id <= 0 || product_id <= 0 { return Err("活动 ID 和商品 ID 必须大于 0".into()); }
+    Ok(serde_json::json!({"action_id":action_id,"product_ids":[product_id]}))
 }
 
 #[tauri::command]
@@ -1785,26 +1831,26 @@ fn ozon_promotion_product_action_blocking(action_id: i64, action: String, produc
         .and_then(|items| items.iter().find(|item| promotion_number(item, "id") as i64 == action_id))
         .ok_or("Ozon 当前活动列表未包含该活动，未提交更改")?;
     let voucher = selected.get("is_voucher_action").and_then(|v| v.as_bool()).unwrap_or(false);
-    if action == "exit_by_price" && (voucher || !promotion_supports_price_exit(selected)) {
-        return Err("该活动不支持通过提高活动价自动退出；未提交更改".into());
+    if action == "exit_by_price" {
+        return Err("提高活动价不会保证退出促销；请使用明确的移出商品操作".into());
     }
-    // The promotion listing is the authoritative product ID -> numeric SKU mapping.
-    // The local product catalog may have a missing product_id even when the
-    // already-verified promotion membership and price cache are complete.
-    let sku_number = if action == "deactivate" { None } else {
+    // The update API identifies products by product_id. Verify membership by
+    // that same ID; an absent SKU in the listing does not block this request.
+    {
         let participating = ozon_promotion_products_blocking(action_id, "participating".into(), state)?;
-        let mut sku = promotion_action_sku(&participating, product_id);
-        if sku.is_none() && action == "activate" {
+        let mut member = participating.get("products").and_then(|v| v.as_array())
+            .is_some_and(|items| items.iter().any(|item| promotion_product_id(item) == product_id));
+        if !member && action == "activate" {
             let candidates = ozon_promotion_products_blocking(action_id, "candidates".into(), state)?;
-            sku = promotion_action_sku(&candidates, product_id);
+            member |= candidates.get("products").and_then(|v| v.as_array())
+                .is_some_and(|items| items.iter().any(|item| promotion_product_id(item) == product_id));
         }
-        Some(sku.ok_or("Ozon 当前活动商品清单中找不到对应的数字 SKU；未提交促销更改")?)
-    };
+        if !member { return Err("Ozon 当前活动商品清单中未找到该商品 ID；未提交促销更改".into()); }
+    }
     let (path, body) = if action == "deactivate" {
-        if !voucher { return Err("新版 Ozon 仅允许对优惠码活动强制移出商品；其他活动需先通过新版价格更新接口调整到活动上限以上，当前未自动退出".into()); }
         (
             "/v2/actions/products/deactivate",
-            serde_json::json!({"action_id":action_id,"product_ids":[product_id]}),
+            promotion_removal_body(action_id, product_id)?,
         )
     } else {
         let price = action_price
@@ -1812,7 +1858,7 @@ fn ozon_promotion_product_action_blocking(action_id: i64, action: String, produc
             .ok_or("活动价必须大于 0")?;
         let quantity = if action == "exit_by_price" { None } else { Some(stock.filter(|value| *value >= 0).ok_or("活动数量不能小于 0")?) };
         let currency = if active_shop_kind(state)? == "cross_border" { "CNY" } else { "RUB" };
-        let mut product = serde_json::json!({"sku":sku_number.ok_or("缺少活动商品 SKU")?,"action_price":{"amount":format!("{price:.2}"),"currency_code":currency}});
+        let mut product = promotion_update_product(product_id, price, currency)?;
         if voucher { product["stock"] = serde_json::json!(quantity.ok_or("优惠码活动必须提供活动数量")?); }
         (
             "/v1/actions/products/update",
@@ -1837,8 +1883,21 @@ fn ozon_promotion_product_action_blocking(action_id: i64, action: String, produc
         .and_then(|value| value.as_array())
         .map(|items| items.iter().any(|item| item.as_i64() == Some(product_id)))
         .unwrap_or(false);
-    let success = rejection.is_empty() && accepted;
-    let message = if success {
+    let mut success = rejection.is_empty() && accepted;
+    let mut verification_message = String::new();
+    if success && action == "deactivate" {
+        match ozon_promotion_products_blocking(action_id, "participating".into(), state) {
+            Ok(listing) => {
+                if listing["products"].as_array().is_some_and(|items| items.iter().any(|item| promotion_product_id(item) == product_id)) {
+                    success = false;
+                    verification_message = "Ozon 已接收移出请求，但回读仍显示商品在活动中；请稍后刷新核对，不重复改活动价".into();
+                }
+            }
+            Err(error) => { success = false; verification_message = format!("Ozon 已接收移出请求，但无法确认活动成员：{error}"); }
+        }
+    }
+    let unverified = !verification_message.is_empty();
+    let message = if unverified { verification_message } else if success {
         if action == "deactivate" || action == "exit_by_price" {
             "商品已移出促销".to_string()
         } else {
@@ -1848,10 +1907,10 @@ fn ozon_promotion_product_action_blocking(action_id: i64, action: String, produc
         if rejection.is_empty() {
             "Ozon 未确认该商品操作，请刷新后检查活动状态".to_string()
         } else {
-            format!("Ozon 拒绝：{rejection}")
+            format!("Ozon 拒绝：{rejection}。若活动不支持 API 移出，请在 Ozon 后台该活动的“正在参与”列表勾选商品后删除，再回软件重新核对")
         }
     };
-    c.execute("INSERT INTO ozon_promotion_action_logs(action_id,product_id,action,action_price,stock,status,message) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![action_id,product_id,action,action_price,stock,if success {"success"} else {"rejected"},message]).map_err(|e| e.to_string())?;
+    c.execute("INSERT INTO ozon_promotion_action_logs(action_id,product_id,action,action_price,stock,status,message) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![action_id,product_id,action,action_price,stock,if success {"success"} else if unverified {"pending_verification"} else {"rejected"},message]).map_err(|e| e.to_string())?;
     if success {
         c.execute(
             "DELETE FROM ozon_promotion_cache WHERE cache_key='actions'",
@@ -1875,7 +1934,7 @@ fn seller_error_detail(raw: &str) -> String {
 mod seller_api_error_tests {
     use super::{
         finance_accrual_type_name, finance_timestamp, normalize_finance_accrual,
-        promotion_action_sku, promotion_number, promotion_product_id, promotion_result, promotion_supports_price_exit,
+        promotion_action_sku, promotion_catalog_sku, promotion_update_product, promotion_removal_body, promotion_number, promotion_product_id, promotion_result, promotion_supports_price_exit,
         repair_finance_accrual_attribution, seller_error_detail, DateRange,
     };
     use rusqlite::{params, Connection};
@@ -1895,6 +1954,39 @@ mod seller_api_error_tests {
         let listing = serde_json::json!({"products":[{"id":321,"sku":"2483087902"}]});
         assert_eq!(promotion_action_sku(&listing, 321), Some(2483087902));
         assert_eq!(promotion_action_sku(&listing, 999), None);
+    }
+
+    #[test]
+    fn promotion_without_sku_resolves_verified_catalog_product() {
+        let listing = serde_json::json!({"products":[{"id":"321","actionPrice":101}]});
+        assert_eq!(promotion_product_id(&listing["products"][0]), 321);
+        assert_eq!(promotion_action_sku(&listing, 321), None);
+        assert_eq!(promotion_catalog_sku(&serde_json::json!({"items":[{"id":321,"sku":2483116653_i64}]}),321).unwrap(),2483116653);
+        assert_eq!(promotion_catalog_sku(&serde_json::json!({"result":{"items":[{"id":"321","sources":[{"sku":"2483116653"}]}]}}),321).unwrap(),2483116653);
+        assert!(promotion_catalog_sku(&serde_json::json!({"items":[{"id":999,"sku":2483116653_i64}]}),321).is_err());
+        assert!(promotion_catalog_sku(&serde_json::json!({"items":[{"id":321,"sources":[{"sku":123},{"sku":456}]}]}),321).is_err());
+        assert!(promotion_catalog_sku(&serde_json::json!({"items":[{"id":321,"sku":0}]}),321).is_err());
+    }
+
+    #[test]
+    fn promotion_update_sends_product_id_required_by_ozon() {
+        let product = promotion_update_product(321,117.72,"CNY").unwrap();
+        assert_eq!(product["product_id"],321);
+        assert!(product.get("sku").is_none());
+        assert_eq!(product["action_price"]["amount"],"117.72");
+        assert_eq!(product["action_price"]["currency_code"],"CNY");
+        assert!(promotion_update_product(0,117.72,"CNY").is_err());
+        assert!(promotion_update_product(321,f64::NAN,"CNY").is_err());
+    }
+
+    #[test]
+    fn promotion_exit_requests_removal_without_invalid_discount_price() {
+        let body = promotion_removal_body(123,2226717574).unwrap();
+        assert_eq!(body["product_ids"][0],2226717574_i64);
+        assert_eq!(body["action_id"],123);
+        assert!(body.get("products").is_none());
+        assert!(body.get("action_price").is_none());
+        assert!(promotion_removal_body(123,0).is_err());
     }
 
     #[test]
@@ -3134,6 +3226,10 @@ fn campaign_control_blocking(
     input: CampaignControlInput,
     state: &AppState,
 ) -> Result<String, String> {
+    if let Some(expected) = &input.expected_shop_id {
+        let current = state.active_shop_id.lock().map_err(|_| "店铺状态锁异常")?;
+        if *current != *expected { return Err("当前店铺已切换，批量广告操作已停止".into()); }
+    }
     if input.confirmation.trim() != "确认执行" {
         return Err("请输入“确认执行”后再提交广告写操作".into());
     }
@@ -3248,6 +3344,29 @@ async fn campaign_control(
     tauri::async_runtime::spawn_blocking(move || campaign_control_blocking(input, &owned))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn campaign_inventory(state: State<'_, AppState>) -> Result<Vec<CampaignInventoryRow>, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if active_shop_kind(&owned)? != "cross_border" { return Err("批量广告控制仅供跨境店使用".into()); }
+        let c = db(&owned)?;
+        let token = performance_token(&c)?;
+        let payload = performance_get("/api/client/campaign", &token)?;
+        let source = payload.get("list").and_then(|v| v.as_array()).or_else(|| payload.as_array()).ok_or("Performance API 未返回活动清单")?;
+        let mut rows = Vec::new();
+        for item in source {
+            let id = json_text(item.get("id"));
+            if id.is_empty() { continue; }
+            let name = json_text(item.get("title"));
+            let campaign_state = json_text(item.get("state"));
+            c.execute("INSERT INTO campaigns(campaign_id,name,state,source)VALUES(?1,?2,?3,'api') ON CONFLICT(campaign_id) DO UPDATE SET name=excluded.name,state=excluded.state,source='api',updated_at=CURRENT_TIMESTAMP",params![id,name,campaign_state]).map_err(|e| e.to_string())?;
+            rows.push(CampaignInventoryRow { id, name, state: campaign_state });
+        }
+        rows.sort_by(|a,b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        Ok(rows)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -11000,6 +11119,7 @@ fn multi_cluster_dropoff_warehouse_type(_listed_type: Option<&str>) -> &'static 
 mod supply_draft_tests {
     use super::{
         collect_draft_destinations, collect_supply_timeslots, draft_status_diagnostics,
+        draft_product_checks_with_reader, SupplyDraftGroupInput, SupplyDraftItemInput,
         multi_cluster_dropoff_warehouse_type,
     };
 
@@ -11010,6 +11130,27 @@ mod supply_draft_tests {
             "DELIVERY_POINT"
         );
         assert_eq!(multi_cluster_dropoff_warehouse_type(None), "DELIVERY_POINT");
+    }
+
+    #[test]
+    fn compares_cluster_sku_quantities_and_does_not_sum_alternative_warehouses() {
+        let c=rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE products(sku TEXT,offer_id TEXT,name TEXT); INSERT INTO products VALUES('123','A','Product A');").unwrap();
+        let groups=vec![SupplyDraftGroupInput{macrolocal_cluster_id:"4036".into(),items:vec![SupplyDraftItemInput{sku:"123".into(),quantity:100}]}];
+        let partial=serde_json::json!({"clusters":[{"macrolocal_cluster_id":4036,"cluster_name":"Moscow","warehouses":[{"availability_status":{"state":"PARTIAL_AVAILABLE"},"bundle_ids":[{"bundle_id":"accepted"}],"restricted_bundle_id":"blocked"}]}]});
+        let rows=draft_product_checks_with_reader(&c,&partial,&groups,true,|id|Ok(vec![serde_json::json!({"sku":123,"quantity":if id=="accepted" {60} else {40}})]));
+        assert_eq!(rows[0].planned_quantity,Some(100)); assert_eq!(rows[0].accepted_quantity,Some(60)); assert_eq!(rows[0].shortage_quantity,Some(40)); assert_eq!(rows[0].status,"部分可配送");
+        let rows=draft_product_checks_with_reader(&c,&partial,&groups,true,|_|Err("无法读取组成".into()));
+        assert_eq!(rows[0].accepted_quantity,None); assert_eq!(rows[0].status,"数量未确认");
+        let full=serde_json::json!({"clusters":[{"macrolocal_cluster_id":4036,"warehouses":[{"availability_status":{"state":"FULL_AVAILABLE"},"storage_warehouse":null},{"availability_status":{"state":"FULL_AVAILABLE"},"storage_warehouse":null}]}]});
+        let rows=draft_product_checks_with_reader(&c,&full,&groups,true,|_|panic!("no bundle needed"));
+        assert_eq!(rows[0].accepted_quantity,Some(100)); assert_eq!(rows[0].status,"全部可配送");
+        let rows=draft_product_checks_with_reader(&c,&full,&groups,false,|_|panic!("no bundle needed"));
+        assert_eq!(rows[0].accepted_quantity,None); assert_eq!(rows[0].status,"原计划数量未确认");
+        let blocked=serde_json::json!({"clusters":[{"macrolocal_cluster_id":4036,"warehouses":[{"availability_status":{"state":"NOT_AVAILABLE","invalid_reason":"NOT_AVAILABLE_MATRIX"},"storage_warehouse":{"warehouse_id":1}}]}]});
+        let rows=draft_product_checks_with_reader(&c,&blocked,&groups,true,|_|panic!("no bundle needed"));
+        assert_eq!(rows[0].accepted_quantity,Some(0)); assert_eq!(rows[0].shortage_quantity,Some(100)); assert_eq!(rows[0].status,"不可配送");
+        let mut routes=vec![]; collect_draft_destinations(&blocked,"",&mut routes); assert!(routes.is_empty());
     }
 
     #[test]
@@ -11186,6 +11327,7 @@ async fn create_supply_workflow_drafts(
     let owned = background_state(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
         let c = db(&owned)?;
+        c.execute_batch("CREATE TABLE IF NOT EXISTS supply_draft_plan_snapshots(draft_id INTEGER PRIMARY KEY,payload TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
         let mut cluster_infos = Vec::new();
         let mut cluster_ids = Vec::new();
         for group in &groups {
@@ -11213,7 +11355,8 @@ async fn create_supply_workflow_drafts(
             let payload = seller_post_once(&c, "/v1/draft/multi-cluster/create", &body)?;
             let draft_id = supply_json_i64(payload.get("draft_id").or_else(|| payload.pointer("/result/draft_id")));
             if draft_id <= 0 { return Err("多集群越库草稿已提交，但 Ozon 未返回 draft_id；请先到后台核对，系统不会重复提交".into()); }
-            return Ok(vec![SupplyDraftCreated { draft_id, macrolocal_cluster_id: cluster_ids.join(", "), status: json_text(payload.get("status")), message: json_text(payload.get("message")) }]);
+            let snapshot_error=c.execute("INSERT OR REPLACE INTO supply_draft_plan_snapshots(draft_id,payload)VALUES(?1,?2)",params![draft_id,serde_json::to_string(&groups).map_err(|e|e.to_string())?]).err();
+            return Ok(vec![SupplyDraftCreated { draft_id, macrolocal_cluster_id: cluster_ids.join(", "), status: json_text(payload.get("status")), message: snapshot_error.map(|e|format!("草稿已创建，计划快照保存失败：{e}；不要重复创建")).unwrap_or_else(||json_text(payload.get("message"))) }]);
         }
         let mut created = Vec::new();
         for (group, cluster_info) in groups.into_iter().zip(cluster_infos.into_iter()) {
@@ -11222,7 +11365,8 @@ async fn create_supply_workflow_drafts(
             let payload = seller_post_once(&c, path, &body)?;
             let draft_id = supply_json_i64(payload.get("draft_id").or_else(|| payload.pointer("/result/draft_id")));
             if draft_id <= 0 { return Err(format!("集群 {} 的草稿已提交，但 Ozon 未返回 draft_id；请先到后台核对，系统不会重复提交", group.macrolocal_cluster_id)); }
-            created.push(SupplyDraftCreated { draft_id, macrolocal_cluster_id: group.macrolocal_cluster_id, status: json_text(payload.get("status")), message: json_text(payload.get("message")) });
+            let snapshot_error=c.execute("INSERT OR REPLACE INTO supply_draft_plan_snapshots(draft_id,payload)VALUES(?1,?2)",params![draft_id,serde_json::to_string(&vec![group.clone()]).map_err(|e|e.to_string())?]).err();
+            created.push(SupplyDraftCreated { draft_id, macrolocal_cluster_id: group.macrolocal_cluster_id, status: json_text(payload.get("status")), message: snapshot_error.map(|e|format!("草稿已创建，计划快照保存失败：{e}；不要重复创建")).unwrap_or_else(||json_text(payload.get("message"))) });
         }
         Ok(created)
     }).await.map_err(|e| format!("创建 Ozon 草稿后台任务失败：{e}"))?
@@ -11269,7 +11413,10 @@ fn collect_draft_destinations(
                     .and_then(|value| value.get("state"))
                     .and_then(|value| value.as_str())
                     == Some("FULL_AVAILABLE");
-            if warehouse_id > 0 || auto_routed {
+            let route_state = json_text(map.get("availability_status").or_else(||map.get("status")).and_then(|v|v.get("state")));
+            let blocked_route = route_state.ends_with("NOT_AVAILABLE") || route_state.ends_with("UNAVAILABLE");
+            if blocked_route { return; }
+            if !blocked_route && (warehouse_id > 0 || auto_routed) {
                 let mut name = json_text(map.get("name").or_else(|| map.get("warehouse_name")));
                 if auto_routed && name.is_empty() {
                     name = "统一发运（Ozon 自动分配）".into();
@@ -11324,6 +11471,103 @@ fn collect_supply_timeslots(value: &serde_json::Value, output: &mut Vec<SupplyTi
     }
 }
 
+fn draft_product_checks(c: &Connection, payload: &serde_json::Value, groups: &[SupplyDraftGroupInput], snapshot: bool) -> Vec<SupplyDraftProductCheck> {
+    draft_product_checks_with_reader(c,payload,groups,snapshot,|id|supply_bundle_items(c,id))
+}
+
+fn draft_product_checks_with_reader<F: FnMut(&str)->Result<Vec<serde_json::Value>,String>>(c: &Connection, payload: &serde_json::Value, groups: &[SupplyDraftGroupInput], snapshot: bool, mut read_bundle: F) -> Vec<SupplyDraftProductCheck> {
+    let clusters = payload.get("clusters").or_else(|| payload.pointer("/result/clusters")).and_then(|v|v.as_array()).cloned().unwrap_or_default();
+    let mut checks = Vec::new();
+    for group in groups {
+        let cluster = clusters.iter().find(|v| supply_identifier(v.get("macrolocal_cluster_id").or_else(||v.get("cluster_id"))) == group.macrolocal_cluster_id);
+        let cluster_name = cluster.map(|v|json_text(v.get("cluster_name"))).unwrap_or_default();
+        let warehouses = cluster.and_then(|v|v.get("warehouses")).and_then(|v|v.as_array());
+        let availability = |v: &serde_json::Value| json_text(v.pointer("/availability_status/state").or_else(||v.pointer("/status/state")));
+        // Warehouses are alternative routes, never sum their quantities.
+        let route = warehouses.and_then(|rows| rows.iter().max_by_key(|v| { let s=availability(v); if s.ends_with("FULL_AVAILABLE") {3} else if s.ends_with("PARTIAL_AVAILABLE") {2} else {1} }));
+        let state = route.map(availability).unwrap_or_default();
+        let mut accepted = std::collections::HashMap::<String,i64>::new();
+        let mut restricted = std::collections::HashMap::<String,i64>::new();
+        let mut accepted_complete = false;
+        let mut reason = route.map(|v|json_text(v.pointer("/availability_status/invalid_reason").or_else(||v.pointer("/status/invalid_reason")))).unwrap_or_default();
+        if reason.ends_with("UNSPECIFIED") { reason.clear(); }
+        if let Some(route) = route {
+            let mut ids = Vec::new();
+            if let Some(list) = route.get("bundle_ids").and_then(|v|v.as_array()) {
+                for v in list { let id=supply_identifier(v.get("bundle_id").or(Some(v))); if !id.is_empty() && !ids.contains(&id) { ids.push(id); } }
+            }
+            let id=supply_identifier(route.get("bundle_id")); if !id.is_empty() && !ids.contains(&id) {ids.push(id);}
+            accepted_complete = !ids.is_empty();
+            for id in ids {
+                match read_bundle(&id) {
+                    Ok(items) => for item in items { let sku=supply_identifier(item.get("sku")); let quantity=supply_json_i64(item.get("quantity")); if !sku.is_empty() { *accepted.entry(sku).or_default() += quantity.max(0); } },
+                    Err(e) => { accepted_complete=false; reason=format!("{reason} 商品组成读取失败：{e}"); }
+                }
+            }
+            let blocked_id=supply_identifier(route.get("restricted_bundle_id"));
+            if !blocked_id.is_empty() {
+                match read_bundle(&blocked_id) {
+                    Ok(items) => for item in items { let sku=supply_identifier(item.get("sku")); let quantity=supply_json_i64(item.get("quantity")); if !sku.is_empty() { *restricted.entry(sku).or_default() += quantity.max(0); } },
+                    Err(e) => reason=format!("{reason} 受限商品组成读取失败：{e}"),
+                }
+            }
+        }
+        let mut quantities = std::collections::BTreeMap::<String,i64>::new();
+        for item in &group.items { *quantities.entry(item.sku.clone()).or_default() += item.quantity; }
+        for (sku, quantity) in quantities {
+            let full = state.ends_with("FULL_AVAILABLE");
+            let unavailable = state.ends_with("NOT_AVAILABLE") || state.ends_with("UNAVAILABLE");
+            let mut confirmed = if accepted_complete { Some(*accepted.get(&sku).unwrap_or(&0)) }
+                else if full && snapshot {Some(quantity)} else if unavailable {Some(0)} else {None};
+            let mut shortage = confirmed.map(|q|(quantity-q).max(0));
+            let mut status = if confirmed==Some(0) {"不可配送"} else if confirmed.is_some_and(|q|q>=quantity) {"全部可配送"}
+                else if confirmed.is_some() {"部分可配送"} else if !snapshot {"原计划数量未确认"} else {"数量未确认"};
+            let mut detail = reason.clone();
+            for error in payload.get("errors").or_else(||payload.pointer("/result/errors")).and_then(|v|v.as_array()).into_iter().flatten() {
+                for validation in error.get("items_validation").and_then(|v|v.as_array()).into_iter().flatten() {
+                    if supply_identifier(validation.get("sku")) == sku {
+                        if !accepted_complete && !unavailable { confirmed=None; shortage=None; status="数量未确认"; }
+                        let reasons = validation.get("reasons").and_then(|v|v.as_array()).map(|rows|rows.iter().map(|v|json_text(Some(v))).collect::<Vec<_>>().join("、")).unwrap_or_default();
+                        if !reasons.is_empty() { detail=format!("{detail}；商品校验：{reasons}"); }
+                    }
+                }
+            }
+            if let Some(q) = restricted.get(&sku) { detail=format!("受限数量 {q} 件；{detail}"); }
+            if route.is_none() { detail="该集群未返回配送路线，不能确认可配送商品与数量".into(); }
+            if state.ends_with("PARTIAL_AVAILABLE") && !accepted_complete { detail=format!("集群仅部分可用，未取得完整 SKU 数量；{detail}"); }
+            let (offer_id,product_name) = c.query_row("SELECT COALESCE(offer_id,''),COALESCE(name,'') FROM products WHERE sku=?1",[&sku],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).unwrap_or_default();
+            checks.push(SupplyDraftProductCheck { sku,offer_id,product_name,cluster_id:group.macrolocal_cluster_id.clone(),cluster_name:cluster_name.clone(),planned_quantity:Some(quantity),accepted_quantity:confirmed,shortage_quantity:shortage,status:status.into(),reason:detail });
+        }
+    }
+    // Include every platform cluster even when old draft plans are unavailable.
+    for cluster in &clusters {
+        let id=supply_identifier(cluster.get("macrolocal_cluster_id").or_else(||cluster.get("cluster_id")));
+        if !checks.iter().any(|v|v.cluster_id==id) {
+            let mut platform_items = std::collections::BTreeMap::<String,(Option<i64>,i64)>::new();
+            let mut complete=true;
+            let route = cluster.get("warehouses").and_then(|v|v.as_array()).and_then(|v|v.first());
+            if let Some(route)=route {
+                let mut ids=Vec::new();
+                if let Some(bundles)=route.get("bundle_ids").and_then(|v|v.as_array()) { for bundle in bundles {let bundle_id=supply_identifier(bundle.get("bundle_id").or(Some(bundle))); if !bundle_id.is_empty() && !ids.iter().any(|(v,_)|v==&bundle_id) {ids.push((bundle_id,false));}} }
+                let bundle_id=supply_identifier(route.get("restricted_bundle_id")); if !bundle_id.is_empty() {ids.push((bundle_id,true));}
+                for (bundle_id,blocked) in ids {
+                    match read_bundle(&bundle_id) { Ok(items)=>for item in items {let sku=supply_identifier(item.get("sku")); if !sku.is_empty() {let quantities=platform_items.entry(sku).or_default(); if blocked {quantities.1+=supply_json_i64(item.get("quantity"));} else {*quantities.0.get_or_insert(0)+=supply_json_i64(item.get("quantity"));}}},Err(_)=>complete=false }
+                }
+            }
+            if !platform_items.is_empty() {
+                for (sku,(accepted,restricted)) in platform_items {
+                    let (offer_id,product_name)=c.query_row("SELECT COALESCE(offer_id,''),COALESCE(name,'') FROM products WHERE sku=?1",[&sku],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).unwrap_or_default();
+                    let accepted=if complete {accepted}else{None};
+                    checks.push(SupplyDraftProductCheck{sku,offer_id,product_name,cluster_id:id.clone(),cluster_name:json_text(cluster.get("cluster_name")),planned_quantity:None,accepted_quantity:accepted,shortage_quantity:None,status:"原计划数量未确认".into(),reason:format!("平台商品组成：可送 {}，受限 {restricted} 件；旧草稿没有计划快照，不能判断是否全部满足",accepted.map(|q|format!("{q} 件")).unwrap_or("未确认".into()))});
+                }
+                continue;
+            }
+            checks.push(SupplyDraftProductCheck { sku:String::new(),offer_id:String::new(),product_name:String::new(),cluster_id:id,cluster_name:json_text(cluster.get("cluster_name")),planned_quantity:None,accepted_quantity:None,shortage_quantity:None,status:"缺少原始商品计划".into(),reason:"未保存该草稿商品提交快照；选择对应产品与集群数量后重新读取，或创建新草稿保存快照".into() });
+        }
+    }
+    checks
+}
+
 fn draft_status_diagnostics(payload: &serde_json::Value) -> (usize, Vec<String>, Vec<String>) {
     let clusters = payload
         .get("clusters")
@@ -11333,7 +11577,9 @@ fn draft_status_diagnostics(payload: &serde_json::Value) -> (usize, Vec<String>,
     if let Some(clusters) = clusters {
         for cluster in clusters {
             let warehouses = cluster.get("warehouses").and_then(|value| value.as_array());
-            if warehouses.map(|rows| rows.is_empty()).unwrap_or(true) {
+            let mut routes=Vec::new();
+            collect_draft_destinations(cluster,"",&mut routes);
+            if warehouses.map(|rows| rows.is_empty()).unwrap_or(true) || routes.is_empty() {
                 let name = json_text(cluster.get("cluster_name"));
                 let id = supply_identifier(
                     cluster
@@ -11382,11 +11628,13 @@ fn draft_status_diagnostics(payload: &serde_json::Value) -> (usize, Vec<String>,
 #[tauri::command]
 async fn supply_workflow_draft_status(
     draft_ids: Vec<i64>,
+    current_plan: Option<Vec<SupplyDraftGroupInput>>,
     state: State<'_, AppState>,
 ) -> Result<Vec<SupplyDraftStatusRow>, String> {
     let owned = background_state(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
         let c = db(&owned)?;
+        c.execute_batch("CREATE TABLE IF NOT EXISTS supply_draft_plan_snapshots(draft_id INTEGER PRIMARY KEY,payload TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
         let mut rows = Vec::new();
         for draft_id in draft_ids.into_iter().filter(|id| *id > 0) {
             let payload = seller_post(
@@ -11407,6 +11655,16 @@ async fn supply_workflow_draft_status(
             let mut destinations = Vec::new();
             collect_draft_destinations(&payload, "", &mut destinations);
             let (cluster_count, clusters_without_warehouses, error_reasons) = draft_status_diagnostics(&payload);
+            let snapshot = c.query_row("SELECT payload FROM supply_draft_plan_snapshots WHERE draft_id=?1",[draft_id],|r|r.get::<_,String>(0)).ok()
+                .and_then(|raw| serde_json::from_str::<Vec<SupplyDraftGroupInput>>(&raw).ok());
+            let verified_snapshot = snapshot.is_some();
+            let groups = snapshot.or_else(|| current_plan.clone().map(|groups| groups.into_iter().filter(|group|payload.get("clusters").or_else(||payload.pointer("/result/clusters")).and_then(|v|v.as_array()).is_some_and(|clusters|clusters.iter().any(|cluster|supply_identifier(cluster.get("macrolocal_cluster_id").or_else(||cluster.get("cluster_id")))==group.macrolocal_cluster_id))).collect())).unwrap_or_default();
+            let mut product_checks = draft_product_checks(&c, &payload, &groups, verified_snapshot);
+            for check in &mut product_checks {
+                if check.cluster_name.is_empty() {
+                    check.cluster_name=c.query_row("SELECT COALESCE(MAX(NULLIF(cluster_name,'')),'') FROM inventory_stock WHERE macrolocal_cluster_id=?1",[&check.cluster_id],|r|r.get::<_,String>(0)).unwrap_or_default();
+                }
+            }
             let message = if message.is_empty() && destinations.is_empty() {
                 if !error_reasons.is_empty() {
                     format!("Ozon 未返回平台分配仓：{}", error_reasons.join("；"))
@@ -11424,6 +11682,8 @@ async fn supply_workflow_draft_status(
                 cluster_count,
                 clusters_without_warehouses,
                 error_reasons,
+                product_checks,
+                plan_source: if verified_snapshot { "创建草稿时的提交快照" } else { "当前配货篮参考；旧草稿无提交快照，不代表原始提交数量" }.into(),
             });
         }
         Ok(rows)
@@ -11710,7 +11970,7 @@ fn supply_bundle_items(c: &Connection, bundle_id: &str) -> Result<Vec<serde_json
             .or_else(|| payload.pointer("/result/items"))
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_default();
+            .ok_or("Ozon 商品组成未返回 items；不能将缺失响应视为零件商品")?;
         let next = json_text(
             payload
                 .get("last_id")
@@ -11722,12 +11982,11 @@ fn supply_bundle_items(c: &Connection, bundle_id: &str) -> Result<Vec<serde_json
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         rows.extend(page.iter().cloned());
-        if page.is_empty() || !has_next || next.is_empty() || next == last_id {
-            break;
-        }
+        if !has_next { return Ok(rows); }
+        if page.is_empty() || next.is_empty() || next == last_id { return Err("Ozon 商品组成分页不完整，数量未确认".into()); }
         last_id = next;
     }
-    Ok(rows)
+    Err("Ozon 商品组成超过分页上限，数量未确认".into())
 }
 
 fn supply_cargo_counts(payload: &serde_json::Value, supply_ids: &[i64]) -> Option<std::collections::BTreeMap<i64, usize>> {
@@ -12910,7 +13169,7 @@ fn save_credentials_form(form: CredentialsForm, state: State<AppState>) -> Resul
 #[tauri::command]
 fn export_api_bundle(state: State<AppState>) -> Result<String, String> {
     let c = db(&state)?;
-    let credentials = serde_json::json!({"seller_client_id":setting(&c,"seller_client_id"),"seller_api_key":secret_setting(&c,"seller_api_key")?,"performance_client_id":setting(&c,"performance_client_id"),"performance_client_secret":secret_setting(&c,"performance_client_secret")?,"ai_base_url":setting(&c,"ai_base_url"),"ai_api_key":secret_setting(&c,"ai_api_key")?,"ai_model":setting(&c,"ai_model"),"feishu_base_url":setting(&c,"feishu_base_url"),"feishu_app_id":setting(&c,"feishu_app_id"),"feishu_app_secret":secret_setting(&c,"feishu_app_secret")?,"feishu_app_token":setting(&c,"feishu_app_token"),"feishu_product_table_id":setting(&c,"feishu_product_table_id"),"feishu_weekly_table_id":setting(&c,"feishu_weekly_table_id"),"feishu_tracking_table_id":setting(&c,"feishu_tracking_table_id"),"feishu_series_table_id":setting(&c,"feishu_series_table_id"),"feishu_chat_id":setting(&c,"feishu_chat_id"),"feishu_packing_folder_token":setting(&c,"feishu_packing_folder_token")});
+    let credentials = serde_json::json!({"seller_client_id":setting(&c,"seller_client_id"),"seller_api_key":secret_setting(&c,"seller_api_key")?,"performance_client_id":setting(&c,"performance_client_id"),"performance_client_secret":secret_setting(&c,"performance_client_secret")?,"ai_base_url":setting(&c,"ai_base_url"),"ai_api_key":secret_setting(&c,"ai_api_key")?,"ai_model":setting(&c,"ai_model"),"feishu_base_url":setting(&c,"feishu_base_url"),"feishu_app_id":setting(&c,"feishu_app_id"),"feishu_app_secret":secret_setting(&c,"feishu_app_secret")?,"feishu_app_token":setting(&c,"feishu_app_token"),"feishu_product_table_id":setting(&c,"feishu_product_table_id"),"feishu_weekly_table_id":setting(&c,"feishu_weekly_table_id"),"feishu_tracking_table_id":setting(&c,"feishu_tracking_table_id"),"feishu_series_table_id":setting(&c,"feishu_series_table_id"),"feishu_chat_id":setting(&c,"feishu_chat_id"),"feishu_packing_folder_token":setting(&c,"feishu_packing_folder_token"),"local_rub_per_cny":setting(&c,"local_rub_per_cny"),"cross_border_rub_per_cny":setting(&c,"cross_border_rub_per_cny"),"local_tax_rate":setting(&c,"local_tax_rate"),"local_payout_fee_rate":setting(&c,"local_payout_fee_rate")});
     let shop_id = state
         .active_shop_id
         .lock()
@@ -12961,6 +13220,22 @@ fn import_api_bundle(path: String, state: State<AppState>) -> Result<i64, String
         .get("credentials")
         .and_then(|v| v.as_object())
         .ok_or("配置包缺少 credentials")?;
+    for (key, label, min, max) in [
+        ("local_rub_per_cny", "本土店汇率", f64::EPSILON, f64::MAX),
+        ("cross_border_rub_per_cny", "跨境店汇率", f64::EPSILON, f64::MAX),
+        ("local_tax_rate", "税率", 0.0, 100.0),
+        ("local_payout_fee_rate", "回款手续费", 0.0, 100.0),
+    ] {
+        if let Some(raw) = values.get(key) {
+            let value = raw.as_str().ok_or_else(|| format!("{label}必须是文本数字"))?;
+            if !value.is_empty() {
+                let number = value.parse::<f64>().map_err(|_| format!("{label}必须是有效数字"))?;
+                if !number.is_finite() || number < min || number > max {
+                    return Err(format!("{label}超出允许范围"));
+                }
+            }
+        }
+    }
     let mut c = db(&state)?;
     let tx = c.transaction().map_err(|e| e.to_string())?;
     for key in [
@@ -12977,6 +13252,10 @@ fn import_api_bundle(path: String, state: State<AppState>) -> Result<i64, String
         "feishu_series_table_id",
         "feishu_chat_id",
         "feishu_packing_folder_token",
+        "local_rub_per_cny",
+        "cross_border_rub_per_cny",
+        "local_tax_rate",
+        "local_payout_fee_rate",
     ] {
         if let Some(value) = values.get(key).and_then(|v| v.as_str()) {
             save_setting(&tx, key, value)?
@@ -12995,6 +13274,7 @@ fn import_api_bundle(path: String, state: State<AppState>) -> Result<i64, String
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
+    c.execute("DELETE FROM business_report_cache", []).map_err(|e| e.to_string())?;
     Ok(1)
 }
 
@@ -13580,6 +13860,7 @@ pub fn run() {
             contracts::purchase_contract_command,
             campaign_monitor,
             campaign_control,
+            campaign_inventory,
             campaign_ai_analysis,
             products,
             inventory,

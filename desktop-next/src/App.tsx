@@ -44,6 +44,7 @@ import {
   advertising,
   campaignAiAnalysis,
   campaignControl,
+  campaignInventory,
   campaignMonitor,
   connectionStatus,
   dashboard,
@@ -60,6 +61,7 @@ import {
 import type {
   AdvertisingData,
   CampaignMonitorData,
+  CampaignInventoryRow,
   ConnectionStatus,
   DashboardData,
   DateRange,
@@ -1002,6 +1004,7 @@ function Advertising({
   refreshing,
   refresh,
   shopId,
+  crossBorder,
 }: {
   data: AdvertisingData;
   currency: string;
@@ -1010,12 +1013,54 @@ function Advertising({
   refreshing: boolean;
   refresh: () => void;
   shopId: string;
+  crossBorder: boolean;
 }) {
   const [campaignQuery, setCampaignQuery] = useState("");
   const [productQuery, setProductQuery] = useState("");
   const [monitorId, setMonitorId] = useState<string | null>(null);
   const [monitorCache, setMonitorCache] = useState<Record<string, { data: CampaignMonitorData; at: number }>>({});
   const [seriesSelection, setSeriesSelection] = useState<Set<string>>(new Set());
+  const [inventoryRows, setInventoryRows] = useState<CampaignInventoryRow[]>([]);
+  const [selectedCampaigns, setSelectedCampaigns] = useState<Set<string>>(new Set());
+  const [inventoryBusy, setInventoryBusy] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchMessage, setBatchMessage] = useState("");
+  const [batchProgress, setBatchProgress] = useState("");
+  const loadCampaignInventory = async () => {
+    setInventoryBusy(true);
+    try { setInventoryRows(await campaignInventory()); setBatchMessage(""); }
+    catch (error) { setBatchMessage(`读取活动清单失败：${String(error)}`); }
+    finally { setInventoryBusy(false); }
+  };
+  useEffect(() => { if (crossBorder) void loadCampaignInventory(); }, [crossBorder, shopId]);
+  const runCampaignBatch = async (action: "activate" | "deactivate", scope: "all" | "selected") => {
+    if (batchBusy) return;
+    setBatchBusy(true);
+    try {
+      const fresh = await campaignInventory();
+      setInventoryRows(fresh);
+      const targets = scope === "all" ? fresh : fresh.filter((item) => selectedCampaigns.has(item.id));
+      if (!targets.length) { setBatchMessage(scope === "all" ? "当前店铺没有广告活动" : "所选活动已不在当前店铺，请重新选择"); return; }
+      const verb = action === "deactivate" ? "暂停" : "重启";
+      if (!window.confirm(`即将${verb}当前跨境店的 ${targets.length} 个广告活动，逐个写入 Ozon 并回读状态。确认执行吗？`)) return;
+      let success = 0;
+      const failures: string[] = [];
+      for (const [index, item] of targets.entries()) {
+        setBatchProgress(`${verb}中 ${index + 1}/${targets.length}：${item.name || item.id}`);
+        try { await campaignControl({ campaignId: item.id, action, confirmation: "确认执行", expectedShopId: shopId }); success++; }
+        catch (error) {
+          failures.push(`${item.name || item.id}：${String(error)}`);
+          if (String(error).includes("当前店铺已切换")) break;
+        }
+      }
+      setBatchMessage(`${verb}完成：成功 ${success}/${targets.length}${failures.length ? `；失败 ${failures.length}：${failures.slice(0, 3).join("；")}` : ""}`);
+      setSelectedCampaigns(new Set());
+      try { setInventoryRows(await campaignInventory()); }
+      catch (error) { setBatchMessage((old) => `${old}；刷新活动状态失败：${String(error)}`); }
+      refresh();
+    } catch (error) { setBatchMessage(`批量操作失败：${String(error)}`); }
+    finally { setBatchProgress(""); setBatchBusy(false); }
+  };
   const visibleCampaigns = data.campaigns.filter((x) =>
       `${x.name} ${x.id}`
         .toLowerCase()
@@ -1039,6 +1084,18 @@ function Advertising({
         refresh={refresh}
       />
       <RangeTabs days={days} setDays={setDays} />
+      {crossBorder && <section className="card campaign-batch-panel">
+        <div className="card-title">跨境店广告活动控制 <span>{inventoryRows.length} 个活动（账户完整清单）</span></div>
+        <p>选择活动后批量暂停或重启；“暂停全部”会读取当前店铺最新活动清单，不受页面日期和搜索条件限制。每个活动单独记录操作结果。</p>
+        <div className="campaign-batch-actions">
+          <button disabled={inventoryBusy || batchBusy} onClick={() => void loadCampaignInventory()}>{inventoryBusy ? "读取中" : "刷新活动清单"}</button>
+          <button disabled={batchBusy || inventoryBusy || !selectedCampaigns.size} onClick={() => void runCampaignBatch("deactivate", "selected")}>暂停所选（{selectedCampaigns.size}）</button>
+          <button disabled={batchBusy || inventoryBusy || !selectedCampaigns.size} onClick={() => void runCampaignBatch("activate", "selected")}>重启所选（{selectedCampaigns.size}）</button>
+          <button className="danger" disabled={batchBusy || inventoryBusy || !inventoryRows.length} onClick={() => void runCampaignBatch("deactivate", "all")}>一键暂停全部活动</button>
+        </div>
+        <div className="campaign-batch-list"><label><input type="checkbox" checked={inventoryRows.length > 0 && inventoryRows.every((item) => selectedCampaigns.has(item.id))} onChange={(event) => setSelectedCampaigns(event.target.checked ? new Set(inventoryRows.map((item) => item.id)) : new Set())}/>选择全部</label>{inventoryRows.map((item) => <label key={item.id}><input type="checkbox" checked={selectedCampaigns.has(item.id)} onChange={(event) => setSelectedCampaigns((old) => { const next = new Set(old); event.target.checked ? next.add(item.id) : next.delete(item.id); return next; })}/><span>{item.name || item.id}<small>{item.id} · {item.state || "状态未知"}</small></span></label>)}</div>
+        {(batchProgress || batchMessage) && <div className="sync-message" role="status">{batchProgress || batchMessage}</div>}
+      </section>}
       <AdvertisingSeriesPanel shopId={shopId} selection={seriesSelection} setSelection={setSeriesSelection} />
       <section className="card trend-card">
         <div className="section-heading">
@@ -1506,6 +1563,7 @@ export function App() {
               <Advertising
                 key={activeShop?.id}
                 shopId={activeShop?.id || ""}
+                crossBorder={activeShop?.kind === "cross_border"}
                 data={ads}
                 currency={currency}
                 days={days}
