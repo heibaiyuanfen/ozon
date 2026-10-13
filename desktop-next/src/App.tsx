@@ -93,6 +93,7 @@ import {
 } from "./OperationsPages";
 import { AdvertisingSeriesPanel } from "./AdvertisingSeriesPanel";
 import { ProductInsights } from "./ProductInsights";
+import { LocalWeeklyReportPage } from "./LocalWeeklyReportPage";
 import { ProductDifferentiationPage } from "./ProductDifferentiationPage";
 import { SelectionLibraryPage } from "./SelectionLibraryPage";
 import { CrossBorderOperationsPage } from "./CrossBorderOperationsPage";
@@ -1590,6 +1591,7 @@ export function App() {
               />
             )}{" "}
             {page === "weekly_report" && (
+              activeShop?.kind === "local" ? <LocalWeeklyReportPage key={activeShop.id}/> :
               <ReportsPage
                 key={activeShop?.id}
                 range={range}

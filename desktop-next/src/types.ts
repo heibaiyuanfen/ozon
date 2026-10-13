@@ -605,6 +605,15 @@ export interface BusinessReport {
     adSpend: number;
   }>;
 }
+export interface LocalWeeklyReport {
+  from: string; to: string;
+  revenue: number; adRevenue: number; units: number; adUnits: number;
+  acos: number | null; tacos: number | null; profit: number | null;
+  profitNote: string; salesDays: number; adDays: number;
+  daily: Array<{ day: string; revenue: number; adRevenue: number; units: number; adUnits: number; adSpend: number; acos: number | null; tacos: number | null }>;
+  products: Array<{ sku: string; offerId: string; name: string; revenue: number; units: number; adRevenue: number | null; adUnits: number | null; adSpend: number | null; acos: number | null; tacos: number | null }>;
+  profitBreakdown: Array<{ label: string; amount: number; note: string }>;
+}
 export interface MissingCostRow {
   sku: string;
   offerId: string;

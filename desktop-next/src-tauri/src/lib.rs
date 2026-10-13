@@ -27,6 +27,7 @@ mod ozon_monthly;
 mod packing;
 mod price_center;
 mod price_intelligence;
+mod local_weekly_report;
 mod product_master;
 mod product_worker;
 mod purchase_orders;
@@ -13935,6 +13936,7 @@ pub fn run() {
             import_competitor_html,
             remove_competitor,
             business_report,
+            local_weekly_report::local_weekly_report,
             ozon_monthly::export_ozon_monthly_report,
             ozon_monthly::export_ozon_cross_border_report,
             analytics_detail,

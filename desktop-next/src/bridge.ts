@@ -220,6 +220,9 @@ export async function campaignControl(
 export async function campaignInventory(): Promise<import("./types").CampaignInventoryRow[]> {
   return invoke("campaign_inventory");
 }
+export async function localWeeklyReport(weekEnd: string): Promise<import("./types").LocalWeeklyReport> {
+  return invoke("local_weekly_report", { weekEnd });
+}
 
 export async function campaignAiAnalysis(campaignId: string): Promise<string> {
   return invoke("campaign_ai_analysis", { campaignId });
