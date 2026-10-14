@@ -109,6 +109,7 @@ export interface OzonPromotionActionResult {
 }
 
 export interface DashboardData {
+  netDaily?: NetDashboardDay[];
   revenue: number;
   orders: number;
   soldUnits: number;
@@ -133,6 +134,17 @@ export interface DashboardData {
   cancellationRate: number | null;
   views: number;
   orderConversion: number | null;
+}
+
+export interface NetDashboardDay {
+  day: string; revenue: number; units: number; cancellationUnits: number;
+  cancellationAmount: number; netRevenue: number; netUnits: number;
+  adSpend: number; adRevenue: number; estimatedNetAdRevenue: number;
+  estimatedAcos: number | null; tacos: number | null;
+  estimatedProducts: number; unmatchedUnits: number;
+  products: Array<{ sku: string; offerId: string; name: string; revenue: number;
+    units: number; cancellationUnits: number; cancellationAmount: number;
+    netRevenue: number; netUnits: number; amountBasis: string }>;
 }
 
 export interface OrderRow {

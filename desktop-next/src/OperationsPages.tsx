@@ -3986,6 +3986,8 @@ export function SupplyPage() {
     [directAddress] = useState("莫斯科（Ozon 系统分配目的仓）"),
     [crossdockAddress, setCrossdockAddress] = useState(""),
     [dropoffOptions, setDropoffOptions] = useState<SupplyDropoffOption[]>([]),
+    [dropoffError, setDropoffError] = useState(""),
+    [searchingDropoffs, setSearchingDropoffs] = useState(false),
     [selectedDropoffId, setSelectedDropoffId] = useState<number | null>(null),
     [createdDrafts, setCreatedDrafts] = useState<SupplyDraftCreated[]>([]),
     [existingDraftId, setExistingDraftId] = useState(""),
@@ -4139,11 +4141,15 @@ export function SupplyPage() {
     window.localStorage.setItem("ozon-supply-workflow-drafts-v2", JSON.stringify(next));
   };
   const searchDropoffs = async () => {
-    if (crossdockAddress.trim().length < 4) { setError("请输入至少 4 个字符搜索 Ozon 越库发货点"); return; }
-    setBusy(true); setError("");
-    try { setDropoffOptions(await searchSupplyDropoffs(crossdockAddress)); }
-    catch (e) { setError(String(e)); }
-    finally { setBusy(false); }
+    if (crossdockAddress.trim().length < 4) { setDropoffError("请输入至少 4 个字符搜索 Ozon 越库发货点"); return; }
+    setBusy(true); setSearchingDropoffs(true); setDropoffError("");
+    try {
+      const options = await searchSupplyDropoffs(crossdockAddress);
+      setDropoffOptions(options);
+      if (!options.length) setDropoffError("Ozon 未返回匹配发货点，请缩短搜索词或使用城市、仓库名称重新搜索。");
+    }
+    catch (e) { setDropoffError(String(e)); }
+    finally { setBusy(false); setSearchingDropoffs(false); }
   };
   const createRemoteDrafts = async () => {
     if (!selectedWorkflowPlans.length) { setError("请先选择产品和数量"); return; }
@@ -4401,7 +4407,8 @@ export function SupplyPage() {
         </div>
         <div className="supply-address-row">
           {workflowMode === "DIRECT" ? <label>直送地址<select value={directAddress} disabled><option>{directAddress}</option></select><small>直送仅允许选择莫斯科，由 Ozon 草稿返回具体目的仓。</small></label>
-            : <><label>集中配送地址（实际送货及预约地址）<div className="supply-dropoff-search"><input value={crossdockAddress} onChange={(e) => { setCrossdockAddress(e.target.value); setSelectedDropoffId(null); }} placeholder="输入城市、街道或仓库名称"/><button className="outline-button" disabled={busy} onClick={() => void searchDropoffs()}>联网搜索</button></div><small>必须从 Ozon 返回的越库配送点中选择；所有集群统一送到这里，预约时间也以这里为准。</small></label>
+            : <><label>集中配送地址（实际送货及预约地址）<div className="supply-dropoff-search"><input value={crossdockAddress} disabled={searchingDropoffs} onChange={(e) => { setCrossdockAddress(e.target.value); setSelectedDropoffId(null); setDropoffOptions([]); setDropoffError(""); }} placeholder="输入城市、街道或仓库名称"/><button className="outline-button" disabled={busy} onClick={() => void searchDropoffs()}>{searchingDropoffs ? "查询中，连接失败会重试…" : "联网搜索"}</button></div><small>必须从 Ozon 返回的越库配送点中选择；所有集群统一送到这里，预约时间也以这里为准。</small></label>
+              {dropoffError && <div className="error-banner" role="alert">{dropoffError}</div>}
               {!!dropoffOptions.length && <div className="supply-dropoff-options">{dropoffOptions.map((option) => <button key={option.warehouseId} className={selectedDropoffId === option.warehouseId ? "active" : ""} onClick={() => { setSelectedDropoffId(option.warehouseId); setCrossdockAddress(`${option.name} · ${option.address}`); }}><b>{option.name || `发货点 ${option.warehouseId}`}</b><small>{option.address}</small></button>)}</div>}</>}
         </div>
         <div className="supply-workflow-actions">

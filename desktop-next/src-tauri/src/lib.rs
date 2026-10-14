@@ -28,6 +28,7 @@ mod packing;
 mod price_center;
 mod price_intelligence;
 mod local_weekly_report;
+mod net_dashboard;
 mod product_master;
 mod product_worker;
 mod purchase_orders;
@@ -154,6 +155,7 @@ struct TrendRow {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DashboardData {
+    net_daily: Vec<net_dashboard::NetDay>,
     revenue: f64,
     orders: i64,
     sold_units: i64,
@@ -1461,6 +1463,24 @@ fn secret_setting(c: &Connection, key: &str) -> Result<String, String> {
     })
 }
 
+fn retry_supply_lookup_transport(path: &str, attempt: u32) -> bool {
+    path == "/v1/warehouse/fbo/list" && attempt < 2
+}
+
+#[cfg(test)]
+mod supply_lookup_retry_tests {
+    use super::retry_supply_lookup_transport;
+    #[test]
+    fn only_readonly_lookup_has_bounded_network_retries() {
+        assert!(retry_supply_lookup_transport("/v1/warehouse/fbo/list",0));
+        assert!(retry_supply_lookup_transport("/v1/warehouse/fbo/list",1));
+        assert!(!retry_supply_lookup_transport("/v1/warehouse/fbo/list",2));
+        for path in ["/v1/draft/multi-cluster/create","/v2/actions/products/deactivate","/v1/product/import/prices"] {
+            assert!(!retry_supply_lookup_transport(path,0));
+        }
+    }
+}
+
 pub(crate) fn seller_post(
     c: &Connection,
     path: &str,
@@ -1477,10 +1497,11 @@ pub(crate) fn seller_post(
     // Price scans run in small UI batches. Return rate limits promptly so the
     // scanner can stop, rather than sleeping for minutes inside one command.
     let price_scan = matches!(path, "/v5/product/info/prices" | "/v1/product/prices/details");
-    let max_attempts = if price_scan { 1 } else if path == "/v1/analytics/data" { 2 } else { 4 };
+    let supply_lookup = path == "/v1/warehouse/fbo/list";
+    let max_attempts = if supply_lookup { 3 } else if price_scan { 1 } else if path == "/v1/analytics/data" { 2 } else { 4 };
     for attempt in 0..max_attempts {
         match ureq::post(&url)
-            .timeout(std::time::Duration::from_secs(if price_scan { 25 } else { 60 }))
+            .timeout(std::time::Duration::from_secs(if supply_lookup { 15 } else if price_scan { 25 } else { 60 }))
             .set("Client-Id", &client_id)
             .set("Api-Key", &api_key)
             .set("Content-Type", "application/json")
@@ -1524,6 +1545,10 @@ pub(crate) fn seller_post(
                     "Ozon Seller API 请求被拒绝（HTTP {status}，接口 {path}）。{detail}"
                 ));
             }
+            Err(_) if retry_supply_lookup_transport(path, attempt) => {
+                std::thread::sleep(std::time::Duration::from_secs((attempt + 1) as u64));
+            }
+            Err(error) if supply_lookup => return Err(format!("越库发货点查询连接失败，已尝试 3 次：{error}。请检查到 api-seller.ozon.ru 的网络连接，稍后点击“联网搜索”重试；已选商品、数量和已读取草稿仍保留。")),
             Err(error) => return Err(format!("Ozon Seller API 请求失败（{path}）：{error}")),
         }
     }
@@ -2560,6 +2585,7 @@ fn dashboard(range: DateRange, state: State<AppState>) -> Result<DashboardData, 
         )
         .ok();
     Ok(DashboardData {
+        net_daily: net_dashboard::read(&c, &range.from, &range.to, if cross_border { rate } else { 1.0 })?,
         revenue: display_amount(revenue, cross_border, rate),
         orders,
         sold_units,

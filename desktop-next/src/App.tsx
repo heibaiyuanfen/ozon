@@ -8,6 +8,7 @@ import {
 } from "react";
 import "./performance.css";
 import "./layout-fixes.css";
+import NetDashboard from "./NetDashboard";
 import * as echarts from "./charts";
 import {
   BarChart3,
@@ -799,6 +800,7 @@ function Dashboard({
           </div>
         </section>
       </div>
+      <NetDashboard days={data.netDaily ?? []} to={range.to} currency={currency} />
       <ProductInsights to={to} currency={currency} />
     </>
   );

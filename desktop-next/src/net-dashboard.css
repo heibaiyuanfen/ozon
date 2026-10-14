@@ -1,0 +1,23 @@
+.net-dashboard { padding: 20px; margin: 18px 0; }
+.net-dashboard h2 { margin: 0; font-size: 17px; }
+.net-dashboard .section-heading { flex-wrap: wrap; gap: 12px; }
+.net-dashboard select { margin-left: 8px; padding: 8px; border: 1px solid #dbe5f5; border-radius: 8px; background: white; color: #193250; }
+.net-metrics { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; margin: 18px 0; }
+.net-metrics > div { padding: 16px; border-radius: 12px; background: #f2f6fd; }
+.net-metrics span { display: block; color: #6b7f9f; font-size: 12px; }
+.net-metrics strong { display: block; font-size: 21px; margin-top: 10px; overflow-wrap: anywhere; }
+.net-basis { color: #7586a2; font-size: 12px; line-height: 1.8; }
+.net-warning { padding: 12px; background: #fff4df; color: #936017; border-radius: 10px; }
+.net-details { margin-top: 16px; }
+.net-details summary { cursor: pointer; font-weight: 600; padding: 10px 0; }
+.net-table-wrap { overflow: auto; max-height: 430px; }
+.net-dashboard table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.net-dashboard th { position: sticky; top: 0; background: #f1f5fc; z-index: 1; }
+.net-dashboard th,.net-dashboard td { padding: 12px 10px; text-align: left; white-space: nowrap; border-bottom: 1px solid #e8eef7; }
+.net-selected { background: #edf4ff; }
+.net-day-button { background: transparent; border: 0; color: #2764d8; cursor: pointer; padding: 0; }
+.net-product-tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px 0; }
+.net-product-tools input { padding: 8px 12px; border: 1px solid #dbe5f5; border-radius: 8px; width: 300px; }
+.net-product small { display: block; max-width: 260px; overflow: hidden; text-overflow: ellipsis; color: #8390a6; margin-top: 3px; }
+@media(max-width: 1100px) { .net-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media(max-width: 650px) { .net-metrics { grid-template-columns: 1fr; } }
