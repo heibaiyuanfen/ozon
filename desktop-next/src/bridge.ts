@@ -196,6 +196,7 @@ export async function ozonPromotionProductAction(input: {
   productId: number;
   actionPrice?: number;
   stock?: number;
+  expectedShopId?: string;
 }): Promise<OzonPromotionActionResult> {
   return invoke("ozon_promotion_product_action", input);
 }
@@ -955,8 +956,8 @@ export async function refreshProductPrice(
 export async function priceIntelligence(): Promise<import("./types").PriceIntelligenceData> {
     return invoke("price_intelligence");
 }
-export async function priceRepriceSuggestions(skus: string[]): Promise<import("./types").RepriceSuggestion[]> {
-    return invoke("price_reprice_suggestions", { skus });
+export async function priceRepriceSuggestions(skus: string[], targetMargin?: number): Promise<import("./types").RepriceSuggestion[]> {
+    return invoke("price_reprice_suggestions", { skus, targetMargin: targetMargin ?? null });
 }
 export async function resolveRepriceProductIds(skus: string[]): Promise<Record<string, string>> {
     return invoke("resolve_reprice_product_ids", { skus });
@@ -972,8 +973,9 @@ export async function saveProfitMonitorSettings(form: import("./types").ProfitMo
 }
 export async function updateProductPrice(
   form: import("./types").ProductPriceUpdate,
+  expectedShopId?: string,
 ): Promise<import("./types").ProductPrice> {
-  return invoke("update_product_price", { form });
+  return invoke("update_product_price", { form, expectedShopId: expectedShopId ?? null });
 }
 export async function saveProductClusterWeights(
   sku: string,

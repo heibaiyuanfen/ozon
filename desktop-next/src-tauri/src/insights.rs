@@ -620,9 +620,13 @@ fn refresh_product_price_blocking(sku: String, state: &AppState) -> Result<Produ
 #[tauri::command]
 pub async fn update_product_price(
     form: ProductPriceUpdate,
+    expected_shop_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProductPrice, String> {
     let snapshot = state.inner().clone();
+    if let Some(expected) = expected_shop_id {
+        if *snapshot.active_shop_id.lock().map_err(|_| "店铺状态锁异常")? != expected { return Err("当前店铺已切换，改价已停止".into()); }
+    }
     tauri::async_runtime::spawn_blocking(move || update_product_price_blocking(form, &snapshot))
         .await.map_err(|e| format!("商品改价任务异常：{e}"))?
 }

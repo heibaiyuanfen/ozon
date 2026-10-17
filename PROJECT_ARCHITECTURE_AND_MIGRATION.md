@@ -1902,6 +1902,12 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 上传成功信息显示飞书子文件夹名。原有历史文件不会自动搬迁；再次上传同一份装箱单时复用文件夹，但文件本身仍会重新上传。按飞书云空间列出文件夹及创建文件夹 API 实现，未在真实飞书云盘执行写入验收。
 - `cargo test --locked packing::tests` 四项通过，`cargo check --locked`、`pnpm build` 通过。正式 Release 构建及根目录启动器覆盖状态见后续记录。
 - 正式 `desktop-next/scripts/build-tauri-release.cmd` 构建通过。用户打开的 ERP 进程已自行退出；关闭了上一轮由本任务启动的隐藏验收进程后，根目录两个入口均由正式 Release 覆盖。Release、`ozon-analytics-next.exe`、`Ozon ERP.exe` 均为 33,399,808 bytes，SHA-256 均为 `720BC68AB015464F10C16A04AC18D3751E279ECB791939C245DB19BBD6E674FD`。根目录 `Ozon ERP.exe` 启动检查成功，随后关闭本任务测试进程；未进行可见界面或真实飞书上传验收。
+## 2026-09-28：拉取 GitHub 更新并重建启动器
+
+- 从 `origin/main` 快进两个提交至 `bc62327`，拉取前工作区干净；更新包括 Seerfar 浏览器桥接、竞品店铺、采购单、装箱单、促销及经营总览代码。
+- `cargo check --locked`、`cargo test --locked competitor_shop::tests`（2 项）、`node --test seerfar-bridge/content.test.cjs`（6 项）及 `pnpm build` 均通过。Vite 仍提示部分代码包超过 500 kB。
+- 使用 `desktop-next/scripts/build-tauri-release.cmd` 正式构建，已覆盖根目录 `ozon-analytics-next.exe`。Release 与根目录启动器均为 33,411,072 bytes，SHA-256 均为 `7349B7E986078F97C59D8B80965379BFF4125D612397E636C06D831DBBD96F40`。本轮未执行可见界面验收，也未执行真实平台写入。
+
 # 2026-09-29 · 供应单箱式货位分配
 
 - 在“约仓计划 → 供应单预约”增加“指定货位”。按 Ozon 当前供货的 SKU 数量和用户填写的每货位件数生成箱式货位，余数单独成箱，支持逐箱修改 SKU 和件数。
@@ -1971,6 +1977,13 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 使用 build-tauri-release.cmd 正式构建并覆盖根目录 EXE。大小 33,965,568 字节，修改时间 2026-10-08 11:29:59 +08:00；两份 SHA-256 一致为 8E13233981C0B381D9613B3D2350A39171805D0FD1FFC79CC672B649E16A9206。
 - 启动正式版，看到约仓计划内嵌页面、已有草稿 ID 及只读查询入口。进一步读取用户草稿时用户按 Escape 停止 Computer Use，未完成真实草稿数量表验收。
 
+## 2026-10-08：本机拉取更新与启动器重建
+
+- 从 `bc62327` 快进两个提交至 `f9c5e6c`，恢复保留的 2026-09-28 本机构建记录。
+- `cargo check --locked`、`cargo test --locked --lib`（206 通过、5 忽略）及 `pnpm build` 通过。沙箱路径解析失败后，在正常权限下完成验证；Vite 仍有大于 500 kB 的代码包提示。
+- 使用 `desktop-next/scripts/build-tauri-release.cmd` 构建并覆盖根目录 `ozon-analytics-next.exe`。两份文件均为 33,975,296 bytes，修改时间 2026-10-08 22:59:17，SHA-256 均为 `371A732DB5F8DFD4E0DA06FCAEB2E60A94C6C17A9047F6E88A8E67CB6B007414`。
+- 已启动根目录 EXE，并检测到 Ozon ERP 窗口。读取界面时用户按 Escape 停止 Computer Use，因此未完成内嵌页面和更新功能的可见验收。
+
 ## 2026-10-12 本土店单周经营周报
 
 - 本土店经营周报改为周一至周日单周七项指标：销售总额、广告销售总额、销售数量、广告销售数量、广告 ACOS、TACOS、一周利润。支持上一周、下一周、最新完整周与刷新；最新完整周排除尚未结束的本周。跨境周报沿用原页面。
@@ -2006,3 +2019,19 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 验证：cargo check --locked、cargo test --locked --lib supply_lookup_retry_tests（1 个通过）、pnpm build 均通过；正式 build-tauri-release.cmd 构建通过。
 - 根目录正式 EXE 已替换并启动。大小 34,164,224 字节，修改时间 2026-10-14 16:52:12 +08:00；与 Release 文件 SHA-256 一致：7DE4944E697022728A9FA0A417C6C4208F5084E01866B80D4C492E3DDDC08896。
 - 可见确认：内嵌约仓计划页面正常加载，已恢复 19 行商品、10 个集群、6200 件。用户按物理 Escape 停止仓库查询验收，停止后未继续电脑操作。真实网络查询结果尚未验证，不能断言 Ozon 网络连接已经恢复。
+
+## 2026-10-17：本机拉取更新与启动器重建
+
+- 从 `f9c5e6c` 快进两个提交至 `25c8b72`，保留本地既有构建记录。更新包括本土经营周报与明细、扣除取消订单后的净销售日看板，以及仓库列表只读查询超时重试。
+- `cargo check --locked`、`cargo test --locked --lib`（212 通过、5 忽略）、`pnpm build` 均通过。Vite 仍提示部分代码包超过 500 kB。
+- 使用 `desktop-next/scripts/build-tauri-release.cmd` 正式构建并覆盖根目录 `ozon-analytics-next.exe`。两份文件大小均为 34,174,464 bytes，修改时间均为 2026-10-17 13:35:37，SHA-256 均为 `15E8C21713536B98B5494C9D6624D378DCCA971E6459E59F8698F59566307C94`。
+- 已启动根目录新版 EXE 并检测到 Ozon ERP 窗口。读取界面时用户按物理 Escape 停止 Computer Use，未完成内嵌页面和更新功能的可见验收；停止后未继续桌面操作。
+
+## 2026-10-17：跨境店目标利润率批量双向调价
+
+- 仅在跨境店价格与利润监控中新增独立目标利润率输入、“试算所选”和“试算当前全店”。全店使用当前店铺完整商品目录，不受搜索条件影响；目标与预警线独立，非预警商品也可参与。
+- 沿用当前店铺广告、货损、贴单、佣金及阶梯跨境运费模型，在每个费用区间按分寻找目标售价，支持涨价与降价。预计利润率在目标上方 0.1 个百分点内视为达标；成本/重量缺失、运费范围不支持或阶梯/价格精度无法满足目标时跳过。此为用户确认后执行的一次性批量调价，不是持续后台调价。
+- 预览显示原价/利润率、建议价/利润率和涨跌金额，每页 50 项。执行前完整核对活动、实时价格币种、商品 ID 及最新利润参数；目标模式不沿用预警涨价 20% 上限，确认文案明确提示双向变价和不可回滚步骤。活动不允许调整时保留原因。
+- 每次写入携带预期店铺 ID，由后端对捕获的店铺快照核验；关闭窗口或切店停止后续任务。每批最多 5 项并回读缓存，只有回读售价及预计利润率均符合目标才显示已达标，其他显示待核对。没有提交真实店铺改价。
+- `cargo check --locked`、7 项利润改价专项测试、`cargo test --locked --lib`（214 通过、5 忽略）、`pnpm build` 通过。新增测试覆盖双向变价、已达标不变、定制佣金边界与逐分枚举交叉核对、无效参数及不可达目标。正式构建、覆盖及界面验收结果在后续记录。
+- 正式 `desktop-next/scripts/build-tauri-release.cmd` 成功。原根目录启动器被运行中的旧 ERP 占用，核对其经营总览无编辑弹窗后正常关闭窗口，再完成覆盖。根目录与 Release 均为 34,112,000 bytes，修改时间 2026-10-17 20:42:02，SHA-256 均为 `526307DA89332DEBCCC17609D0462EA696DB6DB706014116B4F5BC3FC07B8899`。启动新版验收时用户按物理 Escape 停止 Computer Use，未确认新窗口加载或新功能可见效果；停止后未继续桌面操作。未提交真实商品改价，代码与文档未上传 GitHub。

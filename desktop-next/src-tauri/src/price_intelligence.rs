@@ -83,6 +83,7 @@ pub struct RepriceSuggestion {
     offer_id: String,
     product_id: String,
     current_price_cny: Option<f64>,
+    current_margin: Option<f64>,
     suggested_price_cny: Option<f64>,
     projected_margin: Option<f64>,
     reason: String,
@@ -194,9 +195,38 @@ fn minimum_price_for_margin(cost: f64, weight: f64, current: f64, warning_percen
     None
 }
 
+// Search every constant-freight/commission band in cents, including prices below
+// the current price. At a discontinuity an exact target may not be achievable.
+fn price_for_target_margin(cost: f64, weight: f64, current: f64, percent: f64, s: &ProfitMonitorSettings) -> Option<(f64, f64)> {
+    if ![cost, weight, current, percent].iter().all(|v| v.is_finite())
+        || cost <= 0.0 || weight <= 0.0 || current <= 0.0 || !(0.0..100.0).contains(&percent) { return None; }
+    let target = percent / 100.0;
+    // Retain prices already within 0.1 percentage point above the target.
+    if let Some(m) = projected_margin(current, cost, weight, s) {
+        if m + 1e-10 >= target && m - target <= 0.001 { return Some((current, m)); }
+    }
+    let mut bounds = vec![0, 13_499, 63_499, 2_252_499, (s.commission_threshold_cny * 100.0).floor() as i64];
+    bounds.sort_unstable(); bounds.dedup();
+    let mut candidates = Vec::new();
+    for band in bounds.windows(2) {
+        let (mut low, mut high) = (band[0] + 1, band[1]);
+        if !projected_margin(high as f64 / 100.0, cost, weight, s).is_some_and(|m| m + 1e-10 >= target) { continue; }
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if projected_margin(mid as f64 / 100.0, cost, weight, s).is_some_and(|m| m + 1e-10 >= target) { high = mid; }
+            else { low = mid + 1; }
+        }
+        let price = low as f64 / 100.0;
+        if let Some(m) = projected_margin(price, cost, weight, s) {
+            if m + 1e-10 >= target && m - target <= 0.001 { candidates.push((price, m)); }
+        }
+    }
+    candidates.into_iter().min_by(|a, b| (a.0-current).abs().total_cmp(&(b.0-current).abs()))
+}
+
 #[cfg(test)]
 mod reprice_tests {
-    use super::{catalog_id, minimum_price_for_margin, projected_margin, ProfitMonitorSettings};
+    use super::{catalog_id, minimum_price_for_margin, price_for_target_margin, projected_margin, ProfitMonitorSettings};
     use rusqlite::Connection;
 
     #[test]
@@ -210,6 +240,37 @@ mod reprice_tests {
     #[test]
     fn unsupported_freight_weight_has_no_suggestion() {
         assert!(minimum_price_for_margin(20.0, 30.0, 95.0, 15.0, &ProfitMonitorSettings::default()).is_none());
+    }
+
+    #[test]
+    fn target_margin_prices_both_directions_and_keeps_target_price() {
+        let s = ProfitMonitorSettings::default();
+        let raised = price_for_target_margin(7.2, 0.25, 25.0, 15.0, &s).unwrap();
+        let lowered = price_for_target_margin(7.2, 0.25, 65.0, 15.0, &s).unwrap();
+        assert!(raised.0 > 25.0 && lowered.0 < 65.0);
+        assert_eq!(raised, lowered);
+        assert!(raised.1 >= 0.15 - 1e-10 && raised.1 <= 0.151);
+        assert_eq!(price_for_target_margin(7.2, 0.25, raised.0, 15.0, &s).unwrap(), raised);
+    }
+
+    #[test]
+    fn target_margin_matches_exhaustive_cent_search_across_tariff_bands() {
+        let s = ProfitMonitorSettings { commission_threshold_cny: 180.0, ..ProfitMonitorSettings::default() };
+        for cost in [7.2, 70.0, 300.0] {
+            let actual = price_for_target_margin(cost, 0.6, 600.0, 15.0, &s).unwrap();
+            let expected = (1..=100_000).filter_map(|cents| {
+                let p = cents as f64 / 100.0;
+                projected_margin(p, cost, 0.6, &s).filter(|m| *m + 1e-10 >= 0.15 && *m <= 0.151)
+                    .filter(|_| [1,13_500,63_500,18_001].contains(&cents) || projected_margin(p-0.01, cost, 0.6, &s).is_none_or(|m| m + 1e-10 < 0.15)).map(|m| (p,m))
+            }).min_by(|a,b| (a.0-600.0).abs().total_cmp(&(b.0-600.0).abs())).unwrap();
+            // The band solver rounds up to the first qualifying cent.
+            assert!((actual.1-0.15).abs() <= 0.001);
+            assert_eq!(actual, expected);
+        }
+        assert!(price_for_target_margin(20.0, 30.0, 95.0, 15.0, &s).is_none());
+        assert!(price_for_target_margin(20.0, 0.6, 95.0, 99.0, &s).is_none());
+        assert!(price_for_target_margin(0.0, 0.6, 95.0, 15.0, &s).is_none());
+        assert!(price_for_target_margin(20.0, 0.6, 95.0, f64::NAN, &s).is_none());
     }
 
     #[test]
@@ -240,13 +301,14 @@ mod reprice_tests {
 }
 
 #[tauri::command]
-pub async fn price_reprice_suggestions(skus: Vec<String>, state: State<'_, AppState>) -> Result<Vec<RepriceSuggestion>, String> {
+pub async fn price_reprice_suggestions(skus: Vec<String>, target_margin: Option<f64>, state: State<'_, AppState>) -> Result<Vec<RepriceSuggestion>, String> {
     let snapshot = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || price_reprice_suggestions_blocking(skus, &snapshot))
+    tauri::async_runtime::spawn_blocking(move || price_reprice_suggestions_blocking(skus, target_margin, &snapshot))
         .await.map_err(|e| format!("利润试算任务异常：{e}"))?
 }
 
-fn price_reprice_suggestions_blocking(skus: Vec<String>, state: &AppState) -> Result<Vec<RepriceSuggestion>, String> {
+fn price_reprice_suggestions_blocking(skus: Vec<String>, target_margin: Option<f64>, state: &AppState) -> Result<Vec<RepriceSuggestion>, String> {
+    if target_margin.is_some_and(|v| !v.is_finite() || !(0.0..100.0).contains(&v)) { return Err("目标利润率必须在 0%（含）到 100%（不含）之间".into()); }
     let c = db(state)?;
     let data = build_data(&c, state)?;
     let settings = monitor_settings(&c);
@@ -254,16 +316,19 @@ fn price_reprice_suggestions_blocking(skus: Vec<String>, state: &AppState) -> Re
     let selected: std::collections::HashSet<&str> = skus.iter().map(String::as_str).collect();
     Ok(data.rows.into_iter().filter(|row| selected.contains(row.sku.as_str())).map(|row| {
         let result = row.purchase_cost_cny.zip(row.weight_kg).zip(row.final_pricing_cny)
-            .and_then(|((cost, weight), current)| minimum_price_for_margin(cost, weight, current, data.warning_margin, &settings));
-        let reason = if !row.warning { "当前利润率未低于预警线" }
-            else if row.purchase_cost_cny.filter(|v| *v > 0.0).is_none() { "缺少采购成本" }
+            .and_then(|((cost, weight), current)| match target_margin {
+                Some(target) => price_for_target_margin(cost, weight, current, target, &settings),
+                None => minimum_price_for_margin(cost, weight, current, data.warning_margin, &settings),
+            });
+        let reason = if row.purchase_cost_cny.filter(|v| *v > 0.0).is_none() { "缺少采购成本" }
             else if row.weight_kg.filter(|v| *v > 0.0).is_none() { "缺少重量" }
             else if row.final_pricing_cny.is_none() { "缺少最终定价" }
-            else if result.is_none() { "运费公式范围内无法达到预警利润率" }
+            else if result.is_none() { "阶梯费用或价格精度限制，无法在目标利润率上方 0.1 个百分点内定价" }
             else { "可试算；Ozon 活动限制和补贴需另行核验" };
         RepriceSuggestion {
             sku: row.sku, offer_id: row.offer_id, product_id: row.product_id,
             current_price_cny: row.final_pricing_cny,
+            current_margin: row.profit_margin,
             suggested_price_cny: result.map(|v| v.0), projected_margin: result.map(|v| v.1),
             reason: reason.to_string(),
         }

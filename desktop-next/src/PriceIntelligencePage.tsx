@@ -20,7 +20,16 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
   const [settings, setSettings] = useState<ProfitMonitorSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<Record<keyof ProfitMonitorSettings, string> | null>(null);
   const [repriceSkus, setRepriceSkus] = useState<string[] | null>(null);
-  const [repriceMode, setRepriceMode] = useState<"manual" | "warning">("manual");
+  const [repriceMode, setRepriceMode] = useState<"manual" | "warning" | "target">("manual");
+  const [targetMargin, setTargetMargin] = useState("15");
+  const [repriceTarget, setRepriceTarget] = useState(15);
+  const openTargetReprice = (all: boolean) => {
+    const margin = Number(targetMargin);
+    if (!targetMargin.trim() || !Number.isFinite(margin) || margin < 0 || margin >= 100) { setMessage("目标利润率必须在 0% 到 100%（不含）之间"); return; }
+    const skus = all ? data?.rows.map((row) => row.sku) ?? [] : [...selected];
+    if (!skus.length) return;
+    setRepriceTarget(margin); setRepriceMode("target"); setRepriceSkus(skus);
+  };
   const currentKind = activeShop?.kind ?? "local";
   const currentShops = shops.filter((shop) => shop.kind === currentKind);
   const changeScope = async (kind: Shop["kind"]) => {
@@ -115,6 +124,12 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
       {data?.isCrossBorder && <><button disabled={busy || !selected.size} onClick={() => { setRepriceMode("manual"); setRepriceSkus([...selected]); }}>手动调价所选（{selected.size}）</button><button disabled={busy || ![...selected].some((sku) => data.rows.some((row) => row.sku === sku && row.warning))} onClick={() => { setRepriceMode("warning"); setRepriceSkus([...selected].filter((sku) => data.rows.some((row) => row.sku === sku && row.warning))); }}>预警商品试算</button><button disabled={!warnings || busy} onClick={() => setSelected(new Set(data.rows.filter((row) => row.warning).map((row) => row.sku)))}>选择全部预警</button></>}
     </section>
     {message && <div className="sync-message">{message}</div>}
+    {data?.isCrossBorder && <section className="card pi-target-toolbar">
+      <div><b>按目标利润率批量调价</b><small>低于目标涨价，高于目标降价；全店范围不受搜索条件影响。先预览，再确认提交。</small></div>
+      <label>目标利润率 <input type="number" min="0" max="99.99" step="0.1" value={targetMargin} disabled={busy || !!repriceSkus} onChange={(event) => setTargetMargin(event.target.value)}/> %</label>
+      <button disabled={busy || !selected.size || !!repriceSkus} onClick={() => openTargetReprice(false)}>试算所选（{selected.size}）</button>
+      <button disabled={busy || !data.rows.length || !!repriceSkus} onClick={() => openTargetReprice(true)}>试算当前全店（{data.rows.length}）</button>
+    </section>}
     <section className="pi-assumptions">
       {data?.isCrossBorder ? <><b>跨境预估规则</b><span>阶梯跨境运费已包含全部运费，不加头程</span><span>货损 (成本 + 贴单 + 跨境运费) × {((settings?.damageRate ?? data.damageRate) * 100).toFixed(1)}%</span><span>广告 {((settings?.advertisingRate ?? data.advertisingRate) * 100).toFixed(1)}%</span><span>贴单 ¥{settings?.labelFeeCny ?? data.labelFeeCny}</span><span>佣金 ≤¥{settings?.commissionThresholdCny ?? data.commissionThresholdCny}：{((settings?.lowCommissionRate ?? data.lowCommissionRate) * 100).toFixed(1)}%，&gt;：{((settings?.highCommissionRate ?? data.highCommissionRate) * 100).toFixed(1)}%</span><span>物流佣金 {((settings?.logisticsCommissionRate ?? data.logisticsCommissionRate) * 100).toFixed(1)}%</span></> : <><b>本土店</b><span>不使用跨境运费阶梯；物流费用以本土实际结算为准</span></>}
     </section>
@@ -139,6 +154,6 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
       {data?.isCrossBorder && <><td><span>广告 {cny(row.advertisingCny)} · 货损 {cny(row.damageCny)}</span><small>平台佣金 {cny(row.commissionCny)} · 物流佣金 {cny(row.logisticsCommissionCny)}</small><small>贴单 {cny(row.labelFeeCny)}</small></td><td className={row.warning?"profit danger-text":"profit"}><b>{cny(row.profitCny)}</b><small>{percent(row.profitMargin)}</small></td></>}
       <td>{row.warning && <div className="warning-badge">需要改价</div>}{row.missingFields.length ? <div className="missing">缺：{row.missingFields.join("、")}</div> : !row.warning && <div className="ok-badge">正常</div>}<small>{row.syncedAt||"尚未读取"}</small></td>
     </tr>)}</tbody></table>{!rows.length&&<div className="empty">没有符合条件的商品</div>}</section>
-    {repriceSkus && data && <RepriceDialog skus={repriceSkus} mode={repriceMode} warningMargin={data.warningMargin} onClose={() => setRepriceSkus(null)} onChanged={() => { void load(); }}/>}
+    {repriceSkus && data && <RepriceDialog skus={repriceSkus} mode={repriceMode} targetMargin={repriceTarget} shopId={activeShop?.id ?? ""} shopName={activeShop?.name ?? "当前店铺"} warningMargin={data.warningMargin} onClose={() => setRepriceSkus(null)} onChanged={() => { void load(); }}/>}
   </main>;
 }

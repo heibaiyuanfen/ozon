@@ -1287,6 +1287,7 @@ export interface PriceProfitRow {
 export interface RepriceSuggestion {
   sku: string; offerId: string; productId: string;
   currentPriceCny: number | null; suggestedPriceCny: number | null;
+  currentMargin: number | null;
   projectedMargin: number | null; reason: string;
 }
 export interface PriceIntelligenceData {
