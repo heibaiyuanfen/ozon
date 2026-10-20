@@ -1,0 +1,80 @@
+[
+  {
+    "tier": 0,
+    "name": "Extra Small Economy",
+    "source_row": 6,
+    "source_rate": "28.1元/千克+3.37元/票",
+    "source_formula": "=IF(AND(R5<=60,R6<=60,R7<=60,R4<=0.5,(R5+R6+R7)<=90),3.37+28.1*R4,\"不符合运输标准\")",
+    "base_cny": 3.37,
+    "per_kg_cny": 28.1,
+    "price_rub": 1000,
+    "weight_kg": 0.4,
+    "expected_cny": 14.61,
+    "source_rub_band": "1500卢布"
+  },
+  {
+    "tier": 1,
+    "name": "Small Economy",
+    "source_row": 10,
+    "source_rate": "28.1元/千克+17.97元/票",
+    "source_formula": "=IF(AND(R5<=60,R6<=60,R7<=60,R4<=2,(R5+R6+R7)<=150),17.97+28.1*R4,\"不符合运输标准\")",
+    "base_cny": 17.97,
+    "per_kg_cny": 28.1,
+    "price_rub": 2000,
+    "weight_kg": 1,
+    "expected_cny": 46.07,
+    "source_rub_band": "1501-7000卢布"
+  },
+  {
+    "tier": 2,
+    "name": "Premium Small Economy",
+    "source_row": 17,
+    "source_rate": "28.1元/千克+24.71元/票",
+    "source_formula": "=IF(AND(R5<=150,R6<=150,R7<=150,R4<=5,(R5+R6+R7)<=250),24.71+28.1*R4,\"不符合运输标准\")",
+    "base_cny": 24.71,
+    "per_kg_cny": 28.1,
+    "price_rub": 8000,
+    "weight_kg": 3,
+    "expected_cny": 109.01,
+    "source_rub_band": "7001-250000\n卢布"
+  },
+  {
+    "tier": 3,
+    "name": "Budget Economy",
+    "source_row": 13,
+    "source_rate": "19.1元/千克+25.83元/票",
+    "source_formula": "=IF(AND(R5<=60,R6<=60,R7<=60,R4>=0.5,R4<=30,(R5+R6+R7)<=150),25.83+19.1*R4,\"不符合运输标准\")",
+    "base_cny": 25.83,
+    "per_kg_cny": 19.1,
+    "price_rub": 1000,
+    "weight_kg": 1,
+    "expected_cny": 44.93,
+    "source_rub_band": "1500卢布"
+  },
+  {
+    "tier": 4,
+    "name": "Big Standard",
+    "source_row": 19,
+    "source_rate": "28.1元/千克+40.44/票",
+    "source_formula": "=IF(AND(R5<=150,R6<=150,R7<=150,R4>=2,R4<=30,(R5+R6+R7)<=250),40.44+28.1*R4,\"不符合运输标准\")",
+    "base_cny": 40.44,
+    "per_kg_cny": 28.1,
+    "price_rub": 2000,
+    "weight_kg": 3,
+    "expected_cny": 124.74,
+    "source_rub_band": "1501-7000\n卢布"
+  },
+  {
+    "tier": 5,
+    "name": "Premium Big Economy",
+    "source_row": 21,
+    "source_rate": "25.8元/千克+69.64元/票",
+    "source_formula": "=IF(AND(R5<=150,R6<=150,R7<=150,R4>=5,R4<=30,(R5+R6+R7)<=310,R8>7000),69.64+25.8*R4,\"不符合运输标准\")",
+    "base_cny": 69.64,
+    "per_kg_cny": 25.8,
+    "price_rub": 8000,
+    "weight_kg": 6,
+    "expected_cny": 224.44,
+    "source_rub_band": "7001-250000\n卢布"
+  }
+]

@@ -1,0 +1,187 @@
+{
+  "total": {
+    "opening_balance": {
+      "value": 54899.23,
+      "currency_code": "RUB"
+    },
+    "closing_balance": {
+      "value": 115321.79,
+      "currency_code": "RUB"
+    },
+    "accrued": {
+      "value": 214691.56,
+      "currency_code": "RUB"
+    },
+    "payments": [
+      {
+        "value": -154269,
+        "currency_code": "RUB"
+      }
+    ]
+  },
+  "cashflows": {
+    "sales": {
+      "amount": {
+        "value": 594895.76,
+        "currency_code": "RUB"
+      },
+      "fee": {
+        "value": -71426.89,
+        "currency_code": "RUB"
+      },
+      "amount_details": {
+        "revenue": {
+          "value": 465476.67,
+          "currency_code": "RUB"
+        },
+        "points_for_discounts": "118913.33",
+        "partner_programs": {
+          "value": 10505.76,
+          "currency_code": "RUB"
+        }
+      }
+    },
+    "returns": {
+      "amount": {
+        "value": -3921,
+        "currency_code": "RUB"
+      },
+      "fee": {
+        "value": 492.17,
+        "currency_code": "RUB"
+      },
+      "amount_details": {
+        "revenue": {
+          "value": -3312,
+          "currency_code": "RUB"
+        },
+        "points_for_discounts": "-575.88",
+        "partner_programs": {
+          "value": -33.12,
+          "currency_code": "RUB"
+        }
+      }
+    },
+    "services": [
+      {
+        "name": "acquiring",
+        "amount": {
+          "value": -5377.17,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "defect_fine_errors",
+        "amount": {
+          "value": -334.63,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "rfbs_global_platform_connection_service",
+        "amount": {
+          "value": -2669.34,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "international_delivery_services",
+        "amount": {
+          "value": -212475.97,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "product_disposal",
+        "amount": {
+          "value": -25,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "accelerated_review_collection",
+        "amount": {
+          "value": -750,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "star_products",
+        "amount": {
+          "value": -7127.78,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "rfbs_global_intermediary_service",
+        "amount": {
+          "value": -361.57,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "agency_fee_ozon",
+        "amount": {
+          "value": -10858.41,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "logistics",
+        "amount": {
+          "value": -2131,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "partner_returns_cancellations_processing",
+        "amount": {
+          "value": -75,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "reverse_logistics",
+        "amount": {
+          "value": -2352,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "courier_client_reinvoice",
+        "amount": {
+          "value": -229.4,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "promotion_with_cost_per_order",
+        "amount": {
+          "value": -5086.8,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "pay_per_click",
+        "amount": {
+          "value": -54566.41,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "first_customer_review",
+        "amount": {
+          "value": -749,
+          "currency_code": "RUB"
+        }
+      },
+      {
+        "name": "partial_compensation_to_buyers",
+        "amount": {
+          "value": -179,
+          "currency_code": "RUB"
+        }
+      }
+    ]
+  }
+}

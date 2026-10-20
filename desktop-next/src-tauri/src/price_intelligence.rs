@@ -23,6 +23,7 @@ pub struct PriceProfitRow {
     freight_cny: Option<f64>,
     volume_l: Option<f64>,
     weight_kg: Option<f64>,
+    dimensions_cm: Option<[f64;3]>,
     final_pricing_cny: Option<f64>,
     commission_rate: Option<f64>,
     advertising_cny: Option<f64>,
@@ -51,11 +52,13 @@ pub struct PriceIntelligenceData {
     high_commission_rate: f64,
     logistics_commission_rate: f64,
     commission_threshold_cny: f64,
+    commission_threshold_rub: f64,
 }
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfitMonitorSettings {
+    rub_per_cny: f64,
     warning_margin: f64,
     advertising_rate: f64,
     damage_rate: f64,
@@ -63,7 +66,9 @@ pub struct ProfitMonitorSettings {
     low_commission_rate: f64,
     high_commission_rate: f64,
     logistics_commission_rate: f64,
+    #[serde(default)]
     commission_threshold_cny: f64,
+    commission_threshold_rub: f64,
 }
 
 #[derive(Serialize)]
@@ -95,14 +100,14 @@ const LABEL_FEE: f64 = 2.0;
 const LOW_COMMISSION: f64 = 0.13;
 const HIGH_COMMISSION: f64 = 0.15;
 const LOGISTICS_COMMISSION: f64 = 0.02;
-const COMMISSION_THRESHOLD: f64 = 134.0;
+const COMMISSION_THRESHOLD: f64 = 1500.0/14.0;
 
 impl Default for ProfitMonitorSettings {
     fn default() -> Self {
-        Self { warning_margin: 15.0, advertising_rate: AD_RATE, damage_rate: DAMAGE_RATE,
+        Self { rub_per_cny:14.0, warning_margin: 15.0, advertising_rate: AD_RATE, damage_rate: DAMAGE_RATE,
             label_fee_cny: LABEL_FEE, low_commission_rate: LOW_COMMISSION,
             high_commission_rate: HIGH_COMMISSION, logistics_commission_rate: LOGISTICS_COMMISSION,
-            commission_threshold_cny: COMMISSION_THRESHOLD }
+            commission_threshold_cny: COMMISSION_THRESHOLD, commission_threshold_rub: 1500.0 }
     }
 }
 
@@ -116,16 +121,27 @@ fn monitor_settings(c: &Connection) -> ProfitMonitorSettings {
         ("cross_profit_low_commission_rate", &mut s.low_commission_rate),
         ("cross_profit_high_commission_rate", &mut s.high_commission_rate),
         ("cross_profit_logistics_commission_rate", &mut s.logistics_commission_rate),
-        ("cross_profit_commission_threshold_cny", &mut s.commission_threshold_cny),
+        ("cross_profit_commission_threshold_rub", &mut s.commission_threshold_rub),
     ] {
         if let Ok(value) = c.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| r.get::<_, String>(0)) {
             if let Ok(parsed) = value.parse::<f64>() { if parsed.is_finite() { *target = parsed; } }
         }
     }
+    s.rub_per_cny=cross_border_rate(c);
+    s.commission_threshold_cny = s.commission_threshold_rub / s.rub_per_cny;
     s
 }
 
+fn cross_border_rate(c: &Connection) -> f64 {
+    ["cross_border_rub_per_cny", "rub_per_cny"].iter()
+        .find_map(|key| crate::setting(c, key).parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0))
+        .unwrap_or(14.0)
+}
+
 fn validate_settings(s: &ProfitMonitorSettings) -> Result<(), String> {
+    if !s.commission_threshold_rub.is_finite() || s.commission_threshold_rub <= 0.0 {
+        return Err("佣金的卢布分界价必须大于 0".into());
+    }
     if !s.warning_margin.is_finite() || !(-100.0..=100.0).contains(&s.warning_margin) {
         return Err("利润率预警值必须在 -100% 到 100% 之间".into());
     }
@@ -135,8 +151,12 @@ fn validate_settings(s: &ProfitMonitorSettings) -> Result<(), String> {
         if !value.is_finite() || !(0.0..=1.0).contains(&value) { return Err(format!("{label}必须在 0% 到 100% 之间")); }
     }
     if !s.label_fee_cny.is_finite() || !(0.0..=10_000.0).contains(&s.label_fee_cny) { return Err("贴单费必须在 ¥0 到 ¥10000 之间".into()); }
-    if !s.commission_threshold_cny.is_finite() || !(0.0..=22_524.99).contains(&s.commission_threshold_cny) { return Err("佣金分界价必须在 ¥0 到 ¥22524.99 之间".into()); }
+    if !s.commission_threshold_cny.is_finite() || !s.rub_per_cny.is_finite() || s.rub_per_cny<=0.0 { return Err("跨境汇率必须为有效正数".into()); }
     Ok(())
+}
+
+pub(crate) fn freight_threshold(c: &Connection) -> Result<f64,String> {
+    Ok(crate::rets_shipping::SALE_BANDS_RUB[0]/cross_border_rate(c))
 }
 
 fn ensure(c: &Connection) -> Result<(), String> {
@@ -157,67 +177,87 @@ fn minimum_positive(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     }
 }
 
-fn cross_border_freight(price_cny: Option<f64>, weight_kg: Option<f64>) -> Option<f64> {
+fn cross_border_freight(price_cny: Option<f64>, weight_kg: Option<f64>, settings: &ProfitMonitorSettings, dimensions:Option<[f64;3]>) -> Option<f64> {
     price_cny
         .zip(weight_kg.filter(|w| *w > 0.0))
-        .and_then(|(price, weight)| cross_border_shipping(price, weight))
+        .and_then(|(price, weight)| cross_border_shipping(price, weight, settings.rub_per_cny,dimensions))
 }
 
-fn projected_margin(price: f64, cost: f64, weight: f64, s: &ProfitMonitorSettings) -> Option<f64> {
-    let freight = cross_border_shipping(price, weight)?;
-    let commission = if price > s.commission_threshold_cny { s.high_commission_rate } else { s.low_commission_rate };
+fn commission_rate_at(price: f64, s: &ProfitMonitorSettings) -> f64 {
+    let tolerance = f64::EPSILON * 8.0 * price.abs().max(s.commission_threshold_cny.abs()).max(1.0);
+    if price - s.commission_threshold_cny > tolerance { s.high_commission_rate } else { s.low_commission_rate }
+}
+
+fn normalized_cents(price: f64) -> f64 {
+    let cents = price * 100.0;
+    let nearest = cents.round();
+    if (cents - nearest).abs() <= f64::EPSILON * 8.0 * cents.abs().max(1.0) { nearest } else { cents }
+}
+
+fn reprice_band_ends(s: &ProfitMonitorSettings) -> Vec<i64> {
+    // Only freight price boundaries are fixed; commission uses the saved setting.
+    let max=normalized_cents(250000.0/s.rub_per_cny).floor() as i64;
+    let mut ends = vec![0,max,normalized_cents(s.commission_threshold_cny).floor() as i64];
+    ends.extend(crate::rets_shipping::SALE_BANDS_RUB.into_iter().map(|v|normalized_cents(v/s.rub_per_cny).floor() as i64));
+    ends.retain(|v|*v>=0 && *v<=max);
+    ends.sort_unstable();
+    ends.dedup();
+    ends
+}
+
+fn projected_margin(price: f64, cost: f64, weight: f64, s: &ProfitMonitorSettings, dimensions:Option<[f64;3]>) -> Option<f64> {
+    let freight = cross_border_shipping(price, weight, s.rub_per_cny,dimensions)?;
+    let commission = commission_rate_at(price, s);
     let damage = (cost + s.label_fee_cny + freight) * s.damage_rate;
     Some((price - cost - price * s.advertising_rate - damage - freight - price * commission
         - price * s.logistics_commission_rate - s.label_fee_cny) / price)
 }
 
-fn minimum_price_for_margin(cost: f64, weight: f64, current: f64, warning_percent: f64, s: &ProfitMonitorSettings) -> Option<(f64, f64)> {
-    if !(cost > 0.0 && weight > 0.0 && current > 0.0 && warning_percent.is_finite()) { return None; }
+fn minimum_price_for_margin(cost: f64, weight: f64, current: f64, warning_percent: f64, s: &ProfitMonitorSettings, dimensions:Option<[f64;3]>) -> Option<(f64, f64)> {
+    if ![cost, weight, current, warning_percent].iter().all(|v|v.is_finite()) || !(cost > 0.0 && weight > 0.0 && current > 0.0) { return None; }
     let target = warning_percent / 100.0;
-    let start = (current * 100.0).ceil().max(1.0) as i64;
+    let start = normalized_cents(current).ceil().max(1.0) as i64;
     // Shipping and commission are constant-form within these price bands.
-    let mut boundaries = vec![0, 13_400, 13_499, 63_499, 2_252_499, (s.commission_threshold_cny * 100.0).floor() as i64];
-    boundaries.sort_unstable(); boundaries.dedup();
+    let boundaries = reprice_band_ends(s);
     for pair in boundaries.windows(2) {
         let (band_start, band_end) = (pair[0] + 1, pair[1]);
         let mut low = start.max(band_start);
         if low > band_end { continue; }
         let mut high = band_end;
-        if !projected_margin(high as f64 / 100.0, cost, weight, s).is_some_and(|m| m * 100.0 > warning_percent) { continue; }
+        if !projected_margin(high as f64 / 100.0, cost, weight, s, dimensions).is_some_and(|m| m * 100.0 > warning_percent) { continue; }
         while low < high {
             let mid = low + (high - low) / 2;
-            if projected_margin(mid as f64 / 100.0, cost, weight, s).is_some_and(|m| m > target) { high = mid; }
+            if projected_margin(mid as f64 / 100.0, cost, weight, s, dimensions).is_some_and(|m| m > target) { high = mid; }
             else { low = mid + 1; }
         }
         let price = low as f64 / 100.0;
-        if let Some(margin) = projected_margin(price, cost, weight, s) { return Some((price, margin)); }
+        if let Some(margin) = projected_margin(price, cost, weight, s, dimensions) { return Some((price, margin)); }
     }
     None
 }
 
 // Search every constant-freight/commission band in cents, including prices below
 // the current price. At a discontinuity an exact target may not be achievable.
-fn price_for_target_margin(cost: f64, weight: f64, current: f64, percent: f64, s: &ProfitMonitorSettings) -> Option<(f64, f64)> {
+fn price_for_target_margin(cost: f64, weight: f64, current: f64, percent: f64, s: &ProfitMonitorSettings, dimensions:Option<[f64;3]>) -> Option<(f64, f64)> {
     if ![cost, weight, current, percent].iter().all(|v| v.is_finite())
         || cost <= 0.0 || weight <= 0.0 || current <= 0.0 || !(0.0..100.0).contains(&percent) { return None; }
     let target = percent / 100.0;
     // Retain prices already within 0.1 percentage point above the target.
-    if let Some(m) = projected_margin(current, cost, weight, s) {
+    if let Some(m) = projected_margin(current, cost, weight, s, dimensions) {
         if m + 1e-10 >= target && m - target <= 0.001 { return Some((current, m)); }
     }
-    let mut bounds = vec![0, 13_499, 63_499, 2_252_499, (s.commission_threshold_cny * 100.0).floor() as i64];
-    bounds.sort_unstable(); bounds.dedup();
+    let bounds = reprice_band_ends(s);
     let mut candidates = Vec::new();
     for band in bounds.windows(2) {
         let (mut low, mut high) = (band[0] + 1, band[1]);
-        if !projected_margin(high as f64 / 100.0, cost, weight, s).is_some_and(|m| m + 1e-10 >= target) { continue; }
+        if !projected_margin(high as f64 / 100.0, cost, weight, s, dimensions).is_some_and(|m| m + 1e-10 >= target) { continue; }
         while low < high {
             let mid = low + (high - low) / 2;
-            if projected_margin(mid as f64 / 100.0, cost, weight, s).is_some_and(|m| m + 1e-10 >= target) { high = mid; }
+            if projected_margin(mid as f64 / 100.0, cost, weight, s, dimensions).is_some_and(|m| m + 1e-10 >= target) { high = mid; }
             else { low = mid + 1; }
         }
         let price = low as f64 / 100.0;
-        if let Some(m) = projected_margin(price, cost, weight, s) {
+        if let Some(m) = projected_margin(price, cost, weight, s, dimensions) {
             if m + 1e-10 >= target && m - target <= 0.001 { candidates.push((price, m)); }
         }
     }
@@ -225,8 +265,18 @@ fn price_for_target_margin(cost: f64, weight: f64, current: f64, percent: f64, s
 }
 
 #[cfg(test)]
+mod test_pricing_helpers {
+    use super::ProfitMonitorSettings;
+    pub fn projected_margin(p:f64,c:f64,w:f64,s:&ProfitMonitorSettings)->Option<f64>{super::projected_margin(p,c,w,s,Some([10.;3]))}
+    pub fn minimum_price_for_margin(c:f64,w:f64,p:f64,m:f64,s:&ProfitMonitorSettings)->Option<(f64,f64)>{super::minimum_price_for_margin(c,w,p,m,s,Some([10.;3]))}
+    pub fn price_for_target_margin(c:f64,w:f64,p:f64,m:f64,s:&ProfitMonitorSettings)->Option<(f64,f64)>{super::price_for_target_margin(c,w,p,m,s,Some([10.;3]))}
+    pub fn cross_border_freight(p:Option<f64>,w:Option<f64>,s:&ProfitMonitorSettings)->Option<f64>{super::cross_border_freight(p,w,s,Some([10.;3]))}
+}
+
+#[cfg(test)]
 mod reprice_tests {
-    use super::{catalog_id, minimum_price_for_margin, price_for_target_margin, projected_margin, ProfitMonitorSettings};
+    use super::{catalog_id, ProfitMonitorSettings};
+    use super::test_pricing_helpers::{minimum_price_for_margin,price_for_target_margin,projected_margin};
     use rusqlite::Connection;
 
     #[test]
@@ -239,7 +289,7 @@ mod reprice_tests {
 
     #[test]
     fn unsupported_freight_weight_has_no_suggestion() {
-        assert!(minimum_price_for_margin(20.0, 30.0, 95.0, 15.0, &ProfitMonitorSettings::default()).is_none());
+        assert!(minimum_price_for_margin(20.0, 30.00001, 95.0, 15.0, &ProfitMonitorSettings::default()).is_none());
     }
 
     #[test]
@@ -256,18 +306,19 @@ mod reprice_tests {
     #[test]
     fn target_margin_matches_exhaustive_cent_search_across_tariff_bands() {
         let s = ProfitMonitorSettings { commission_threshold_cny: 180.0, ..ProfitMonitorSettings::default() };
+        let starts=super::reprice_band_ends(&s).into_iter().map(|v|v+1).collect::<Vec<_>>();
         for cost in [7.2, 70.0, 300.0] {
             let actual = price_for_target_margin(cost, 0.6, 600.0, 15.0, &s).unwrap();
             let expected = (1..=100_000).filter_map(|cents| {
                 let p = cents as f64 / 100.0;
                 projected_margin(p, cost, 0.6, &s).filter(|m| *m + 1e-10 >= 0.15 && *m <= 0.151)
-                    .filter(|_| [1,13_500,63_500,18_001].contains(&cents) || projected_margin(p-0.01, cost, 0.6, &s).is_none_or(|m| m + 1e-10 < 0.15)).map(|m| (p,m))
+                    .filter(|_| starts.contains(&cents) || projected_margin(p-0.01, cost, 0.6, &s).is_none_or(|m| m + 1e-10 < 0.15)).map(|m| (p,m))
             }).min_by(|a,b| (a.0-600.0).abs().total_cmp(&(b.0-600.0).abs())).unwrap();
             // The band solver rounds up to the first qualifying cent.
             assert!((actual.1-0.15).abs() <= 0.001);
             assert_eq!(actual, expected);
         }
-        assert!(price_for_target_margin(20.0, 30.0, 95.0, 15.0, &s).is_none());
+        assert!(price_for_target_margin(20.0, 30.00001, 95.0, 15.0, &s).is_none());
         assert!(price_for_target_margin(20.0, 0.6, 95.0, 99.0, &s).is_none());
         assert!(price_for_target_margin(0.0, 0.6, 95.0, 15.0, &s).is_none());
         assert!(price_for_target_margin(20.0, 0.6, 95.0, f64::NAN, &s).is_none());
@@ -317,11 +368,12 @@ fn price_reprice_suggestions_blocking(skus: Vec<String>, target_margin: Option<f
     Ok(data.rows.into_iter().filter(|row| selected.contains(row.sku.as_str())).map(|row| {
         let result = row.purchase_cost_cny.zip(row.weight_kg).zip(row.final_pricing_cny)
             .and_then(|((cost, weight), current)| match target_margin {
-                Some(target) => price_for_target_margin(cost, weight, current, target, &settings),
-                None => minimum_price_for_margin(cost, weight, current, data.warning_margin, &settings),
+                Some(target) => price_for_target_margin(cost, weight, current, target, &settings,row.dimensions_cm),
+                None => minimum_price_for_margin(cost, weight, current, data.warning_margin, &settings,row.dimensions_cm),
             });
         let reason = if row.purchase_cost_cny.filter(|v| *v > 0.0).is_none() { "缺少采购成本" }
             else if row.weight_kg.filter(|v| *v > 0.0).is_none() { "缺少重量" }
+
             else if row.final_pricing_cny.is_none() { "缺少最终定价" }
             else if result.is_none() { "阶梯费用或价格精度限制，无法在目标利润率上方 0.1 个百分点内定价" }
             else { "可试算；Ozon 活动限制和补贴需另行核验" };
@@ -400,7 +452,7 @@ fn price_reprice_validate_blocking(sku: String, price_cny: f64, state: &AppState
     let row = data.rows.iter().find(|row| row.sku == sku).ok_or("商品未找到")?;
     Ok(row.purchase_cost_cny.filter(|v| *v > 0.0)
         .zip(row.weight_kg.filter(|v| *v > 0.0))
-        .and_then(|(cost, weight)| projected_margin(price_cny, cost, weight, &monitor_settings(&c))))
+        .and_then(|(cost, weight)| projected_margin(price_cny, cost, weight, &monitor_settings(&c),row.dimensions_cm)))
 }
 
 fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData, String> {
@@ -408,6 +460,7 @@ fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData,
     let is_cross_border = active_shop_kind(state)? == "cross_border";
     let rate = rub_per_cny_for(state, c)?;
     let settings = monitor_settings(c);
+    validate_settings(&settings)?;
     let limit = settings.warning_margin;
     // products belongs to the selected shop database. Cost and price caches may
     // contain historical imports; they cannot introduce extra shop products.
@@ -459,7 +512,7 @@ fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData,
             // The cross-border tier already includes all freight. Never add
             // first-mile cost here; local stores use a separate settlement model.
             let freight = if is_cross_border {
-                cross_border_freight(final_cny, weight)
+                cross_border_freight(final_cny, weight, &settings,length.zip(width).zip(height).map(|((l,w),h)|[l,w,h]))
             } else { None };
             let mut missing = Vec::new();
             if final_pricing.is_none() {
@@ -476,13 +529,13 @@ fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData,
                     missing.push("重量".to_string());
                 }
                 if final_cny.is_some() && weight.filter(|x| *x > 0.0).is_some() && freight.is_none() {
-                    missing.push("运费超出公式区间".to_string());
+                    missing.push(crate::rets_shipping::quote(final_cny.unwrap()*rate,weight.unwrap(),length.zip(width).zip(height).map(|((l,w),h)|[l,w,h])).err().unwrap_or_else(||"RETS 费率待核对".into()));
                 }
             }
             // Price-based fees are useful even when the product has no cost or
             // weight data. Damage and profit use the cross-border freight only.
             let pricing = if is_cross_border { final_cny } else { None };
-            let commission_rate = pricing.map(|a| if a > settings.commission_threshold_cny { settings.high_commission_rate } else { settings.low_commission_rate });
+            let commission_rate = pricing.map(|a| commission_rate_at(a, &settings));
             let advertising = pricing.map(|a| a * settings.advertising_rate);
             let commission = pricing.zip(commission_rate).map(|(a, rate)| a * rate);
             let logistics = pricing.map(|a| a * settings.logistics_commission_rate);
@@ -513,6 +566,7 @@ fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData,
                 freight_cny: freight,
                 volume_l,
                 weight_kg: weight,
+                dimensions_cm: length.zip(width).zip(height).map(|((l,w),h)|[l,w,h]),
                 final_pricing_cny: final_cny,
                 commission_rate,
                 advertising_cny: advertising,
@@ -542,6 +596,7 @@ fn build_data(c: &Connection, state: &AppState) -> Result<PriceIntelligenceData,
         high_commission_rate: settings.high_commission_rate,
         logistics_commission_rate: settings.logistics_commission_rate,
         commission_threshold_cny: settings.commission_threshold_cny,
+        commission_threshold_rub: settings.commission_threshold_rub,
     })
 }
 
@@ -617,14 +672,16 @@ fn refresh_price_intelligence_blocking(
 
 #[tauri::command]
 pub fn save_profit_monitor_settings(
-    form: ProfitMonitorSettings,
+    mut form: ProfitMonitorSettings,
     state: State<AppState>,
 ) -> Result<PriceIntelligenceData, String> {
     if active_shop_kind(&state)? != "cross_border" { return Err("仅跨境店可修改此利润模型".into()); }
-    validate_settings(&form)?;
     let mut c = db(&state)?;
+    form.commission_threshold_cny = form.commission_threshold_rub / form.rub_per_cny;
+    validate_settings(&form)?;
     let tx = c.transaction().map_err(|e| e.to_string())?;
     for (key, value) in [
+        ("cross_border_rub_per_cny", form.rub_per_cny),
         ("cross_profit_warning_margin", form.warning_margin),
         ("cross_profit_advertising_rate", form.advertising_rate),
         ("cross_profit_damage_rate", form.damage_rate),
@@ -632,7 +689,7 @@ pub fn save_profit_monitor_settings(
         ("cross_profit_low_commission_rate", form.low_commission_rate),
         ("cross_profit_high_commission_rate", form.high_commission_rate),
         ("cross_profit_logistics_commission_rate", form.logistics_commission_rate),
-        ("cross_profit_commission_threshold_cny", form.commission_threshold_cny),
+        ("cross_profit_commission_threshold_rub", form.commission_threshold_rub),
     ] {
         tx.execute("INSERT INTO settings(key,value)VALUES(?1,?2)ON CONFLICT(key)DO UPDATE SET value=excluded.value",params![key,value.to_string()]).map_err(|e|e.to_string())?;
     }
@@ -643,6 +700,23 @@ pub fn save_profit_monitor_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_pricing_helpers::{minimum_price_for_margin,projected_margin,cross_border_freight};
+    #[test]
+    fn fixed_ruble_threshold_tracks_exchange_rate_without_rounding() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT); INSERT INTO settings VALUES('cross_profit_commission_threshold_cny','120'),('cross_border_rub_per_cny','12');").unwrap();
+        let s = monitor_settings(&c);
+        assert_eq!(s.commission_threshold_rub, 1500.0);
+        assert_eq!(s.commission_threshold_cny, 125.0);
+        assert_eq!(cross_border_freight(Some(125.0),Some(0.4),&s),Some(14.61));
+        assert_eq!(cross_border_freight(Some(125.01),Some(0.4),&s),Some(29.21));
+        c.execute("UPDATE settings SET value='14' WHERE key='cross_border_rub_per_cny'",[]).unwrap();
+        let s = monitor_settings(&c);
+        assert_eq!(s.commission_threshold_cny,1500.0/14.0);
+        assert_eq!(commission_rate_at(107.14,&s),LOW_COMMISSION);
+        assert_eq!(commission_rate_at(107.15,&s),HIGH_COMMISSION);
+        assert!(reprice_band_ends(&s).contains(&10714));
+    }
     #[test]
     fn price_monitor_only_accepts_products_in_current_shop_catalog() {
         let c = Connection::open_in_memory().unwrap();
@@ -661,31 +735,57 @@ mod tests {
     }
     #[test]
     fn commission_boundary_is_strict() {
-        assert_eq!(
-            if 134.0 > COMMISSION_THRESHOLD {
-                HIGH_COMMISSION
-            } else {
-                LOW_COMMISSION
-            },
-            LOW_COMMISSION
-        );
-        assert_eq!(
-            if 134.01 > COMMISSION_THRESHOLD {
-                HIGH_COMMISSION
-            } else {
-                LOW_COMMISSION
-            },
-            HIGH_COMMISSION
-        );
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);INSERT INTO settings VALUES('cross_profit_commission_threshold_rub','1500'),('cross_border_rub_per_cny','12.5');").unwrap();
+        let settings = monitor_settings(&c);
+        assert_eq!(commission_rate_at(119.99, &settings), LOW_COMMISSION);
+        assert_eq!(commission_rate_at(120.0, &settings), LOW_COMMISSION);
+        assert_eq!(commission_rate_at(120.00000000000001, &settings), LOW_COMMISSION);
+        assert_eq!(commission_rate_at(120.01, &settings), HIGH_COMMISSION);
+        assert_eq!(cross_border_freight(Some(120.0),Some(0.4),&settings),Some(14.61));
+        assert_eq!(cross_border_freight(Some(120.01),Some(0.4),&settings),Some(29.21));
+        assert!(reprice_band_ends(&settings).contains(&12000));
+        assert!(!reprice_band_ends(&settings).contains(&13400));
+        let old = ProfitMonitorSettings {commission_threshold_cny:150.0,..Default::default()};
+        let freight_change = 0.0;
+        let expected_drop = 0.02 + freight_change*(1.0+settings.damage_rate)/130.0;
+        assert!((projected_margin(130.0,20.0,0.3,&old).unwrap()-projected_margin(130.0,20.0,0.3,&settings).unwrap()-expected_drop).abs()<1e-10);
+        c.execute("UPDATE settings SET value='10' WHERE key='cross_border_rub_per_cny'",[]).unwrap();
+        let changed = monitor_settings(&c);
+        assert_eq!(commission_rate_at(130.0,&changed),LOW_COMMISSION);
+        assert_eq!(cross_border_freight(Some(130.0),Some(0.4),&changed),Some(14.61));
+        assert_eq!(commission_rate_at(150.01,&changed),HIGH_COMMISSION);
+    }
+
+    #[test]
+    fn fractional_cent_boundaries_and_suggestions_match_exhaustive_search() {
+        let settings = ProfitMonitorSettings { commission_threshold_cny:0.29,..Default::default() };
+        assert!(reprice_band_ends(&settings).contains(&29));
+        assert_eq!(commission_rate_at(0.29,&settings),LOW_COMMISSION);
+        assert_eq!(commission_rate_at(0.30,&settings),HIGH_COMMISSION);
+        for threshold in [120.0,120.29,150.0] {
+            let s=ProfitMonitorSettings {commission_threshold_cny:threshold,..Default::default()};
+            for weight in [0.49999,0.5,0.50001,1.99999,2.0,2.00001,4.99999,5.0,5.00001] {
+                let expected=(100..=100000).find_map(|cents| {
+                    let price=cents as f64/100.0;
+                    projected_margin(price,20.0,weight,&s).filter(|m|*m>0.15).map(|m|(price,m))
+                });
+                assert_eq!(minimum_price_for_margin(20.0,weight,1.0,15.0,&s),expected,"threshold={threshold},weight={weight}");
+            }
+        }
     }
     #[test]
     fn cross_border_freight_is_the_complete_freight() {
-        assert_eq!(cross_border_freight(Some(95.0), Some(0.6)), Some(41.57));
-        let freight = cross_border_freight(Some(95.0), Some(0.6)).unwrap();
+        let s=ProfitMonitorSettings::default();
+        assert_eq!(cross_border_freight(Some(65.0), Some(0.301), &s), Some(11.83));
+        assert_eq!(cross_border_freight(Some(65.0), Some(0.401), &s), Some(14.64));
+        assert_eq!(cross_border_freight(Some(95.0), Some(0.6), &s), Some(37.29));
+        let freight = cross_border_freight(Some(95.0), Some(0.6), &s).unwrap();
         let damage = (22.5 + LABEL_FEE + freight) * DAMAGE_RATE;
         let profit = 95.0 - 22.5 - 95.0 * AD_RATE - damage - freight
             - 95.0 * LOW_COMMISSION - 95.0 * LOGISTICS_COMMISSION - LABEL_FEE;
-        assert!((damage - 1.9821).abs() < 1e-8);
-        assert!((profit - 3.1979).abs() < 1e-8);
+        assert!((damage - 1.8537).abs() < 1e-8);
+        assert!((profit - 7.6063).abs() < 1e-8);
     }
 }
+

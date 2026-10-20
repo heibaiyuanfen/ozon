@@ -9,6 +9,7 @@ import {
 import "./performance.css";
 import "./layout-fixes.css";
 import NetDashboard from "./NetDashboard";
+import { PaymentRates } from "./PaymentRates";
 import * as echarts from "./charts";
 import {
   BarChart3,
@@ -297,7 +298,7 @@ function Sidebar({
           <div className="nav-label">工作台</div>
           <nav className="grouped-nav">
             {groups.map((group) => {
-              const visibleItems = group.items.filter(([key]) => !(key === "monthly_profit" && activeShop?.kind === "cross_border"));
+              const visibleItems = group.items;
               const GroupIcon = group.icon;
               const opened = collapsed || openGroups[group.id];
               return <section className="nav-group" key={group.id}>
@@ -1466,10 +1467,6 @@ export function App() {
     clearReportCache();
     orderCache.clear();
     setProductRows([]);
-    const nextShop = shops.find((shop) => shop.id === id);
-    if (nextShop?.kind === "cross_border" && page === "monthly_profit") {
-      setPage("cross_profit");
-    }
     setShops((xs) => xs.map((x) => ({ ...x, active: x.id === id })));
   };
   const reloadShops = async () => setShops(await listShops());
@@ -1584,13 +1581,16 @@ export function App() {
                 initialTab="daily"
               />
             )}{" "}
-            {page === "monthly_profit" && activeShop?.kind !== "cross_border" && (
+            {page === "monthly_profit" && (
+              <>
+              {activeShop?.kind === "cross_border" && <PaymentRates key={`payment-${activeShop.id}`} />}
               <ReportsPage
-                key={activeShop?.id}
+                key={`monthly-${activeShop?.id}`}
                 range={monthRange}
                 currency={currency}
                 initialTab="summary"
               />
+              </>
             )}{" "}
             {page === "weekly_report" && (
               activeShop?.kind === "local" ? <LocalWeeklyReportPage key={activeShop.id}/> :

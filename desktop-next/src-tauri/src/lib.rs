@@ -29,6 +29,9 @@ mod price_center;
 mod price_intelligence;
 mod local_weekly_report;
 mod net_dashboard;
+mod finance_settlement;
+mod payment_rates;
+mod rets_shipping;
 mod product_master;
 mod product_worker;
 mod purchase_orders;
@@ -748,9 +751,11 @@ struct CrossBorderDayRow {
     purchase_and_freight_cny: f64,
     profit_cny: Option<f64>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct CrossBorderReport {
+    settlement: finance_settlement::SettlementReport,
+    freight_threshold_cny: f64,
     date_from: String,
     date_to: String,
     rub_per_cny: f64,
@@ -1677,10 +1682,17 @@ fn promotion_text(value: &serde_json::Value, key: &str) -> String {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
 fn promotion_supports_price_exit(action: &serde_json::Value) -> bool {
     let label = format!("{} {}", promotion_text(action, "title"), promotion_text(action, "action_type")).to_lowercase();
-    label.contains("эластичн") || label.contains("elastic") || label.contains("скидка на сток") || label.contains("stock discount")
+    label.contains("эластичн") || label.contains("elastic") || label.contains("скидка на сток") || label.contains("stock discount") || label.contains("stock_discount") || label.contains("максимальный бустинг") || label.contains("maximum boosting")
+}
+
+fn promotion_validate_exit_price(price: Option<f64>, ceiling: f64) -> Result<f64, String> {
+    let price = price.filter(|p|p.is_finite() && *p>0.0).ok_or("该活动使用统一价格退出，请填写退出价格后提交")?;
+    if !ceiling.is_finite() || ceiling<=0.0 { return Err("Ozon 未返回有效活动限价，无法确认退出价格，未提交更改".into()); }
+    let price=(price*100.0).round()/100.0;
+    if price<=ceiling {return Err(format!("退出价格必须高于活动限价 {ceiling:.2}；此操作会修改商品统一价格"));}
+    Ok(price)
 }
 
 #[cfg(test)]
@@ -1861,13 +1873,17 @@ fn ozon_promotion_product_action_blocking(action_id: i64, action: String, produc
         .and_then(|items| items.iter().find(|item| promotion_number(item, "id") as i64 == action_id))
         .ok_or("Ozon 当前活动列表未包含该活动，未提交更改")?;
     let voucher = selected.get("is_voucher_action").and_then(|v| v.as_bool()).unwrap_or(false);
-    if action == "exit_by_price" {
-        return Err("提高活动价不会保证退出促销；请使用明确的移出商品操作".into());
-    }
+    let removing = action == "deactivate" || action == "exit_by_price";
+    let price_exit = removing && !voucher;
+    if price_exit && !promotion_supports_price_exit(selected) {return Err("该活动类型的统一价格退出规则尚未确认，请在 Ozon 后台处理，未提交更改".into());}
+    let mut exit_ceiling = 0.0;
     // The update API identifies products by product_id. Verify membership by
     // that same ID; an absent SKU in the listing does not block this request.
     {
         let participating = ozon_promotion_products_blocking(action_id, "participating".into(), state)?;
+        if price_exit {
+            exit_ceiling = participating.get("products").and_then(|v|v.as_array()).and_then(|items|items.iter().find(|item|promotion_product_id(item)==product_id)).map(|item|promotion_number(item,"maxActionPrice")).unwrap_or(0.0);
+        }
         let mut member = participating.get("products").and_then(|v| v.as_array())
             .is_some_and(|items| items.iter().any(|item| promotion_product_id(item) == product_id));
         if !member && action == "activate" {
@@ -1877,19 +1893,16 @@ fn ozon_promotion_product_action_blocking(action_id: i64, action: String, produc
         }
         if !member { return Err("Ozon 当前活动商品清单中未找到该商品 ID；未提交促销更改".into()); }
     }
-    let (path, body) = if action == "deactivate" {
+    let (path, body) = if removing && voucher {
         (
             "/v2/actions/products/deactivate",
             promotion_removal_body(action_id, product_id)?,
         )
     } else {
-        let price = action_price
-            .filter(|value| *value > 0.0)
-            .ok_or("活动价必须大于 0")?;
-        let quantity = if action == "exit_by_price" { None } else { Some(stock.filter(|value| *value >= 0).ok_or("活动数量不能小于 0")?) };
+        let price = if price_exit {promotion_validate_exit_price(action_price,exit_ceiling)?} else {action_price.filter(|value|value.is_finite() && *value>0.0).ok_or("活动价必须大于0")?};
         let currency = if active_shop_kind(state)? == "cross_border" { "CNY" } else { "RUB" };
         let mut product = promotion_update_product(product_id, price, currency)?;
-        if voucher { product["stock"] = serde_json::json!(quantity.ok_or("优惠码活动必须提供活动数量")?); }
+        if voucher { product["stock"] = serde_json::json!(stock.filter(|v|*v>=0).ok_or("优惠码活动必须提供有效活动数量")?); }
         (
             "/v1/actions/products/update",
             serde_json::json!({"action_id":action_id,"products":[product]}),
@@ -1909,13 +1922,13 @@ fn ozon_promotion_product_action_blocking(action_id: i64, action: String, produc
         .unwrap_or_default()
         .to_string();
     let accepted = result
-        .get(if action == "deactivate" { "product_ids" } else if action == "exit_by_price" { "deactivated_product_ids" } else { "active_product_ids" })
+        .get(if removing && voucher { "product_ids" } else if price_exit { "deactivated_product_ids" } else { "active_product_ids" })
         .and_then(|value| value.as_array())
         .map(|items| items.iter().any(|item| item.as_i64() == Some(product_id)))
         .unwrap_or(false);
     let mut success = rejection.is_empty() && accepted;
     let mut verification_message = String::new();
-    if success && action == "deactivate" {
+    if success && removing {
         match ozon_promotion_products_blocking(action_id, "participating".into(), state) {
             Ok(listing) => {
                 if listing["products"].as_array().is_some_and(|items| items.iter().any(|item| promotion_product_id(item) == product_id)) {
@@ -1928,8 +1941,8 @@ fn ozon_promotion_product_action_blocking(action_id: i64, action: String, produc
     }
     let unverified = !verification_message.is_empty();
     let message = if unverified { verification_message } else if success {
-        if action == "deactivate" || action == "exit_by_price" {
-            "商品已移出促销".to_string()
+        if removing {
+            if price_exit {"统一价格已更新，回读确认商品已移出该促销；请同时核对该商品其他活动".to_string()} else {"商品已移出促销".to_string()}
         } else {
             "商品促销价格与数量已提交".to_string()
         }
@@ -1964,7 +1977,7 @@ fn seller_error_detail(raw: &str) -> String {
 mod seller_api_error_tests {
     use super::{
         finance_accrual_type_name, finance_timestamp, normalize_finance_accrual,
-        promotion_action_sku, promotion_catalog_sku, promotion_update_product, promotion_removal_body, promotion_number, promotion_product_id, promotion_result, promotion_supports_price_exit,
+        promotion_action_sku, promotion_catalog_sku, promotion_update_product, promotion_removal_body, promotion_number, promotion_product_id, promotion_result, promotion_supports_price_exit, promotion_validate_exit_price,
         repair_finance_accrual_attribution, seller_error_detail, DateRange,
     };
     use rusqlite::{params, Connection};
@@ -1996,6 +2009,15 @@ mod seller_api_error_tests {
         assert!(promotion_catalog_sku(&serde_json::json!({"items":[{"id":999,"sku":2483116653_i64}]}),321).is_err());
         assert!(promotion_catalog_sku(&serde_json::json!({"items":[{"id":321,"sources":[{"sku":123},{"sku":456}]}]}),321).is_err());
         assert!(promotion_catalog_sku(&serde_json::json!({"items":[{"id":321,"sku":0}]}),321).is_err());
+    }
+
+    #[test]
+    fn unified_price_exit_requires_explicit_price_above_limit() {
+        assert_eq!(promotion_validate_exit_price(Some(100.01),100.0).unwrap(),100.01);
+        for price in [None,Some(100.0),Some(99.0),Some(f64::NAN),Some(f64::INFINITY),Some(100.001)] {assert!(promotion_validate_exit_price(price,100.0).is_err());}
+        assert!(promotion_validate_exit_price(Some(100.01),0.0).is_err());
+        assert!(promotion_supports_price_exit(&serde_json::json!({"action_type":"STOCK_DISCOUNT"})));
+        assert!(promotion_supports_price_exit(&serde_json::json!({"title":"Максимальный бустинг: усиление."})));
     }
 
     #[test]
@@ -2102,19 +2124,19 @@ mod seller_api_error_tests {
     #[test]
     fn repairs_cached_accrual_rows_without_requesting_the_api_again() {
         let mut connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch("CREATE TABLE finance_transactions(operation_id TEXT PRIMARY KEY,operation_date TEXT,operation_type TEXT,sku TEXT,raw_json TEXT);CREATE TABLE business_report_cache(range_key TEXT);CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);").unwrap();
+        connection.execute_batch("CREATE TABLE finance_transactions(operation_id TEXT PRIMARY KEY,operation_date TEXT,operation_type TEXT,sku TEXT,raw_json TEXT,accruals_for_sale REAL,sale_commission REAL);CREATE TABLE business_report_cache(range_key TEXT);CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);INSERT INTO settings VALUES('finance_accrual_repair_version','2');").unwrap();
         let raw = serde_json::json!({
             "operation_type":"AccrualType0","items":[],"amount":100.0,
             "accrual_raw":{
                 "accrual_id":99,"accrued_category":"POSTING","date":"2026-09-01",
                 "unit_number":"posting-1","total_amount":{"amount":"100"},
                 "posting":{"delivery_schema":"FBO","products":[{
-                    "sku":7001,"quantity":2,"commission":{"seller_price":{"amount":"100"},"sale_commission":{"amount":"-10"}},
+                    "sku":7001,"quantity":2,"commission":{"seller_price":{"amount":"100"},"sale_amount":{"amount":"200"},"sale_commission":{"amount":"-10"},"commission":{"amount":"-22"}},
                     "delivery":{"total_accrued":{"amount":"-5"},"services":[]}
                 }]},"item_fees":null,"non_item_fee":null
             }
         });
-        connection.execute("INSERT INTO finance_transactions VALUES('legacy','2026-09-01','AccrualType0','',?1)",params![raw.to_string()]).unwrap();
+        connection.execute("INSERT INTO finance_transactions VALUES('legacy','2026-09-01','AccrualType0','',?1,100,-10)",params![raw.to_string()]).unwrap();
         let count = repair_finance_accrual_attribution(
             &mut connection,
             &DateRange {
@@ -2131,10 +2153,29 @@ mod seller_api_error_tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+        let amounts: (f64,f64) = connection.query_row("SELECT accruals_for_sale,sale_commission FROM finance_transactions", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(amounts, (200.0,-22.0));
+        assert_eq!(repair_finance_accrual_attribution(&mut connection, &DateRange{from:"2026-09-01".into(),to:"2026-09-30".into()}).unwrap(),0);
         assert_eq!(
             repaired,
             ("OperationAgentDeliveredToCustomer".into(), "7001".into())
         );
+    }
+
+    #[test]
+    #[ignore = "Explicit maintenance only: refreshes local Finance cache from read-only Seller endpoints"]
+    fn refresh_finance_audit_range() {
+        let dir = std::env::var("OZON_FINANCE_REFRESH_DIR").expect("explicit data directory required");
+        let shop = std::env::var("OZON_FINANCE_REFRESH_SHOP").expect("explicit shop required");
+        let from = std::env::var("OZON_FINANCE_REFRESH_FROM").expect("explicit date required");
+        let to = std::env::var("OZON_FINANCE_REFRESH_TO").expect("explicit date required");
+        let state = super::AppState {data_dir:dir.into(),active_shop_id:std::sync::Mutex::new(shop)};
+        let range = DateRange{from,to};
+        let count = super::sync_finance_blocking(range.clone(),true,&state).unwrap();
+        let mut c = super::db(&state).unwrap();
+        repair_finance_accrual_attribution(&mut c,&range).unwrap();
+        let amounts:(f64,f64,f64) = c.query_row("SELECT SUM(amount),SUM(accruals_for_sale),SUM(sale_commission) FROM finance_transactions WHERE substr(operation_date,1,10) BETWEEN ?1 AND ?2",params![range.from,range.to],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        println!("Finance refreshed: {count} entries; RUB net={}, sales/returns={}, commission={}",amounts.0,amounts.1,amounts.2);
     }
 }
 
@@ -7189,27 +7230,24 @@ fn business_report(range: DateRange, state: State<AppState>) -> Result<BusinessR
     business_report_blocking(range, &state)
 }
 
-pub(crate) fn cross_border_shipping(price: f64, weight: f64) -> Option<f64> {
-    if price < 0.0 || weight < 0.0 {
-        return None;
+pub(crate) fn cross_border_shipping(price_cny: f64, weight: f64, rate: f64, dimensions: Option<[f64;3]>) -> Option<f64> {
+    if !rate.is_finite() || rate<=0.0 { return None; }
+    rets_shipping::quote(price_cny*rate,weight,dimensions).ok().map(|q|q.cny)
+}
+
+fn cross_border_freight_totals(c: &Connection, range: &DateRange, rate: f64) -> Result<std::collections::HashMap<String, Option<f64>>, String> {
+    if !rate.is_finite() || rate<=0.0 { return Err("人民币兑卢布汇率必须大于 0".into()); }
+    let mut stmt=c.prepare("SELECT s.sku,SUM(s.revenue),SUM(s.ordered_units),pc.weight_kg,pc.length_cm,pc.width_cm,pc.height_cm FROM sales_daily s LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2 GROUP BY s.day,s.sku HAVING SUM(s.ordered_units)>0").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(params![range.from,range.to],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?,r.get::<_,i64>(2)?,r.get::<_,Option<f64>>(3)?,r.get::<_,Option<f64>>(4)?,r.get::<_,Option<f64>>(5)?,r.get::<_,Option<f64>>(6)?))).map_err(|e|e.to_string())?;
+    let mut totals=std::collections::HashMap::<String,Option<f64>>::new();
+    for row in rows {
+        let (sku,revenue,units,weight,length,width,height)=row.map_err(|e|e.to_string())?;
+        let dims=length.zip(width).zip(height).map(|((l,w),h)|[l,w,h]);
+        let cost=weight.filter(|w|*w>0.0).and_then(|w|cross_border_shipping(revenue/units as f64/rate,w,rate,dims)).map(|v|v*units as f64);
+        let total=totals.entry(sku).or_insert(Some(0.0));
+        *total=total.zip(cost).map(|(a,b)|a+b);
     }
-    let billed_weight = (weight * 10.0).ceil() / 10.0;
-    let freight = if price < 135.0 && billed_weight < 0.5 {
-        3.37 + billed_weight * 28.10
-    } else if price >= 135.0 && price < 635.0 && billed_weight < 2.0 {
-        17.97 + billed_weight * 28.10
-    } else if price >= 635.0 && price < 22525.0 && billed_weight < 5.0 {
-        25.83 + billed_weight * 19.10
-    } else if price < 135.0 && billed_weight >= 0.5 && billed_weight < 30.0 {
-        24.71 + billed_weight * 28.10
-    } else if price >= 135.0 && price < 635.0 && billed_weight >= 2.0 && billed_weight < 30.0 {
-        40.44 + billed_weight * 28.10
-    } else if price >= 635.0 && price < 22525.0 && billed_weight >= 5.0 && billed_weight < 30.0 {
-        64.00 + billed_weight * 25.80
-    } else {
-        return None;
-    };
-    Some((freight * 100.0).round() / 100.0)
+    Ok(totals)
 }
 
 fn cross_border_report_blocking(
@@ -7217,11 +7255,14 @@ fn cross_border_report_blocking(
     state: &AppState,
 ) -> Result<CrossBorderReport, String> {
     use std::collections::{HashMap, HashSet};
-    let c = db(state)?;
+    let mut c = db(state)?;
+    repair_finance_accrual_attribution(&mut c, &range)?;
     let rate = rub_per_cny_for(state, &c)?;
+    let freight_threshold = price_intelligence::freight_threshold(&c)?;
     if rate <= 0.0 {
         return Err("人民币兑卢布汇率必须大于 0".into());
     }
+    let freight_totals = cross_border_freight_totals(&c, &range, rate)?;
     let (min_day,max_day):(String,String)=c.query_row("SELECT COALESCE(MIN(substr(operation_date,1,10)),''),COALESCE(MAX(substr(operation_date,1,10)),'')FROM finance_transactions",[],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
     let cutoff = if !min_day.is_empty()
         && !max_day.is_empty()
@@ -7387,9 +7428,9 @@ fn cross_border_report_blocking(
     {
         let selling_rub = revenue / units as f64;
         let selling_cny = selling_rub / rate;
-        let freight_unit = weight.and_then(|w| cross_border_shipping(selling_cny, w));
+        let freight_total = freight_totals.get(&sku).copied().flatten();
+        let freight_unit = freight_total.map(|total|total/units as f64);
         let purchase_total = unit_cost.map(|x| x * units as f64);
-        let freight_total = freight_unit.map(|x| x * units as f64);
         let commission_rate = sku_sales
             .get(&sku)
             .copied()
@@ -7464,6 +7505,8 @@ fn cross_border_report_blocking(
     let profit = (missing == 0 && !rows.is_empty())
         .then(|| revenue_cny + total_fees - ad_rub / rate - purchase_freight);
     Ok(CrossBorderReport {
+        settlement: finance_settlement::read(&c, &range.from, &range.to, rate)?,
+        freight_threshold_cny: freight_threshold,
         date_from: range.from.clone(),
         date_to: range.to.clone(),
         rub_per_cny: rate,
@@ -7484,7 +7527,7 @@ fn cross_border_report_blocking(
         rfbs_orders: rfbs,
         whd_orders: whd,
         daily: {
-            let mut stmt=c.prepare("SELECT s.day,SUM(s.ordered_units),SUM(s.revenue),pc.unit_cost_cny,pc.weight_kg FROM sales_daily s LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2 GROUP BY s.day,s.sku HAVING SUM(s.ordered_units)>0 ORDER BY s.day").map_err(|e|e.to_string())?;
+            let mut stmt=c.prepare("SELECT s.day,SUM(s.ordered_units),SUM(s.revenue),pc.unit_cost_cny,pc.weight_kg,pc.length_cm,pc.width_cm,pc.height_cm FROM sales_daily s LEFT JOIN product_costs pc ON pc.sku=s.sku WHERE s.day BETWEEN ?1 AND ?2 GROUP BY s.day,s.sku HAVING SUM(s.ordered_units)>0 ORDER BY s.day").map_err(|e|e.to_string())?;
             let raw = stmt
                 .query_map(params![range.from, range.to], |r| {
                     Ok((
@@ -7493,15 +7536,18 @@ fn cross_border_report_blocking(
                         r.get::<_, f64>(2)?,
                         r.get::<_, Option<f64>>(3)?,
                         r.get::<_, Option<f64>>(4)?,
+                        r.get::<_, Option<f64>>(5)?,
+                        r.get::<_, Option<f64>>(6)?,
+                        r.get::<_, Option<f64>>(7)?,
                     ))
                 })
                 .map_err(|e| e.to_string())?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
             let mut days = std::collections::BTreeMap::<String, (i64, f64, f64, bool)>::new();
-            for (day, qty, revenue, cost, weight) in raw {
+            for (day, qty, revenue, cost, weight, length, width, height) in raw {
                 let price = revenue / qty as f64 / rate;
-                let freight = weight.and_then(|w| cross_border_shipping(price, w));
+                let freight = weight.filter(|w|*w>0.0).and_then(|w| cross_border_shipping(price, w, rate, length.zip(width).zip(height).map(|((l,w),h)|[l,w,h])));
                 let complete = cost.is_some()
                     && freight.is_some()
                     && shop_commission_rate.is_some()
@@ -7571,8 +7617,11 @@ fn analytics_detail_blocking(
 ) -> Result<AnalyticsDetail, String> {
     let c = db(&state)?;
     let rate = rub_per_cny_for(state, &c)?;
+    let freight_threshold = price_intelligence::freight_threshold(&c)?;
+    let freight_totals = cross_border_freight_totals(&c, &range, rate)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS analytics_detail_cache(range_key TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
     let fingerprint:String=c.query_row("SELECT 'analytics-v5-ad-level-dedup|'||printf('%d|%s|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let fingerprint=format!("{fingerprint}|rets-russia-20260724-weight-only-v3|{freight_threshold}|{rate}");
     let cache_key = format!("{}|{}", range.from, range.to);
     if let Ok(payload) = c.query_row(
         "SELECT payload FROM analytics_detail_cache WHERE range_key=?1 AND fingerprint=?2",
@@ -7591,18 +7640,11 @@ fn analytics_detail_blocking(
             let ad: f64 = r.get(5)?;
             let unit: Option<f64> = r.get(6)?;
             let first_unit: Option<f64> = r.get(7)?;
-            let weight: Option<f64> = r.get(8)?;
             let fees: f64 = r.get(9)?;
             let purchase = unit.map(|v| v * rate * units as f64);
             let first = first_unit.map(|v| v * units as f64);
-            let freight = weight.and_then(|w| {
-                if units > 0 {
-                    cross_border_shipping(revenue / units as f64 / rate, w)
-                        .map(|v| v * rate * units as f64)
-                } else {
-                    None
-                }
-            });
+            let sku: String = r.get(0)?;
+            let freight = freight_totals.get(&sku).copied().flatten().map(|v|v*rate);
             let complete = purchase.is_some() && first.is_some();
             let profit = if complete {
                 Some(revenue - ad - purchase.unwrap_or(0.0) - first.unwrap_or(0.0) - fees)
@@ -9018,11 +9060,15 @@ fn normalize_finance_accrual(
     }));
     let accruals_for_sale = products
         .iter()
-        .map(|product| json_f64(product.pointer("/commission/seller_price")).unwrap_or(0.0))
+        // sale_amount is the accrued total, including quantity and subsidies.
+        // seller_price is a unit/reference price and can differ substantially.
+        .map(|product| json_f64(product.pointer("/commission/sale_amount"))
+            .or_else(|| json_f64(product.pointer("/commission/seller_price"))).unwrap_or(0.0))
         .sum::<f64>();
     let sale_commission = products
         .iter()
-        .map(|product| json_f64(product.pointer("/commission/sale_commission")).unwrap_or(0.0))
+        .map(|product| json_f64(product.pointer("/commission/commission"))
+            .or_else(|| json_f64(product.pointer("/commission/sale_commission"))).unwrap_or(0.0))
         .sum::<f64>();
     let delivery_charge = products
         .iter()
@@ -9121,14 +9167,14 @@ fn repair_finance_accrual_attribution(
             |row| row.get(0),
         )
         .unwrap_or_default();
-    if repair_version == "2" {
+    if repair_version == "3" {
         return Ok(0);
     }
     let rows = {
         let mut statement = c
             .prepare(
                 "SELECT operation_id,operation_date,raw_json FROM finance_transactions \
-                 WHERE operation_type='AccrualType0' OR raw_json LIKE '%\"AccrualType%'",
+                 WHERE raw_json LIKE '%\"accrual_raw\"%'",
             )
             .map_err(|error| error.to_string())?;
         let mapped = statement
@@ -9176,12 +9222,14 @@ fn repair_finance_accrual_attribution(
             String::new()
         };
         transaction.execute(
-            "UPDATE finance_transactions SET operation_type=?1,sku=?2,raw_json=?3 WHERE operation_id=?4",
+            "UPDATE finance_transactions SET operation_type=?1,sku=?2,raw_json=?3,accruals_for_sale=?5,sale_commission=?6 WHERE operation_id=?4",
             params![
                 json_text(normalized.get("operation_type")),
                 sku,
                 normalized.to_string(),
                 operation_id
+                ,json_f64(normalized.get("accruals_for_sale")).unwrap_or(0.0)
+                ,json_f64(normalized.get("sale_commission")).unwrap_or(0.0)
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -9194,7 +9242,7 @@ fn repair_finance_accrual_attribution(
     }
     transaction
         .execute(
-            "INSERT INTO settings(key,value) VALUES('finance_accrual_repair_version','2') ON CONFLICT(key) DO UPDATE SET value='2'",
+            "INSERT INTO settings(key,value) VALUES('finance_accrual_repair_version','3') ON CONFLICT(key) DO UPDATE SET value='3'",
             [],
         )
         .map_err(|error| error.to_string())?;
@@ -13312,21 +13360,78 @@ fn import_api_bundle(path: String, state: State<AppState>) -> Result<i64, String
 #[cfg(test)]
 mod cross_border_tests {
     use super::{
-        cross_border_shipping, cross_border_weekly_card, inventory_feishu_cards, CrossBorderReport,
+        cross_border_weekly_card, inventory_feishu_cards, CrossBorderReport,
         DateRange,
     };
+
+    fn cross_border_shipping(price:f64,weight:f64)->Option<f64> {
+        super::cross_border_shipping(price,weight,12.0,Some([10.;3]))
+    }
 
     #[test]
     fn freight_formula_matches_current_boundaries() {
         assert_eq!(cross_border_shipping(100.0, 0.4), Some(14.61));
         assert_eq!(cross_border_shipping(200.0, 1.0), Some(46.07));
-        assert_eq!(cross_border_shipping(700.0, 3.0), Some(83.13));
-        assert_eq!(cross_border_shipping(100.0, 1.0), Some(52.81));
-        assert_eq!(cross_border_shipping(200.0, 2.0), Some(96.64));
-        assert_eq!(cross_border_shipping(700.0, 5.0), Some(193.00));
-        assert_eq!(cross_border_shipping(10.0, 0.01), Some(6.18));
-        assert_eq!(cross_border_shipping(635.0, 30.0), None);
+        assert_eq!(cross_border_shipping(700.0, 3.0), Some(109.01));
+        assert_eq!(cross_border_shipping(100.0, 1.0), Some(44.93));
+        assert_eq!(cross_border_shipping(200.0, 2.0), Some(74.17));
+        assert_eq!(cross_border_shipping(700.0, 5.0), Some(165.21));
+        assert_eq!(cross_border_shipping(10.0, 0.01), Some(3.65));
+        assert_eq!(cross_border_shipping(635.0, 30.0), Some(843.64));
         assert_eq!(cross_border_shipping(30000.0, 1.0), None);
+    }
+
+    #[test]
+    fn freight_uses_actual_weight_until_each_real_boundary() {
+        for (weight, expected) in [(0.3,11.80),(0.301,11.83),(0.4,14.61),(0.401,14.64),(0.499,17.39),(0.5,17.42)] {
+            assert_eq!(cross_border_shipping(65.0,weight),Some(expected),"weight={weight}");
+        }
+        assert_eq!(cross_border_shipping(200.0,1.999),Some(74.14));
+        assert_eq!(cross_border_shipping(200.0,2.0),Some(74.17));
+        assert_eq!(cross_border_shipping(700.0,4.999),Some(165.18));
+        assert_eq!(cross_border_shipping(700.0,5.0),Some(165.21));
+        assert_eq!(cross_border_shipping(100.0,29.999),Some(598.81));
+        assert_eq!(cross_border_shipping(100.0,30.0),Some(598.83));
+    }
+
+    #[test]
+    fn freight_does_not_promote_weight_by_point_zero_one_gram() {
+        // 0.00001 kg is 0.01 g. Real tier changes are retained exactly.
+        for (price,boundary,below,at) in [(100.0,0.5,17.42,35.38),(200.0,2.0,74.17,96.64),(700.0,5.0,165.21,198.64)] {
+            assert_eq!(cross_border_shipping(price,boundary-0.00001),Some(below));
+            assert_eq!(cross_border_shipping(price,boundary),Some(below));
+            assert_eq!(cross_border_shipping(price,boundary+0.00001),Some(at));
+            assert_eq!(cross_border_shipping(price,boundary-f64::EPSILON),Some(below));
+            assert_eq!(cross_border_shipping(price,boundary+f64::EPSILON),Some(below));
+        }
+        assert_eq!(cross_border_shipping(100.0,0.30001),Some(11.80));
+        assert_eq!(cross_border_shipping(100.0,0.40001),Some(14.61));
+        assert_eq!(cross_border_shipping(100.0,29.99999),Some(598.83));
+        assert_eq!(cross_border_shipping(100.0,30.0-f64::EPSILON*16.0),Some(598.83));
+        assert_eq!(cross_border_shipping(100.0,f64::NAN),None);
+    }
+
+    #[test]
+    fn monthly_freight_uses_rub_bands_and_is_independent_of_commission_and_fx() {
+        let c=rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE sales_daily(day TEXT,sku TEXT,revenue REAL,ordered_units INTEGER);CREATE TABLE product_costs(sku TEXT,weight_kg REAL,length_cm REAL,width_cm REAL,height_cm REAL);CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);INSERT INTO settings VALUES('cross_profit_commission_threshold_rub','1200'),('cross_border_rub_per_cny','10');INSERT INTO product_costs VALUES('A',0.4,10,10,10),('MISSING',NULL,10,10,10);INSERT INTO sales_daily VALUES('2026-10-01','A',6000,5),('2026-10-02','A',8500,5),('2026-09-01','A',999999,999),('2026-10-03','MISSING',1000,1);").unwrap();
+        let range=DateRange{from:"2026-10-01".into(),to:"2026-10-31".into()};
+
+        let totals=super::cross_border_freight_totals(&c,&range,10.0).unwrap();
+        assert!((totals["A"].unwrap()-219.10).abs()<1e-9);
+        assert!(totals["MISSING"].is_none());
+        let monthly_mean=super::cross_border_shipping(145.0,0.4,10.0,Some([10.;3])).unwrap()*10.0;
+        assert!((monthly_mean-totals["A"].unwrap()).abs()>1.0);
+        let mut sum=0.0;
+        for day in ["2026-10-01","2026-10-02"] {
+            let d=DateRange{from:day.into(),to:day.into()};
+            sum+=super::cross_border_freight_totals(&c,&d,10.0).unwrap()["A"].unwrap();
+        }
+        assert!((sum-totals["A"].unwrap()).abs()<1e-9);
+        c.execute("UPDATE settings SET value='1500' WHERE key='cross_profit_commission_threshold_rub'",[]).unwrap();
+
+        let changed=super::cross_border_freight_totals(&c,&range,20.0).unwrap();
+        assert!((changed["A"].unwrap()-219.10).abs()<1e-9);
     }
 
     #[test]
@@ -13336,6 +13441,8 @@ mod cross_border_tests {
             to: "2026-09-13".into(),
         };
         let report = CrossBorderReport {
+            freight_threshold_cny: 120.0,
+            settlement: Default::default(),
             date_from: range.from.clone(),
             date_to: range.to.clone(),
             rub_per_cny: 12.5,
@@ -13870,6 +13977,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            payment_rates::payment_rate_list,
+            payment_rates::payment_rate_fetch,
+            payment_rates::payment_rate_save,
             list_shops,
             select_shop,
             create_shop,
@@ -14084,3 +14194,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("failed to run app")
 }
+

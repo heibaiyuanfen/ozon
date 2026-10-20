@@ -2035,3 +2035,132 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 每次写入携带预期店铺 ID，由后端对捕获的店铺快照核验；关闭窗口或切店停止后续任务。每批最多 5 项并回读缓存，只有回读售价及预计利润率均符合目标才显示已达标，其他显示待核对。没有提交真实店铺改价。
 - `cargo check --locked`、7 项利润改价专项测试、`cargo test --locked --lib`（214 通过、5 忽略）、`pnpm build` 通过。新增测试覆盖双向变价、已达标不变、定制佣金边界与逐分枚举交叉核对、无效参数及不可达目标。正式构建、覆盖及界面验收结果在后续记录。
 - 正式 `desktop-next/scripts/build-tauri-release.cmd` 成功。原根目录启动器被运行中的旧 ERP 占用，核对其经营总览无编辑弹窗后正常关闭窗口，再完成覆盖。根目录与 Release 均为 34,112,000 bytes，修改时间 2026-10-17 20:42:02，SHA-256 均为 `526307DA89332DEBCCC17609D0462EA696DB6DB706014116B4F5BC3FC07B8899`。启动新版验收时用户按物理 Escape 停止 Computer Use，未确认新窗口加载或新功能可见效果；停止后未继续桌面操作。未提交真实商品改价，代码与文档未上传 GitHub。
+
+## 2026-10-19 更新项目后覆盖根目录启动器
+
+- 按用户要求对已更新项目重新执行 desktop-next/scripts/build-tauri-release.cmd，前端 tsc/Vite 和 Tauri Release 构建通过。本次未修改业务源码，未另外运行 Rust 单元测试。
+- 已关闭旧的根目录进程，将正式 Release 产物覆盖根目录 ozon-analytics-next.exe 并启动。
+- 根目录 EXE 大小 34,101,760 字节，修改时间 2026-10-19 17:08:48 +08:00；根目录和 Release 产物 SHA-256 一致：32AC2CAD93425993798FF06FC05EFF551E7AEE7C57B1C7B0894ABB12304CEAA9。
+- 已确认根目录进程运行并返回 Ozon ERP 窗口。用户按物理 Escape 停止 Computer Use，未完成页面截图可见验收；停止后未继续桌面操作。
+
+## 2026-10-20 跨境利润监控运费按实际重量计算
+
+- 按用户确认的表格公式修改 cross_border_shipping：去掉 ceil(weight*10)/10，计费和档位判断均使用实际 kg；最终金额四舍五入到两位小数。价格与利润监控的运费、利润、建议价格、目标利润试算均调用该共享公式；共享跨境报表调用处同步生效。
+- 页面增加“按实际 kg 计费，不进位到 0.1kg；仅运费金额保留两位小数”说明。
+- 售价低于 135 元示例：0.3kg=11.80 元，0.301kg=11.83 元，0.401kg=14.64 元，0.499kg=17.39 元；到 0.5kg 才进入下一档（38.76 元）。2kg、5kg、30kg 边界也按真实重量判断。
+- cargo check --locked 通过；cross_border_tests 4 项及 price_intelligence 12 项测试均通过，包含阶梯边界、原重量示例、建议价格及逐分穷举对照；pnpm build 通过。
+- 正式构建脚本成功，覆盖并启动根目录 ozon-analytics-next.exe。大小 34,101,760 字节，修改时间 2026-10-20 14:35:08 +08:00；根目录与 Release SHA-256 一致：65A7597EC348AF0E07AE2D5EBE1EB1B8090C5A5B315A08A8ACCCB1A320F16184。
+- 已确认根目录进程和 Ozon ERP 窗口存在；用户按物理 Escape 停止 Computer Use，价格与利润监控页面未完成可见验收。停止后未继续桌面操作。
+
+## 2026-10-20 动态佣金分界及浮点边界修复
+
+- 用户确认保留原表真实档位，仅消除提前进位和浮点误差。未将运费改成连续累进模型。
+- 佣金比较集中为 commission_rate_at，商品利润与调价试算使用同一店铺设置；等于分界价使用低档佣金。统一 reprice_band_ends，移除预警建议算法中残留固定 134 元分界，仅保留真实运费售价边界和用户配置佣金边界。
+- 新增 normalized_cents，仅校正机器精度级的整数分误差，避免分界价乘 100 后错误向下取整、建议价错误向上多进一分钱。跨境运费在 0.5/2/5/30kg 和售价 135/635/22525 附近仅校正机器精度误差，不将 0.01g 或实际重量进位。
+- 回归：cargo check --locked 通过；cross_border_tests 5 项和 price_intelligence 13 项均通过，验证保存 120/150 元设置、分界价相等及高一分的佣金、临界重量前后 0.01g、分币误差及按不同佣金设置逐分穷举的建议价；pnpm build 通过。
+- 正式 build-tauri-release.cmd 成功，关闭旧进程后覆盖根目录 EXE 并启动。大小 34,101,760 字节，修改时间 2026-10-20 14:44:15 +08:00；根目录与 Release SHA-256 相同：4B1C2F905C75F6454DBDE71D8636433B72500CAD0E4C7B593D37BBD97D1ED447。
+- 已确认根目录进程及 Ozon ERP 窗口存在；用户按物理 Escape 停止 Computer Use，未完成页面可见验收，停止后未继续桌面操作。
+
+## 2026-10-20 运费售价首档分界与佣金配置统一、跨境月报纠正
+
+- 用户进一步明确：原 135 元是 1500 RUB 的旧折算值，首档运费售价门槛应与填写的佣金分界价一起变化。cross_border_shipping 现在显式接收当前店铺保存的 commission_threshold_cny，不再在生产路径固定 135。等于分界价走低档，下一分进入下一档；635/22525 后续售价档位和真实重量档位保留。联合分界校验范围为 0（含）到 635（不含），避免档位重叠。
+- 利润监控、预警建议和目标利润试算共用设置；定价搜索仅保留自定义首档门槛及后续真实运费门槛。UI 名称改为“运费 / 佣金分界价”，保存后清除前端报表缓存。
+- 核实当前跨境月度统计走 cross_profit / cross_border_report。原月报按整月 SKU 均价套运费档，和逐日采用的档位可能不一致。新增 cross_border_freight_totals，逐日 SKU 均价 × 真实重量计算件均运费，再乘日销量后汇总，月报单位运费为加权平均，缺少重量仍标记不完整。月报主表、产品明细、导出均使用此口径。
+- analytics_detail 按同一逐日运费汇总，缓存指纹包含算法版本、分界价和汇率；跨境月报返回 freightThresholdCny，在页面及导出核算说明中明示。导出原有文件不原地改写，重新导出可得到新结果。
+- 回归验证：cargo check --locked、pnpm build 通过；cross_border_tests 6 项、price_intelligence 13 项、ozon_monthly 2 项均通过。覆盖设置 120/150 元后运费和佣金同步变化、月度汇总与日合计一致、避免整月均价误分档、重量边界及导出分界说明；现有缺成本处理保留。
+- 正式构建脚本 build-tauri-release.cmd 成功，根目录 EXE 已替换并启动。大小 34,107,392 字节，修改时间 2026-10-20 14:59:20 +08:00；与 Release 产物 SHA-256 一致：5990B49653FA6283C568A78B82F707DAC071ABD1DC7F9131370D9C4469A347BB。
+- 已确认根目录进程与 Ozon ERP 窗口存在；用户按物理 Escape 停止 Computer Use，利润监控与跨境月报未完成可见验收。停止后未继续桌面操作。
+
+## 2026-10-20 固定卢布首档门槛并随汇率换算
+- 价格与利润监控保存 cross_profit_commission_threshold_rub，默认 1500 RUB。首档运费和佣金共用该值除以当前跨境 RUB/CNY 汇率得到的人民币门槛；旧人民币门槛不再作为输入。界面展示卢布设置和人民币换算值。
+- 换算保留完整精度，实际重量计费与真实重量档位继续保留。后续 635/22525 CNY 售价档位保持原表。本次仅转换指定首档门槛。
+- 跨境月报、商品利润明细和导出表通过共享门槛函数同步使用当前汇率；报表说明同步更新。
+- cargo check --locked、price_intelligence 14 项、cross_border_tests 6 项、ozon_monthly 2 项通过；前端 tsc/Vite 构建通过。
+- 使用 desktop-next/scripts/build-tauri-release.cmd 构建，停止旧根目录进程后覆盖并启动根目录 ozon-analytics-next.exe。大小 34116096 字节，修改时间 2026-10-20 15:10:55 +08:00，根目录与 Release SHA256 均为 982A1F63888947439D0354BFBEAAA7C7F0B441F1DED2B782C290331E08398FA8。
+- 可见验收：根目录程序正常显示经营总览，UI 自动化确认地址 http://tauri.localhost/（内嵌前端）。进入报表与利润菜单时用户按物理 Escape 停止 Computer Use，遵照停止要求未继续；新参数页及月报页面未完成可见验收。未提交任何线上调价。
+
+## 2026-10-20 修复促销降价缺少最低价时预览与执行规则冲突
+- AUTO-2 从 19 降至 14.10 的截图错误来自 RepriceDialog 本地执行检查：预览允许缺失最低价，执行却因 minActionPrice<=0 拦截，尚未向平台提交。
+- 新增共享 promotionPriceBounds：保留所有已知正数最低价，最低价缺失时允许按明确目标价提交平台校验，并在预览说明平台可能拒绝；每个活动均须有有效最高价。执行继续调用相同 planFor 对新读取活动核验，移除矛盾的降价拦截。
+- 保留店铺、商品 ID、币种、活动冻结期、完整清单和目标利润率检查。未代用户提交任何线上改价。
+- scripts/test-promotion-price-bounds.mjs 4 项通过，覆盖截图降价、缺失最低价、多活动已知最低价和缺失上限；cargo check --locked、Rust promotion 4 项、pnpm build 均通过。
+- 使用 scripts/build-tauri-release.cmd 正式构建，覆盖并重启根目录 EXE；大小 34116096 字节，修改时间 2026-10-20 15:20:55 +08:00，根目录及 Release SHA256 一致：30D563412218F152CB7CA30553C1759E9416321E11E82E29EE4DA43D04B8D96A。
+- 可见确认：根目录程序经营总览正常加载，地址 http://tauri.localhost/，非开发服务器。进入相关菜单时用户按 Escape 停止 Computer Use，已停止；改价预览页面未完成可见验收，真实平台调价未测试。
+
+## 2026-10-20 跨境 Finance 入账订单利润核算
+- 用户明确选择按 Finance 平台入账核算，银行卡到账单独标注未核实。审计原跨境实时预估利润：使用下单 sales_daily 的 ordered_units/revenue、估计佣金/收单和阶梯运费，未扣取消退货；原 Finance 净额是所选入账日期 amount 总和，不等于银行到账。
+- 新增 finance_settlement.rs：按入账日期逐笔净额、销售应计、退款、佣金、实际正向物流、退货物流、广告推广、其他费用拆解，恒等式与 amount 对齐；净额扣对应商品成本，不重复扣运费和 Performance 广告。无 SKU 的实际运费按订单号聚合，多 SKU 订单不猜测摊分到单品。
+- 数量读取 Finance 明确 quantity（优先 accrual_raw 商品）或精确订单 SKU 数量；不以一笔流水当一件。销售入账在全部已缓存历史中按订单/SKU 去重计成本，跨期费用不再扣采购成本；重复正销售入账、缺数量、缺成本或损坏原始数据均待核对。采购成本采用当前录入值，未承诺历史批次成本。
+- 退款已经减少净额；不推定退货商品已回仓，不自动恢复成本。退款组列为待核对，不输出最终利润；另展示退货成本未冲回前利润。未入账费用、平台外费用、税费、银行卡到账与结汇差额不在当前已核实范围。
+- 新增 FinanceSettlementView：总览、净额拆解、订单/货号/SKU/流水搜索、仅待核对筛选、每页30组、订单展开商品成本与逐笔流水。旧预测表明确标为下单预估参考（未扣退货取消）。
+- 跨境 Excel 导出包含 Finance订单核算、Finance原始流水、入账商品成本、下单预估参考四张表；本土单表导出保留。新增导出 ZIP 工作表及关联验证。
+- 只读审计当前非凡智汇店 2026-10-01 至 2026-10-20：1661 笔，117867.83 RUB / 12 = 9822.3191667 CNY；实际正向物流 -7047.5175 CNY，实扣广告 -1996.7433333 CNY；对应采购 5306.65 CNY，退货成本未冲回前利润 4515.6691667 CNY；缺成本/数量0组，退款待核对3组。独立 SQLite JSON 商品数量核对 278 商品行、326件，采购成本同为5306.65。实际平台扣费与预估/Performance区分，不重复扣除。
+- cargo check --locked、finance_settlement 5项、ozon_monthly 3项、cross_border_tests 6项及显式只读真实店铺审计1项通过（共15项）；pnpm build、正式构建内 tsc/Vite 均通过，git diff --check通过。
+- 按 scripts/build-tauri-release.cmd 构建正式程序，停止旧根目录进程，覆盖并启动根目录 EXE。大小34278400字节，修改时间2026-10-20 15:49:53 +08:00，根目录/Release SHA256一致：4949ABD00E4AAFA3B3F63C533941907AA38F05AEFD100665FB05073A8EA66832。
+- 可见验收：已确认新根目录进程及 Ozon ERP 窗口。激活/截图时用户按物理Escape停止Computer Use，已停止，未完成新版本内嵌页面和新核算页面的可见验收。无线上调价、银行操作或数据写入。
+
+## 2026-10-20 按俄通收 RETS 2026.07.24 俄罗斯段纠正运费与卢布档位
+- 用户在读取8月CIS费率表后指定以“俄通收RETS新品价格测算表2026.07.24执行xlsx.xlsx”为准；实际采用Sheet1俄罗斯/莫斯科主段，G/M行6、10、17、13、19、21，经济渠道优先，Big为源表唯一列出的Standard。该区段资费文本与测算公式一致。
+- 新增 rets_shipping.rs 统一计算：货值档位以1500/7000/250000 RUB为准，运费票费/重量费保持CNY；Extra Small 3.37+28.1/kg，Small 17.97+28.1/kg，Premium Small 24.71+28.1/kg，Budget 25.83+19.1/kg，Big 40.44+28.1/kg，Premium Big 69.64+25.8/kg。纠正原Budget/Premium Small票费串档与Premium Big旧票费。
+- 采用该主段原M列直接实重R4公式，不加体积重。实重不进位，0.5/2/5/30kg含端点，重叠端点优先尺寸合规小件；校验长宽高、三边和及最长边。缺尺寸或超限不输出虚假0运费。未验证带电/禁运品资格，当前模型为费率尺寸测算。
+- 价格利润监控、目标利润率调价/校验、日/跨境月报预估运费采用同一规则；按真实卢布档位拆分价格求解区间并以分为单位搜索。Finance实际入账表使用后台实扣费用，不套预估模型。所有委托线上改价动作均未执行。
+- 监控参数新增可编辑rubPerCny并保存至当前店铺cross_border_rub_per_cny，事件清理报表缓存；显示三个RUB档位对应的人民币值。佣金卢布分界配置与固定来源运费档位分开，佣金仍保留用户配置。报告/Excel预估说明同步更新。
+- 从原始G/M列解析并相互校对生成fixtures/rets_russia_20260724.json；32项相关Rust测试通过（来源费率与边界4、价格模型14、跨境报告6、导出3、Finance实际核算5），cargo check --locked与pnpm build通过，git diff --check通过。
+- 使用内置artifact-tool生成 outputs/rets-20261020/RETS俄罗斯运费测算.xlsx；同目录提供图二_K15公式.txt与图二公式设置.md。参考测算文件黄色J2为汇率，图二公式用N2且假设Q/R/S是长宽高；说明需同步更新E3:F8及C/D档位文字。
+- Excel测算表和独立图二LET单格公式各23组样例重算通过，验证汇率12改14、无效汇率、0.301kg、401g、所有真实端点/相邻重量、价格门槛、尺寸缺失/超限；错误扫描0项。已渲染查看全表上下区域，检查保存xlsx缓存值；未在原WPS在线表中粘贴操作，原附件未覆盖。
+- 正式构建入口 scripts/build-tauri-release.cmd 成功；关闭旧根目录进程、覆盖并启动根目录EXE。大小34327040字节，修改时间2026-10-20 16:25:32 +08:00，根目录与Release SHA256一致：83C2591F263073722A0E385BEB94B7A67EDEC548CDF7EEFBC39BB155C3B1BC7F。
+- 可见验收：确认根目录Ozon ERP新进程/窗口；激活截图时用户按物理Escape停止Computer Use，已停止，未完成新版参数页/内嵌前端可见验收。
+
+## 2026-10-20 九月跨境销售额与 Finance 后台对账修复
+
+- 根因：下单销售额与平台应计销售混用；Finance 使用 seller_price 而非 sale_amount，使用 sale_commission 而非 commission；九月本地缓存缺少 9 月 30 日后补的 43 笔流水。
+- 修复：归一化优先实际应计/佣金总额，缺字段兼容旧格式；修复版本升至 3，重算数据库金额列及分类，跨境报告也执行迁移。总净额始终取平台 total_amount，没有补差凑数。
+- 页面增加“销售和退货 / 应计费用及其他调整 / 合计净额”的 RUB 原额及 CNY 换算；新增全量重读本期 Finance 按钮，成功后立即重载跨境报告。下单预估继续单独标注口径。
+- 已先做 SQLite 一致性备份，然后通过只读 Seller Finance 接口完整读取 2026-09-01 至 2026-09-30。旧 3629 笔、新 3672 笔；新增均为 9 月 30 日，净额 +3507.63 RUB，原有流水净额未变化。
+- 九月核验：销售和退货 590974.76 RUB，应计费用 -376283.20 RUB，净额 214691.56 RUB，佣金 -70934.72 RUB。与用户后台整数截图一致。汇率 12.5，销售和退货 47277.98 CNY，净额 17175.32 CNY。
+- 测试：cargo check --locked 通过；seller_api_error_tests 11 通过（另 1 显式维护测试默认忽略）；finance_settlement 5 通过（另 1 只读审计默认忽略）；显式九月刷新维护测试成功；pnpm build 通过。
+- 发布：使用 desktop-next/scripts/build-tauri-release.cmd 成功。关闭根目录旧进程并覆盖、启动根目录 EXE。大小 34321408 字节，时间 2026-10-20 16:42:07 +08:00；根目录与 release SHA256 相同：2C7554D720781810721E7BBC7860B3DCF253561F54F88D02DB1F745BD9709209。
+- 可见验收：找到根目录新版 Ozon ERP 窗口 2360846；在激活/页面捕获时用户按物理 Escape 停止 Computer Use，已停止 UI 操作。因此尚未完成内嵌前端页面及新增看板的可见验收，不宣称该项通过。
+- 对账说明与原始金额汇总保存在 outputs/finance-september-audit/九月对账说明.md 和 audit.json。
+
+## 2026-10-20 Finance 待核对记录的商品身份与成本编辑
+
+- 用户要求知道待核对的具体商品并双击定位。为每组 Finance 记录增加 relatedProducts（SKU、货号、名称），从原始商品、明确 SKU、精确订单号关联的 posting_routes 获取，独立于商品成本确认。因此费用/退款或异常分类记录也能定位商品，不增加或重复扣采购成本。
+- 汇总行显示对应货号和 SKU；展开后每个关联商品显示名称及“查看 / 编辑成本”按钮，双击商品行也打开现有成本编辑器。只按完全一致 SKU 找商品；未同步商品不误开其他产品。保存后重读跨境报告，保持当前日期。
+- 截图订单 0200980082-0344-2 对应 WZW001-forest-6 / SKU 2483087902 / 1 件，当前采购单价 15 CNY。旧 AccrualType0 分类是截图待核对原因；当前九月确认销售商品未发现采购单价为空。
+- 验证：cargo check --locked 通过；finance_settlement 6 个测试通过、1 只读审计默认忽略；新增费用记录从订单路由找到商品但不确认采购成本的回归测试。pnpm build 通过。
+- 使用指定 build-tauri-release.cmd 正式构建，关闭旧根目录进程后覆盖并启动。根目录与 release 同为 34319872 字节，修改时间 2026-10-20 16:50:31 +08:00，SHA256 4810470C37B6EDD6121A15BF63C84D64BC990B9DC70509B14E18417AC2BD9962。
+- 可见验收：找到新版 Ozon ERP 窗口 1704086；激活/捕获页面时用户按物理 Escape 停止 Computer Use，已停止 UI 操作，尚未完成内嵌页面与双击功能的可见验收。
+
+## 2026-10-20 跨境预估运费暂不校验尺寸
+
+- 按用户要求，跨境月度/每日盈亏与价格利润监控共享的 RETS quote 改为只按实际重量选择档位和计费。尺寸为空、无效、超限均不再阻止计算或使端点重量跳到更大档位。
+- 保留来源费率、固定卢布货值档位 1500/7000/250000、汇率换算及真实重量边界 0.5/2/5/30 kg；保持不做 0.1 kg 提前进位。尺寸资料仍保留在产品中。
+- 取消调价试算中的缺尺寸提示；更新监控/跨境利润页面文字，缺失原因仅提示货值或重量超范围。分析明细缓存标识升至 weight-only-v3，避免沿用原来缺尺寸导致无法核算的结果。
+- 验证：cargo check --locked 通过；RETS 4、跨境 6、价格监控 7 项测试通过，共 17 项；pnpm build 通过。覆盖无尺寸/超大尺寸、重量端点不因尺寸跳档、0.301/0.401 kg 实重、真实档位与汇率等情形。
+- 正式交付：指定脚本构建成功，根目录旧进程关闭后已覆盖并启动；大小 34321920 字节，时间 2026-10-20 16:56:15 +08:00，根目录与 release SHA256 一致：4317B7769EC7A49F06D3358C0C4279716468604C58630A4D1DEBE7448500AFA2。
+- 可见验收：成功读取新版窗口 3737502，页面来源 http://tauri.localhost/，经营总览正常显示，确认内嵌前端已加载；进入价格与利润监控时用户按物理 Escape 停止 Computer Use，已停止操作，修改页面的可见验收尚未完成。
+
+## 2026-10-20 跨境付款结算汇率
+- 在跨境店铺利润页增加“付款与结算汇率”：按日期调用 /v1/finance/balance，读取 RUB 付款净额，手填同批人民币合计，自动计算并按店铺保存。
+- 保存使用各店独立数据库 settings/payment_rate_records_v1；重新获取付款发生变化时清空人民币及汇率，要求重新核对。不自动修改利润汇率。
+- 检查通过：cargo check --locked；cargo test --locked payment_rates --lib（2/2）；pnpm build。
+- 使用 desktop-next/scripts/build-tauri-release.cmd 构建正式嵌入前端 Release，成功覆盖根目录 ozon-analytics-next.exe，大小34398720字节，SHA256 D1928D93183F510CED34A5C86B514F8010AB2335B0710D0B8B2B80D4042E9591，与构建产物一致。
+- 已启动根目录新版 EXE。用户按物理 Escape 停止 Computer Use；未完成新版可见页面及获取/填写/保存流程验收，未声称实际验收通过。
+
+## 2026-10-20 付款模块显示范围修复
+- 用户报告模块残留于其他页面；旧程序真实观察到本土店广告促销页面底部仍有付款模块。
+- 修复原 PaymentRates 与相邻报表使用相同店铺 key 导致的重复 React key；付款组件改用 payment-店铺ID 独立标识，仅挂载于 monthly_profit 分支且店铺 kind 为 cross_border。
+- 恢复跨境店月度盈亏导航，移除切店时从月度盈亏跳到跨境利润的旧逻辑。本土月度盈亏不挂载付款模块；历史记录不变。
+- cargo check --locked、cargo test --locked payment_rates --lib（2/2）、pnpm build 通过。
+- 通过 desktop-next/scripts/build-tauri-release.cmd 构建并覆盖根目录 EXE；34398720 字节，SHA256 831B5CB12E2E163B3B0C4B73D1D72B6952C166589B6AE0646011972A2416BAB5 与 Release 产物一致。
+- 已启动根目录修复版；用户按物理 Escape 停止 Computer Use，未完成新版三个显示场景的可见验收，未宣称验收通过。
+
+## 2026-10-20 统一价格促销退出迁移
+- 弹性加速、库存折扣和最大加速活动退出改用 /v1/actions/products/update，要求用户明确填写退出价格，后端按最新 max_action_price 校验两位小数价格严格高于限价；/v2/actions/products/deactivate 仅用于优惠码。
+- 更新促销页按钮为“按填写价格退出”，明确统一价格对其他活动的影响；传入 expectedShopId，退出响应须包含 deactivated_product_ids 并回读确认不在活动内才显示成功。未知类型或无有效限价不提交。
+- 现有加入/更新本已使用新版 update，保留商品 Product ID 与 Money 请求格式；不再对非优惠码强制要求库存数量。
+- 官方 /v1/actions 和 /v2/actions/products 已真实只读验证成功；未执行真实店铺写入。官方 Swagger 受反机器人限制，未绕过。补充 docs/ozon-promos-unified-price.md。
+- cargo check --locked、cargo test --locked seller_api_error_tests --lib（12通过、1维护测试忽略）、pnpm build 通过；正式 build-tauri-release.cmd 成功。
+- 根目录 EXE已更新并启动，大小34404864字节，SHA256 7ABD18641591CA52AF247D8182DFEC5E588AD3E42AFEEA9B00F53644008B2C15，与Release产物一致。
+- 新版可见验收被用户物理Escape停止；未完成界面验收和真实改价退出端到端验证，不声称已验证真实退出成功。

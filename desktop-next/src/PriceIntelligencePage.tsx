@@ -39,7 +39,7 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
     try { await onSelectShop(target.id); }
     catch (error) { setMessage(`切换店铺失败：${String(error)}`); }
   };
-  const load = () => priceIntelligence().then((value) => { setData(value); setSettings({ warningMargin: value.warningMargin, advertisingRate: value.advertisingRate, damageRate: value.damageRate, labelFeeCny: value.labelFeeCny, lowCommissionRate: value.lowCommissionRate, highCommissionRate: value.highCommissionRate, logisticsCommissionRate: value.logisticsCommissionRate, commissionThresholdCny: value.commissionThresholdCny }); setSettingsDraft({ warningMargin: String(value.warningMargin), advertisingRate: String(value.advertisingRate * 100), damageRate: String(value.damageRate * 100), labelFeeCny: String(value.labelFeeCny), lowCommissionRate: String(value.lowCommissionRate * 100), highCommissionRate: String(value.highCommissionRate * 100), logisticsCommissionRate: String(value.logisticsCommissionRate * 100), commissionThresholdCny: String(value.commissionThresholdCny) }); }).catch((e) => setMessage(String(e)));
+  const load = () => priceIntelligence().then((value) => { setData(value); setSettings({ rubPerCny: value.rubPerCny, warningMargin: value.warningMargin, advertisingRate: value.advertisingRate, damageRate: value.damageRate, labelFeeCny: value.labelFeeCny, lowCommissionRate: value.lowCommissionRate, highCommissionRate: value.highCommissionRate, logisticsCommissionRate: value.logisticsCommissionRate, commissionThresholdRub: value.commissionThresholdRub }); setSettingsDraft({ rubPerCny: String(value.rubPerCny), warningMargin: String(value.warningMargin), advertisingRate: String(value.advertisingRate * 100), damageRate: String(value.damageRate * 100), labelFeeCny: String(value.labelFeeCny), lowCommissionRate: String(value.lowCommissionRate * 100), highCommissionRate: String(value.highCommissionRate * 100), logisticsCommissionRate: String(value.logisticsCommissionRate * 100), commissionThresholdRub: String(value.commissionThresholdRub) }); }).catch((e) => setMessage(String(e)));
   useEffect(() => { void load(); }, []);
   const rows = useMemo(() => (data?.rows ?? []).filter((row) => `${row.sku} ${row.offerId} ${row.productName}`.toLowerCase().includes(query.trim().toLowerCase())), [data, query]);
   const refresh = async (chosen: string[]) => {
@@ -88,10 +88,10 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
     if (!settingsDraft) return;
     const parsed = Object.fromEntries(Object.entries(settingsDraft).map(([key, raw]) => [key, Number(raw) / (["advertisingRate", "damageRate", "lowCommissionRate", "highCommissionRate", "logisticsCommissionRate"].includes(key) ? 100 : 1)])) as unknown as ProfitMonitorSettings;
     if (Object.values(settingsDraft).some((raw) => raw.trim() === "") || Object.values(parsed).some((value) => !Number.isFinite(value))) { setMessage("请填写有效的利润参数"); return; }
-    try { const value = await saveProfitMonitorSettings(parsed); setData(value); setSettings(parsed); setMessage("利润预估参数已保存，商品利润和预警已重新计算"); }
+    try { const value = await saveProfitMonitorSettings(parsed); setData(value); setSettings({ ...parsed, commissionThresholdRub: value.commissionThresholdRub }); window.dispatchEvent(new Event("report-settings-changed")); setMessage("参数已保存；运费、佣金、商品利润和建议定价已重新计算，跨境月报预估运费同步使用 RETS 卢布档位；Finance 实扣运费不受影响"); }
     catch (e) { setMessage(String(e)); }
   };
-  const settingField = (key: keyof ProfitMonitorSettings, label: string, rate = false) => <label key={key}>{label}<input type="number" step={rate ? "0.1" : "0.01"} value={settingsDraft?.[key] ?? ""} onChange={(event) => setSettingsDraft((old) => old && ({ ...old, [key]: event.target.value }))}/>{rate ? "%" : "¥"}</label>;
+  const settingField = (key: keyof ProfitMonitorSettings, label: string, rate = false) => <label key={key}>{label}<input type="number" step={rate ? "0.1" : "0.01"} value={settingsDraft?.[key] ?? ""} onChange={(event) => setSettingsDraft((old) => old && ({ ...old, [key]: event.target.value }))}/>{rate ? "%" : key === "commissionThresholdRub" ? "₽" : key === "rubPerCny" ? "RUB" : "¥"}</label>;
   const complete = data?.rows.filter((r) => r.profitMargin != null).length ?? 0;
   const warnings = data?.rows.filter((r) => r.warning).length ?? 0;
   const shownPrice = (value: number | null, currencyCode: string) => {
@@ -131,14 +131,16 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
       <button disabled={busy || !data.rows.length || !!repriceSkus} onClick={() => openTargetReprice(true)}>试算当前全店（{data.rows.length}）</button>
     </section>}
     <section className="pi-assumptions">
-      {data?.isCrossBorder ? <><b>跨境预估规则</b><span>阶梯跨境运费已包含全部运费，不加头程</span><span>货损 (成本 + 贴单 + 跨境运费) × {((settings?.damageRate ?? data.damageRate) * 100).toFixed(1)}%</span><span>广告 {((settings?.advertisingRate ?? data.advertisingRate) * 100).toFixed(1)}%</span><span>贴单 ¥{settings?.labelFeeCny ?? data.labelFeeCny}</span><span>佣金 ≤¥{settings?.commissionThresholdCny ?? data.commissionThresholdCny}：{((settings?.lowCommissionRate ?? data.lowCommissionRate) * 100).toFixed(1)}%，&gt;：{((settings?.highCommissionRate ?? data.highCommissionRate) * 100).toFixed(1)}%</span><span>物流佣金 {((settings?.logisticsCommissionRate ?? data.logisticsCommissionRate) * 100).toFixed(1)}%</span></> : <><b>本土店</b><span>不使用跨境运费阶梯；物流费用以本土实际结算为准</span></>}
+      {data?.isCrossBorder && <><span>俄通收 2026.07.24 俄罗斯段；实重计费，0.5 / 2 / 5 / 30 kg 含端点，暂不校验尺寸</span><span>运费档位 ₽1500 / ₽7000 / ₽250000；当前对应 ¥{(1500/data.rubPerCny).toFixed(4)} / ¥{(7000/data.rubPerCny).toFixed(4)} / ¥{(250000/data.rubPerCny).toFixed(4)}</span></>}
+      {data?.isCrossBorder ? <><b>跨境预估规则</b><span>阶梯跨境运费已包含全部运费，不加头程</span><span>货损 (成本 + 贴单 + 跨境运费) × {((settings?.damageRate ?? data.damageRate) * 100).toFixed(1)}%</span><span>广告 {((settings?.advertisingRate ?? data.advertisingRate) * 100).toFixed(1)}%</span><span>贴单 ¥{settings?.labelFeeCny ?? data.labelFeeCny}</span><span>佣金 ≤¥{data.commissionThresholdCny.toFixed(4)}：{((settings?.lowCommissionRate ?? data.lowCommissionRate) * 100).toFixed(1)}%，&gt;：{((settings?.highCommissionRate ?? data.highCommissionRate) * 100).toFixed(1)}%</span><span>物流佣金 {((settings?.logisticsCommissionRate ?? data.logisticsCommissionRate) * 100).toFixed(1)}%</span></> : <><b>本土店</b><span>不使用跨境运费阶梯；物流费用以本土实际结算为准</span></>}
     </section>
     {data?.isCrossBorder && settings && <section className="card pi-settings"><h2>利润预估参数</h2><p>当前店铺单独保存；保存后会重新计算商品利润、预警和调价试算。</p><div className="pi-settings-grid">
       {settingField("warningMargin", "低利润预警线", true)}
       {settingField("advertisingRate", "广告费率", true)}
       {settingField("damageRate", "货损率", true)}
       {settingField("labelFeeCny", "贴单费")}
-      {settingField("commissionThresholdCny", "佣金分界价")}
+      {settingField("rubPerCny", "汇率：1 CNY = RUB")}
+      {settingField("commissionThresholdRub", "佣金卢布分界价")}
       {settingField("lowCommissionRate", "低档平台佣金", true)}
       {settingField("highCommissionRate", "高档平台佣金", true)}
       {settingField("logisticsCommissionRate", "物流佣金", true)}
@@ -157,3 +159,4 @@ export function PriceIntelligencePage({ shops, activeShop, onSelectShop }: { sho
     {repriceSkus && data && <RepriceDialog skus={repriceSkus} mode={repriceMode} targetMargin={repriceTarget} shopId={activeShop?.id ?? ""} shopName={activeShop?.name ?? "当前店铺"} warningMargin={data.warningMargin} onClose={() => setRepriceSkus(null)} onChanged={() => { void load(); }}/>}
   </main>;
 }
+

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listShops, ozonPromotionProductAction, ozonPromotionProducts, ozonPromotions, priceRepriceSuggestions, priceRepriceValidate, refreshPriceIntelligence, refreshProductPrice, resolveRepriceProductIds, updateProductPrice } from "./bridge";
 import type { OzonPromotion, OzonPromotionProduct, RepriceSuggestion } from "./types";
+import { promotionPriceBounds } from "./promotionPriceBounds";
 
 type Membership = { action: OzonPromotion; product: OzonPromotionProduct };
 type Check = { memberships: Membership[]; incomplete: boolean };
@@ -80,14 +81,13 @@ export function RepriceDialog({ skus, warningMargin, mode, targetMargin = 15, sh
     if (!check || check.incomplete) return { kind: "blocked", price: target, steps: [], reason: "活动清单未完整读取，无法排除其他促销" };
     if (!Number.isFinite(target) || target <= 0) return { kind: "blocked", price: target, steps: [], reason: "请填写有效的目标售价" };
     if (!check.memberships.length) return { kind: "base", price: target, steps: [`修改普通售价至 ${money(target)}`], reason: "未参加已读取的促销活动" };
-    const upper = Math.min(...check.memberships.map(({ product }) => product.maxActionPrice > 0 ? product.maxActionPrice : Infinity));
-    const lower = Math.max(...check.memberships.map(({ product }) => product.minActionPrice > 0 ? product.minActionPrice : 0));
+    const { upper, lower, missingMinimum } = promotionPriceBounds(check.memberships.map(({ product }) => product));
     if (target < lower) return { kind: "blocked", price: target, steps: [], reason: `目标价低于活动下限 ${money(lower)}；不会擅自上调目标价` };
     const now = Date.now();
     if (check.memberships.some(({ action }) => action.freezeDate && Date.parse(action.freezeDate) <= now)) return { kind: "blocked", price: target, steps: [], reason: "活动已到冻结期，需在 Ozon 后台核对改价权限" };
-    if (!Number.isFinite(upper)) return { kind: "blocked", price: target, steps: [], reason: "Ozon 未返回活动允许最高价，无法安全判断是否需要退出活动" };
+    if (upper == null) return { kind: "blocked", price: target, steps: [], reason: "Ozon 未返回活动允许最高价，无法安全判断是否需要退出活动" };
     if (target <= upper) {
-      return { kind: "promotion", price: target, steps: check.memberships.map(({ action }) => `将「${action.title}」活动价改为 ${money(target)}`), reason: "目标位于活动允许区间" };
+      return { kind: "promotion", price: target, steps: check.memberships.map(({ action }) => `将「${action.title}」活动价改为 ${money(target)}`), reason: missingMinimum ? "目标满足已知活动价格限制；部分活动未返回最低价，将提交 Ozon 校验，平台可能拒绝" : "目标位于活动允许区间" };
     }
     if (check.memberships.some(({ product }) => product.maxActionPrice >= target)) return { kind: "blocked", price: target, steps: [], reason: "多项活动的价格上限不同，目标价不能使所有活动退出；请逐项核对" };
     return { kind: "base", price: target, steps: [`先修改普通售价至 ${money(target)}`, ...check.memberships.map(({ action }) => `再申请移出「${action.title}」并回读成员确认；若平台拒绝，需后台手动移出`)], reason: `目标超过活动上限 ${money(upper)}` };
@@ -109,8 +109,6 @@ export function RepriceDialog({ skus, warningMargin, mode, targetMargin = 15, sh
     setLog((old) => [...old, `${item.offerId || item.sku}：目标 ${money(plan.price)}，${margin == null ? "成本或重量缺失，无法试算利润率" : `预计利润率 ${(margin * 100).toFixed(2)}%`}，开始执行`]);
     if (plan.kind === "promotion") {
       for (const { action, product } of fresh.memberships) {
-        if (product.maxActionPrice <= 0) throw new Error("Ozon 未返回活动允许最高价，未提交改价");
-        if (plan.price < product.actionPrice && product.minActionPrice <= 0) throw new Error("降价时 Ozon 未返回活动最低价，未提交改价");
         await assertShop();
         const result = await ozonPromotionProductAction({ actionId: action.id, action: "activate", productId: product.id, actionPrice: plan.price, stock: Math.max(product.stock, product.minStock), expectedShopId: shopId });
         if (!result.success) throw new Error(`${action.title}：${result.message}`);

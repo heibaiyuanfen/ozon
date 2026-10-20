@@ -1,0 +1,68 @@
+{
+  "products": [
+    {
+      "id": 1457096169,
+      "price": {
+        "amount": "134",
+        "currency": ""
+      },
+      "action_price": {
+        "amount": "116",
+        "currency": ""
+      },
+      "max_action_price": {
+        "amount": "132.63",
+        "currency": ""
+      },
+      "add_mode": "SELLER",
+      "stock": 0,
+      "min_stock": 0,
+      "recommended_stock": 1,
+      "marketplace_seller_price": {
+        "amount": "116",
+        "currency": ""
+      },
+      "alert_max_action_price_failed": false,
+      "alert_max_action_price": {
+        "amount": "0",
+        "currency": ""
+      },
+      "current_boost": 54.3,
+      "price_min_elastic": {
+        "amount": "132.63",
+        "currency": ""
+      },
+      "price_max_elastic": {
+        "amount": "115.7",
+        "currency": ""
+      },
+      "min_boost": 15,
+      "max_boost": 55,
+      "website_prices": {
+        "price": {
+          "amount": "131.83",
+          "currency": "CNY"
+        },
+        "prices_by_schema": {
+          "RFBS": {
+            "black_price": {
+              "amount": "138.77",
+              "currency": "CNY"
+            },
+            "green_price": {
+              "amount": "131.83",
+              "currency": "CNY"
+            }
+          }
+        }
+      },
+      "min_seller_price": {
+        "amount": "0",
+        "currency": ""
+      },
+      "is_quarantined": false
+    }
+  ],
+  "total": 243,
+  "last_id": "1457096169"
+}

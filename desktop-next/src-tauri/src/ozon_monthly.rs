@@ -342,8 +342,22 @@ fn sheet_xml(
 }
 
 fn write_xlsx(path: &Path, sheet: String) -> Result<(), String> {
+    write_xlsx_extra(path, sheet, Vec::new())
+}
+
+fn write_xlsx_extra(path: &Path, sheet: String, extras: Vec<(String,String)>) -> Result<(), String> {
     let styles = r#"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="2"><numFmt numFmtId="164" formatCode="₽#,##0.00;[Red]-₽#,##0.00"/><numFmt numFmtId="165" formatCode="0.00%"/></numFmts><fonts count="3"><font><sz val="10"/><name val="Microsoft YaHei"/></font><font><b/><sz val="20"/><color rgb="FF0B1F3A"/><name val="Microsoft YaHei"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Microsoft YaHei"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEDF4FF"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF246BFD"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFDDE5F0"/></left><right style="thin"><color rgb="FFDDE5F0"/></right><top style="thin"><color rgb="FFDDE5F0"/></top><bottom style="thin"><color rgb="FFDDE5F0"/></bottom></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="11"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="2" borderId="1"/><xf numFmtId="0" fontId="2" fillId="3" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="4" borderId="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="1"/><xf numFmtId="0" fontId="0" fillId="2" borderId="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#;
     let parts=[("[Content_Types].xml",r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>"#.to_string()),("_rels/.rels",r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_string()),("xl/workbook.xml",r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="月报" sheetId="1" r:id="rId1"/></sheets><calcPr calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/></workbook>"#.to_string()),("xl/_rels/workbook.xml.rels",r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_string()),("xl/styles.xml",styles.to_string()),("xl/worksheets/sheet1.xml",sheet)];
+    let mut parts = parts.into_iter().map(|(n,d)|(n.to_string(),d)).collect::<Vec<_>>();
+    if !extras.is_empty() { parts[2].1=parts[2].1.replace("name=\"月报\"","name=\"Finance订单核算\""); }
+    for (index,(name,xml)) in extras.into_iter().enumerate() {
+        let number=index+2;
+        let rid=index+3;
+        parts[0].1=parts[0].1.replace("</Types>",&format!("<Override PartName=\"/xl/worksheets/sheet{number}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>"));
+        parts[2].1=parts[2].1.replace("</sheets>",&format!("<sheet name=\"{}\" sheetId=\"{number}\" r:id=\"rId{rid}\"/></sheets>",esc(&name)));
+        parts[3].1=parts[3].1.replace("</Relationships>",&format!("<Relationship Id=\"rId{rid}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{number}.xml\"/></Relationships>"));
+        parts.push((format!("xl/worksheets/sheet{number}.xml"),xml));
+    }
     let mut zip = zip::ZipWriter::new(fs::File::create(path).map_err(|e| e.to_string())?);
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -353,6 +367,45 @@ fn write_xlsx(path: &Path, sheet: String) -> Result<(), String> {
     }
     zip.finish().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn settlement_sheets(report: &super::CrossBorderReport, store: &str) -> Vec<(String,String)> {
+    fn table(title: &str, note: &str, headers: &[&str], records: Vec<Vec<serde_json::Value>>) -> String {
+        let mut rows=format!("<row r=\"1\">{}</row><row r=\"2\">{}</row>",text_cell("A1",title,1),text_cell("A2",note,2));
+        rows.push_str("<row r=\"4\">");
+        for (i,h) in headers.iter().enumerate() { rows.push_str(&text_cell(&format!("{}4",(b'A'+i as u8) as char),h,4)); }
+        rows.push_str("</row>");
+        for (index,record) in records.iter().enumerate() {
+            let n=index+5;
+            rows.push_str(&format!("<row r=\"{n}\">"));
+            for (i,v) in record.iter().enumerate() {
+                let cell=format!("{}{n}",(b'A'+i as u8) as char);
+                if let Some(value)=v.as_f64() { rows.push_str(&num_cell(&cell,value,5)); }
+                else { rows.push_str(&text_cell(&cell,v.as_str().unwrap_or("待核对"),7)); }
+            }
+            rows.push_str("</row>");
+        }
+        let last=(records.len()+4).max(5);
+        let end=(b'A'+headers.len() as u8-1)as char;
+        format!(r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="4" topLeftCell="A5" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="{}" width="22" customWidth="1"/></cols><sheetData>{rows}</sheetData><autoFilter ref="A4:{end}{last}"/></worksheet>"#,headers.len())
+    }
+    use serde_json::json;
+    let s=&report.settlement;
+    let note=format!("店铺 {store}；{} 至 {}，按 Finance 入账日；1 CNY={} RUB。净额已含广告/运费/退款，不重复扣费；利润=净额-对应商品采购成本。采用当前录入采购成本，退货回仓未核实则不冲回成本；银行卡到账、税费和平台外费用未核实。",report.date_from,report.date_to,report.rub_per_cny);
+    let mut orders=vec![vec![json!("合计"),json!(report.date_from),json!(report.date_to),json!(s.sale_cny),json!(s.refunds_cny),json!(s.commission_cny),json!(s.delivery_cny),json!(s.return_delivery_cny),json!(s.advertising_cny),json!(s.other_cny),json!(s.net_cny),json!(s.purchase_cny),json!(s.profit_before_return_recovery_cny),json!(s.profit_cny),json!(format!("{}组缺成本/数量，{}组退款待核对",s.missing_cost_orders,s.return_review_orders))]];
+    let mut entries=Vec::new();
+    let mut products=Vec::new();
+    for r in &s.rows {
+        let status=if r.return_review {format!("{}；退货回仓成本待核对",r.issues.join("；"))}else{r.issues.join("；")};
+        orders.push(vec![json!(r.posting_number),json!(r.first_day),json!(r.last_day),json!(r.sale_cny),json!(r.refunds_cny),json!(r.commission_cny),json!(r.delivery_cny),json!(r.return_delivery_cny),json!(r.advertising_cny),json!(r.other_cny),json!(r.net_cny),json!(r.purchase_cny),json!(r.profit_before_return_recovery_cny),json!(r.profit_cny),json!(status)]);
+        for e in &r.entries { entries.push(vec![json!(r.posting_number),json!(e.operation_id),json!(e.day),json!(e.operation_type),json!(e.sale_cny),json!(e.commission_cny),json!(e.delivery_cny),json!(e.return_delivery_cny),json!(e.advertising_cny),json!(e.other_cny),json!(e.net_cny)]); }
+        for p in &r.products { products.push(vec![json!(r.posting_number),json!(p.sku),json!(p.offer_id),json!(p.quantity),json!(p.quantity_source),json!(p.unit_cost_cny),json!(p.purchase_cny)]); }
+    }
+    vec![
+        ("Finance订单核算".into(),table("跨境 Finance 入账利润（CNY）",&note,&["订单号","首次入账日","最后入账日","销售应计 CNY","退款 CNY","佣金 CNY","实际正向物流 CNY","实际退货物流 CNY","实际广告 CNY","收单及其他 CNY","入账净额 CNY","对应采购成本 CNY","退货成本未冲回前利润 CNY","入账利润 CNY","待核对"],orders)),
+        ("Finance原始流水".into(),table("Finance 逐笔流水（CNY）",&note,&["订单号","流水 ID","入账日","平台类型","销售/退款 CNY","佣金 CNY","正向物流 CNY","退货物流 CNY","广告 CNY","收单及其他 CNY","入账净额 CNY"],entries)),
+        ("入账商品成本".into(),table("本期确认的订单商品成本（CNY）",&note,&["订单号","SKU","货号","明确数量","数量来源","当前录入单位成本 CNY","本期商品成本 CNY"],products)),
+    ]
 }
 
 fn cross_border_sheet(report: &super::CrossBorderReport, store: &str) -> String {
@@ -505,7 +558,8 @@ fn cross_border_sheet(report: &super::CrossBorderReport, store: &str) -> String 
     rows.push_str(&format!(
         r#"<row r="6" ht="28" customHeight="1">{source}</row>"#
     ));
-    rows.push_str(&format!(r#"<row r="8">{}{}</row>"#,text_cell("A8","核算与验证说明",2),text_cell("B8","广告费按各 SKU 销售额占比分摊。平台及收单调整保留负数扣费口径；总成本=分摊广告+采购+跨境运费-平台及收单调整，利润=销售额-总成本。缺采购成本、重量、运费或费率时不计入利润合计。",2)));
+    let basis=format!("下单预估参考（未扣退货取消，不代表 Finance 入账利润）。运费首档售价分界 ¥{}（含），采用俄通收 RETS 2026.07.24 俄罗斯段；货值档位1500/7000/250000 RUB按当前汇率换算，实重计费并校验尺寸，按逐日SKU均价汇总，单位运费为加权均值。广告按 SKU 销售额占比分摊；总成本=广告+采购+跨境运费-平台及收单调整，利润=销售额-总成本。缺少成本或费率时不计入利润合计。",report.freight_threshold_cny);
+    rows.push_str(&format!(r#"<row r="8">{}{}</row>"#,text_cell("A8","核算与验证说明",2),text_cell("B8",&basis,2)));
     let headers = [
         "SKU",
         "货号",
@@ -521,7 +575,7 @@ fn cross_border_sheet(report: &super::CrossBorderReport, store: &str) -> String 
         "单位采购成本 CNY",
         "采购成本 CNY",
         "重量 kg",
-        "单位跨境运费 CNY",
+        "加权件均跨境运费 CNY",
         "跨境运费 CNY",
         "平台及收单调整 CNY",
         "总成本 CNY",
@@ -761,7 +815,10 @@ pub fn export_ozon_cross_border_report(
         "Ozon跨境利润_{safe}_{}_{}.xlsx",
         report.date_from, report.date_to
     ));
-    write_xlsx(&path, cross_border_sheet(&report, &store))?;
+    let mut sheets=settlement_sheets(&report,&store);
+    let (_,first)=sheets.remove(0);
+    sheets.push(("下单预估参考".into(),cross_border_sheet(&report,&store)));
+    write_xlsx_extra(&path,first,sheets)?;
     let _ = open::that(&path);
     Ok(path.to_string_lossy().to_string())
 }
@@ -769,6 +826,29 @@ pub fn export_ozon_cross_border_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn settlement_export_keeps_order_costs_and_all_operations_in_separate_sheets() {
+        use super::super::finance_settlement::{SettlementOrder,SettlementReport,SettlementProduct,SettlementEntry};
+        let entry=SettlementEntry{operation_id:"OP-1".into(),day:"2026-10-01".into(),operation_type:"OperationAgentDeliveredToCustomer".into(),net_cny:80.,sale_cny:100.,commission_cny:-10.,delivery_cny:-10.,return_delivery_cny:0.,advertising_cny:0.,other_cny:0.};
+        let order=SettlementOrder{posting_number:"ORDER-1".into(),net_cny:80.,purchase_cny:Some(20.),profit_cny:Some(60.),profit_before_return_recovery_cny:Some(60.),products:vec![SettlementProduct{sku:"SKU-1".into(),offer_id:"GOODS-1".into(),quantity:Some(2),unit_cost_cny:Some(10.),purchase_cny:Some(20.),quantity_source:"Finance 商品数量".into()}],entries:vec![entry],..Default::default()};
+        let report=super::super::CrossBorderReport{date_from:"2026-10-01".into(),date_to:"2026-10-20".into(),rub_per_cny:12.,settlement:SettlementReport{net_cny:80.,purchase_cny:Some(20.),profit_cny:Some(60.),rows:vec![order],..Default::default()},..Default::default()};
+        let mut sheets=settlement_sheets(&report,"审计店");
+        assert_eq!(sheets.len(),3);
+        assert!(sheets[0].1.contains("银行卡到账"));
+        assert!(sheets[1].1.contains("OP-1"));
+        assert!(sheets[2].1.contains("SKU-1"));
+        let (_,first)=sheets.remove(0);
+        let path=std::env::temp_dir().join(format!("ozon-settlement-export-{}.xlsx",std::process::id()));
+        write_xlsx_extra(&path,first,sheets).unwrap();
+        let mut zip=zip::ZipArchive::new(fs::File::open(&path).unwrap()).unwrap();
+        use std::io::Read;
+        let mut workbook=String::new(); zip.by_name("xl/workbook.xml").unwrap().read_to_string(&mut workbook).unwrap();
+        assert!(workbook.contains("Finance订单核算"));
+        assert!(workbook.contains("Finance原始流水"));
+        assert!(workbook.contains("入账商品成本"));
+        assert!(zip.by_name("xl/worksheets/sheet3.xml").is_ok());
+        drop(zip); fs::remove_file(path).unwrap();
+    }
     #[test]
     fn monthly_sheet_contains_totals_and_formula_audit() {
         let report = super::super::BusinessReport {
@@ -860,6 +940,8 @@ mod tests {
             cost_complete: true,
         };
         let report = super::super::CrossBorderReport {
+            freight_threshold_cny: 120.0,
+            settlement: Default::default(),
             date_from: "2026-09-01".into(),
             date_to: "2026-09-30".into(),
             rub_per_cny: 12.5,
@@ -883,6 +965,8 @@ mod tests {
             rows: vec![item],
         };
         let xml = cross_border_sheet(&report, "跨境店");
+        assert!(xml.contains("运费首档售价分界 ¥120（含）"));
+        assert!(xml.contains("加权件均跨境运费 CNY"));
         assert!(xml.contains("IFERROR($H$4*J12/$E$4,0)"));
         assert!(xml.contains("K12+M12+P12-Q12"));
         assert!(xml.contains("SUM(S12:S12)"));

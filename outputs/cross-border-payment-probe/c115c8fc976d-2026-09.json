@@ -1,0 +1,276 @@
+{
+  "result": {
+    "cash_flows": [
+      {
+        "period": {
+          "id": 0,
+          "begin": "2026-09-16T00:00:00Z",
+          "end": "2026-09-30T00:00:00Z"
+        },
+        "orders_amount": 303375.27,
+        "returns_amount": 0,
+        "commission_amount": -36182.51,
+        "services_amount": -165415.06,
+        "item_delivery_and_return_amount": 104385.56,
+        "currency_code": "RUB"
+      },
+      {
+        "period": {
+          "id": 0,
+          "begin": "2026-09-01T00:00:00Z",
+          "end": "2026-09-15T00:00:00Z"
+        },
+        "orders_amount": 290360.58,
+        "returns_amount": -3921,
+        "commission_amount": -33592.3,
+        "services_amount": -191486.92,
+        "item_delivery_and_return_amount": 103303.01,
+        "currency_code": "RUB"
+      }
+    ],
+    "page_count": 1,
+    "details": [
+      {
+        "period": {
+          "id": 0,
+          "begin": "2026-09-16T00:00:00Z",
+          "end": "2026-09-30T00:00:00Z"
+        },
+        "begin_balance_amount": 154269,
+        "payments": [
+          {
+            "payment": 0,
+            "currency_code": "RUB"
+          }
+        ],
+        "delivery": {
+          "total": 159633.66,
+          "amount": 267192.76,
+          "delivery_services": {
+            "total": -107559.1,
+            "items": [
+              {
+                "name": "MarketplaceServiceItemRedistributionLastMileCourier",
+                "price": -95.77
+              },
+              {
+                "name": "MarketplaceServiceItemDirectFlowLogisticSum",
+                "price": -907
+              },
+              {
+                "name": "MarketplaceServiceItemRedistributionOfDeliveryServices",
+                "price": -106556.33
+              }
+            ]
+          }
+        },
+        "return": {
+          "total": -1168,
+          "amount": 0,
+          "return_services": {
+            "total": -1168,
+            "items": [
+              {
+                "name": "MarketplaceServiceItemReturnFlowLogistic",
+                "price": -1168
+              }
+            ]
+          }
+        },
+        "loan": 0,
+        "invoice_transfer": 0,
+        "rfbs": {
+          "total": -179,
+          "transfer_delivery": 0,
+          "transfer_delivery_return": 0,
+          "compensation_delivery_return": 0,
+          "partial_compensation": -179,
+          "partial_compensation_return": 0
+        },
+        "services": {
+          "total": 55113.04,
+          "items": [
+            {
+              "name": "MarketplaceServiceCostPerClick",
+              "price": -27771.11
+            },
+            {
+              "name": "MarketplaceServicePromotionWithCostPerOrder",
+              "price": -2140.4
+            },
+            {
+              "name": "FinesErrorIndexExceeded",
+              "price": -334.63
+            },
+            {
+              "name": "MarketplaceServiseItemAgencyFeeForSale",
+              "price": 30779.92
+            },
+            {
+              "name": "MarketplaceServiceConnectionToOzonLogPlatform",
+              "price": -2654.34
+            },
+            {
+              "name": "ItemAgentServiceStarsMembership",
+              "price": -2834.9
+            },
+            {
+              "name": "MarketplaceServiseItemPointsAwarded",
+              "price": 67297.99
+            },
+            {
+              "name": "MarketplaceRedistributionOfAcquiringItem",
+              "price": -1921.94
+            },
+            {
+              "name": "MarketplaceElectronicServiceAcceleratedProductReviews",
+              "price": -500
+            },
+            {
+              "name": "MarketplaceServiceArrangementOfInternationalCarriage",
+              "price": -359.78
+            },
+            {
+              "name": "MarketplaceAgencyFeeAggregator3PLGlobalItem",
+              "price": -4447.77
+            }
+          ]
+        },
+        "others": {
+          "total": 7776.26,
+          "items": [
+            {
+              "name": "OperationMarketplaceServicePartialCompensationToClient",
+              "price": -179
+            },
+            {
+              "name": "EWalletPaymentOperation",
+              "price": 7955.26
+            }
+          ]
+        },
+        "end_balance_amount": 113168.36
+      },
+      {
+        "period": {
+          "id": 0,
+          "begin": "2026-09-01T00:00:00Z",
+          "end": "2026-09-15T00:00:00Z"
+        },
+        "begin_balance_amount": 62737.45,
+        "payments": [
+          {
+            "payment": 0,
+            "currency_code": "RUB"
+          }
+        ],
+        "delivery": {
+          "total": 148998.84,
+          "amount": 256276.11,
+          "delivery_services": {
+            "total": -107277.27,
+            "items": [
+              {
+                "name": "MarketplaceServiceItemRedistributionLastMileCourier",
+                "price": -133.63
+              },
+              {
+                "name": "MarketplaceServiceItemDirectFlowLogisticSum",
+                "price": -1224
+              },
+              {
+                "name": "MarketplaceServiceItemRedistributionOfDeliveryServices",
+                "price": -105919.64
+              }
+            ]
+          }
+        },
+        "return": {
+          "total": -4687.83,
+          "amount": -3428.83,
+          "return_services": {
+            "total": -1259,
+            "items": [
+              {
+                "name": "MarketplaceServiceItemReturnFlowLogistic",
+                "price": -1184
+              },
+              {
+                "name": "MarketplaceServiceItemRedistributionReturnsPVZ",
+                "price": -75
+              }
+            ]
+          }
+        },
+        "loan": 0,
+        "invoice_transfer": 0,
+        "rfbs": {
+          "total": 0,
+          "transfer_delivery": 0,
+          "transfer_delivery_return": 0,
+          "compensation_delivery_return": 0,
+          "partial_compensation": 0,
+          "partial_compensation_return": 0
+        },
+        "services": {
+          "total": 22721.03,
+          "items": [
+            {
+              "name": "MarketplaceServiceCostPerClick",
+              "price": -26795.3
+            },
+            {
+              "name": "MarketplaceServicePromotionWithCostPerOrder",
+              "price": -2946.4
+            },
+            {
+              "name": "MarketplaceProductDisposal",
+              "price": -25
+            },
+            {
+              "name": "MarketplaceServiseItemAgencyFeeForSale",
+              "price": 16622.81
+            },
+            {
+              "name": "MarketplaceServiceConnectionToOzonLogPlatform",
+              "price": -15
+            },
+            {
+              "name": "ItemAgentServiceStarsMembership",
+              "price": -4292.88
+            },
+            {
+              "name": "MarketplaceServiseItemPointsAwarded",
+              "price": 51039.46
+            },
+            {
+              "name": "MarketplaceRedistributionOfAcquiringItem",
+              "price": -3455.23
+            },
+            {
+              "name": "MarketplaceElectronicServiceAcceleratedProductReviews",
+              "price": -250
+            },
+            {
+              "name": "MarketplaceServiceArrangementOfInternationalCarriage",
+              "price": -1.79
+            },
+            {
+              "name": "MarketplaceServiceItemCollectingFirstProductReviews",
+              "price": -749
+            },
+            {
+              "name": "MarketplaceAgencyFeeAggregator3PLGlobalItem",
+              "price": -6410.64
+            }
+          ]
+        },
+        "others": {
+          "total": 0,
+          "items": []
+        },
+        "end_balance_amount": 154269
+      }
+    ]
+  }
+}

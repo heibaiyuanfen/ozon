@@ -1,0 +1,10 @@
+.finance-settlement { padding: 20px; margin-bottom: 24px; }
+.finance-settlement .section-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin: 12px 0; }
+.finance-settlement .section-heading h2 { margin: 0 0 8px; }
+.finance-settlement .section-heading input:not([type="checkbox"]) { min-width: 280px; padding: 10px; border: 1px solid #dce5f3; border-radius: 8px; }
+.finance-settlement table { min-width: 1100px; margin: 14px 0; }
+.finance-settlement th, .finance-settlement td { white-space: nowrap; }
+.finance-settlement details summary { line-height: 1.8; }
+.finance-settlement .sync-message { line-height: 1.8; }
+.finance-settlement button { padding: 8px 12px; border: 1px solid #dce5f3; border-radius: 8px; background: white; cursor: pointer; }
+.finance-settlement button:disabled { opacity: .5; cursor: default; }

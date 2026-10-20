@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { FinanceSettlementView } from "./FinanceSettlementView";
 import "./analytics.css";
 import "./listing.css";
 import { displayTime } from "./time";
@@ -94,6 +95,7 @@ import {
   saveFbsThreshold,
   saveListingSettings,
   saveProductCost,
+  products as loadCostProducts,
   saveCompetitorAlertSettings,
   saveWarehouseMapping,
   saveWbCost,
@@ -2610,9 +2612,10 @@ export function ReportsPage({
       const count =
         kind === "seller"
           ? await syncSeller(effectiveRange)
-          : await syncFinance(effectiveRange);
+          : await syncFinance(effectiveRange, true);
       clearReportCache();
-      setData(await businessReport(effectiveRange));
+      if (tab === "cross") setCrossData(await crossBorderReport(effectiveRange));
+      else setData(await businessReport(effectiveRange));
       setMessage(
         `${kind === "seller" ? "本月销量" : "本月应计费用"}已同步，写入 ${count} 行。`,
       );
@@ -2639,7 +2642,7 @@ export function ReportsPage({
                   ? "跨境店铺利润"
                   : "产品数据报告"}
           </h1>
-          <p>销售、广告、Finance 与成本缓存的经营预估</p>
+          <p>{initialTab === "cross" ? "Finance 入账订单、实际扣费与对应采购成本；银行卡到账尚未核实" : "销售、广告、Finance 与成本缓存的经营预估"}</p>
         </div>
       </header>
       {initialTab === "weekly" && (
@@ -3443,7 +3446,7 @@ export function ReportsPage({
           )}{" "}
         </>
       )}
-      {tab === "cross" && <CrossBorderView data={crossData} />}
+      {tab === "cross" && <><button disabled={!!busy} onClick={() => syncMonth("finance")}>{busy === "finance" ? "正在全量重读本期 Finance…" : "全量重读本期 Finance（更新入账对账）"}</button><CrossBorderView data={crossData} reload={async()=>{clearReportCache();setCrossData(await crossBorderReport(effectiveRange));}} /></>}
       {tab !== "summary" && tab !== "cross" && (
         <AnalysisDetailView tab={tab} detail={detail} money={m} />
       )}
@@ -3451,7 +3454,18 @@ export function ReportsPage({
   );
 }
 
-function CrossBorderView({ data }: { data: CrossBorderReport | null }) {
+function CrossBorderView({ data, reload }: { data: CrossBorderReport | null; reload: () => Promise<void> }) {
+  const [costEditor, setCostEditor] = useState<MissingCostRow | null>(null);
+  const [costMessage, setCostMessage] = useState("");
+  const editCost = async (sku: string) => {
+    if (!data) return;
+    setCostMessage("");
+    try {
+      const p = (await loadCostProducts({from:data.dateFrom,to:data.dateTo},sku)).find(p=>p.sku===sku);
+      if (!p) {setCostMessage(`SKU ${sku} 尚未同步到商品库，请先同步商品；未打开其他商品。`);return;}
+      setCostEditor({...p,productName:p.name,units:0,missingPurchase:p.unitCost==null,missingFirstMile:p.firstMileCost==null,missingWeight:p.weightKg==null,missingDimensions:[p.lengthCm,p.widthCm,p.heightCm].some(v=>v==null)});
+    } catch(e) {setCostMessage(String(e));}
+  };
   useEffect(() => {
     if (!data) return;
     const el = document.getElementById("cross-profit-trend");
@@ -3500,13 +3514,17 @@ function CrossBorderView({ data }: { data: CrossBorderReport | null }) {
     const reasons: string[] = [];
     if (row.purchaseCostCny == null) reasons.push("采购成本未填写");
     if (row.weightKg == null) reasons.push("重量未填写");
-    else if (row.freightUnitCny == null) reasons.push("重量超出跨境运费区间");
+    else if (row.freightUnitCny == null) reasons.push("RETS 货值/重量超范围（暂不校验尺寸）");
     if (row.estimatedPlatformFeesCny == null)
       reasons.push("历史佣金/收单费率不足");
     return reasons;
   };
   return (
     <>
+      {costMessage && <p className="sync-message">{costMessage}</p>}
+      {costEditor && <MissingCostEditor row={costEditor} close={()=>setCostEditor(null)} saved={async()=>{setCostEditor(null);try{await reload();setCostMessage("商品成本已保存，Finance 入账利润已重新核算。");}catch(e){setCostMessage(`成本已保存，重新核算失败：${String(e)}`);}}}/>}
+      <FinanceSettlementView data={data.settlement} rate={data.rubPerCny} from={data.dateFrom} to={data.dateTo} onEditCost={sku=>void editCost(sku)}/>
+      <h2>下单口径预估参考（未扣退货、取消，不代表入账利润）</h2>
       <div className="report-hero">
         <div>
           <span>销售额 CNY</span>
@@ -3542,17 +3560,18 @@ function CrossBorderView({ data }: { data: CrossBorderReport | null }) {
           <small>下单销售额口径</small>
         </div>
         <div>
-          <span>Finance 已结算净额</span>
+          <span>Finance 平台入账净额</span>
           <strong>
             {data.financeAvailable ? cny(data.settledFinanceNetCny) : "—"}
           </strong>
-          <small>仅用于对账</small>
+          <small>含已入账费用及退款；银行卡到账未核实</small>
         </div>
       </div>
       <div className="sync-message">
         1 CNY = {Number(data.rubPerCny.toFixed(4))} RUB · 履约缓存 FBP{" "}
         {data.fbpOrders} / FBS {data.rfbsOrders} / WHD {data.whdOrders} ·{" "}
         {data.dateFrom} 至 {data.dateTo}
+        <br />预估运费采用俄通收 RETS 2026.07.24 俄罗斯段，货值档位 ₽1500 / ₽7000 / ₽250000；对应 ¥{data.freightThresholdCny.toFixed(4)} / ¥{(7000/data.rubPerCny).toFixed(4)} / ¥{(250000/data.rubPerCny).toFixed(4)}。仅按实重计费，暂不校验尺寸，逐日 SKU 均价汇总；上方 Finance 实扣运费不套预估公式。
       </div>
       <section className="card report-chart-card">
         <div className="card-title">跨境销售额、广告与日利润趋势</div>
@@ -3613,7 +3632,7 @@ function CrossBorderView({ data }: { data: CrossBorderReport | null }) {
               <th>销售额 CNY</th>
               <th>单件售价</th>
               <th>采购 / 重量</th>
-              <th>定价跨境运费</th>
+              <th>加权件均跨境运费</th>
               <th>采购合计</th>
               <th>运费合计</th>
               <th>预估佣金+收单</th>
@@ -6640,3 +6659,5 @@ export function MigrationPage({ range }: { range: DateRange }) {
     </>
   );
 }
+
+

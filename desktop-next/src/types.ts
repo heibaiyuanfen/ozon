@@ -709,6 +709,8 @@ export interface AnalyticsDetail {
   }>;
 }
 export interface CrossBorderReport {
+  settlement: FinanceSettlementReport;
+  freightThresholdCny: number;
   dateFrom: string;
   dateTo: string;
   rubPerCny: number;
@@ -759,6 +761,30 @@ export interface CrossBorderReport {
     acquiringRate: number | null;
     costComplete: boolean;
   }>;
+}
+export interface FinanceSettlementEntry {
+  operationId: string; day: string; operationType: string;
+  netCny: number; saleCny: number; commissionCny: number; deliveryCny: number;
+  returnDeliveryCny: number; advertisingCny: number; otherCny: number;
+}
+export interface FinanceSettlementOrder {
+  key: string; postingNumber: string; firstDay: string; lastDay: string;
+  netCny: number; saleCny: number; refundsCny: number; commissionCny: number;
+  deliveryCny: number; returnDeliveryCny: number; advertisingCny: number; otherCny: number;
+  knownPurchaseCny: number; purchaseCny: number | null;
+  profitBeforeReturnRecoveryCny: number | null; profitCny: number | null;
+  returnReview: boolean; issues: string[];
+  relatedProducts: Array<{sku: string; offerId: string; productName: string}>;
+  products: Array<{sku: string; offerId: string; quantity: number | null; unitCostCny: number | null; purchaseCny: number | null; quantitySource: string}>;
+  entries: FinanceSettlementEntry[];
+}
+export interface FinanceSettlementReport {
+  netCny: number; saleCny: number; refundsCny: number; commissionCny: number;
+  deliveryCny: number; returnDeliveryCny: number; advertisingCny: number; otherCny: number;
+  knownPurchaseCny: number; purchaseCny: number | null;
+  profitBeforeReturnRecoveryCny: number | null; profitCny: number | null;
+  operationCount: number; missingCostOrders: number; returnReviewOrders: number;
+  rows: FinanceSettlementOrder[];
 }
 export interface FinanceBreakdownRow {
   category: string;
@@ -1294,11 +1320,11 @@ export interface PriceIntelligenceData {
   rows: PriceProfitRow[]; isCrossBorder: boolean; rubPerCny: number; warningMargin: number;
   advertisingRate: number; damageRate: number; labelFeeCny: number;
   lowCommissionRate: number; highCommissionRate: number; logisticsCommissionRate: number;
-  commissionThresholdCny: number;
+  commissionThresholdCny: number; commissionThresholdRub: number;
 }
 export type ProfitMonitorSettings = Pick<PriceIntelligenceData,
-  "warningMargin" | "advertisingRate" | "damageRate" | "labelFeeCny" |
-  "lowCommissionRate" | "highCommissionRate" | "logisticsCommissionRate" | "commissionThresholdCny">;
+  "rubPerCny" | "warningMargin" | "advertisingRate" | "damageRate" | "labelFeeCny" |
+  "lowCommissionRate" | "highCommissionRate" | "logisticsCommissionRate" | "commissionThresholdRub">;
 export interface PriceIntelligenceRefreshResult {
   requested: number; refreshed: number; failed: number; errors: string[]; data: PriceIntelligenceData;
 }
