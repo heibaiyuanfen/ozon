@@ -10,6 +10,7 @@ import "./performance.css";
 import "./layout-fixes.css";
 import NetDashboard from "./NetDashboard";
 import { PaymentRates } from "./PaymentRates";
+import { WarehouseSwitch } from "./WarehouseSwitch";
 import * as echarts from "./charts";
 import {
   BarChart3,
@@ -1551,6 +1552,8 @@ export function App() {
             )}{" "}
             {page === "fbs" && <FbsPage currency={currency} />}{" "}
             {page === "products" && (
+              <>
+              {activeShop?.kind === "cross_border" && <WarehouseSwitch key={`warehouse-switch-${activeShop.id}`} shopId={activeShop.id}/>}
               <ProductsPage
                 rows={productRows}
                 currency={currency}
@@ -1558,6 +1561,7 @@ export function App() {
                 setQuery={setQuery}
                 reload={load}
               />
+              </>
             )}{" "}
             {page === "advertising" && (
               <Advertising

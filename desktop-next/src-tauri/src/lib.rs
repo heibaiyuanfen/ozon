@@ -31,6 +31,7 @@ mod local_weekly_report;
 mod net_dashboard;
 mod finance_settlement;
 mod payment_rates;
+mod warehouse_switch;
 mod rets_shipping;
 mod product_master;
 mod product_worker;
@@ -13977,6 +13978,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            warehouse_switch::warehouse_switch_options,
+            warehouse_switch::warehouse_switch_stocks,
+            warehouse_switch::warehouse_switch_preview,
+            warehouse_switch::warehouse_switch_execute,
+            warehouse_switch::warehouse_switch_history,
+            warehouse_switch::warehouse_switch_progress,
             payment_rates::payment_rate_list,
             payment_rates::payment_rate_fetch,
             payment_rates::payment_rate_save,

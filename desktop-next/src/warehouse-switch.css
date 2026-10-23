@@ -1,0 +1,153 @@
+.warehouse-switch {
+  padding: 24px;
+  margin-bottom: 24px;
+}
+.warehouse-switch header {
+  margin-bottom: 18px;
+}
+.warehouse-switch p {
+  color: #64748b;
+  line-height: 1.7;
+}
+.warehouse-switch input:not([type="checkbox"]),
+.warehouse-switch select {
+  border: 1px solid #d9e2ef;
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #fff;
+  color: #1e293b;
+  max-width: 100%;
+  min-width: 90px;
+}
+.warehouse-switch button {
+  border: 1px solid #d9e2ef;
+  border-radius: 8px;
+  padding: 9px 13px;
+  background: #f8fafc;
+  color: #334155;
+  cursor: pointer;
+}
+.warehouse-switch button.primary {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
+}
+.warehouse-switch button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ws-controls,
+.ws-tools {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 16px 0;
+}
+.ws-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #475569;
+}
+.ws-controls input {
+  width: 150px;
+}
+.ws-tools {
+  align-items: center;
+}
+.ws-tools > input {
+  flex: 1;
+  min-width: 210px;
+}
+.ws-table {
+  overflow: auto;
+  max-height: 640px;
+}
+.warehouse-switch table {
+  width: 100%;
+  min-width: 960px;
+  border-collapse: collapse;
+}
+.warehouse-switch th {
+  background: #f4f7fc;
+  text-align: left;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.warehouse-switch td,
+.warehouse-switch th {
+  padding: 12px;
+  border-bottom: 1px solid #e5ebf4;
+}
+.warehouse-switch td:first-child {
+  width: 35px;
+}
+.warehouse-switch td:nth-child(2) {
+  max-width: 260px;
+}
+.warehouse-switch td input[type="number"] {
+  width: 110px;
+}
+.warehouse-switch td select {
+  max-width: 210px;
+}
+.warehouse-switch small {
+  display: block;
+  color: #64748b;
+  line-height: 1.6;
+  margin-top: 4px;
+}
+.warehouse-switch details {
+  margin-top: 16px;
+}
+.warehouse-switch summary {
+  cursor: pointer;
+  color: #475569;
+}
+.ws-submit-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 16px;
+  margin: 16px 0;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.ws-submit-bar > div {
+  flex: 1;
+  min-width: 220px;
+}
+.ws-submit-bar strong {
+  color: #1e40af;
+}
+.ws-submit-bar small {
+  color: #64748b;
+}
+.ws-progress {
+  padding: 16px 18px;
+  margin: 14px 0;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  border-radius: 10px;
+}
+.ws-progress progress {
+  width: 100%;
+  height: 14px;
+  accent-color: #2563eb;
+}
+.ws-progress strong {
+  color: #1e40af;
+}
+.ws-progress p {
+  margin: 8px 0;
+}
+.warehouse-switch td:last-child {
+  min-width: 170px;
+}

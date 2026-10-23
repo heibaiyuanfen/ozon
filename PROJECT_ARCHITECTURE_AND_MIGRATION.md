@@ -2164,3 +2164,39 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - cargo check --locked、cargo test --locked seller_api_error_tests --lib（12通过、1维护测试忽略）、pnpm build 通过；正式 build-tauri-release.cmd 成功。
 - 根目录 EXE已更新并启动，大小34404864字节，SHA256 7ABD18641591CA52AF247D8182DFEC5E588AD3E42AFEEA9B00F53644008B2C15，与Release产物一致。
 - 新版可见验收被用户物理Escape停止；未完成界面验收和真实改价退出端到端验证，不声称已验证真实退出成功。
+
+## 2026-10-23 跨境商品批量切仓与库存
+- 用户确认目标仓已创建，逐项填写目标库存并清零原仓。新增跨境店商品中心独立切仓面板；本土与其他页面不挂载，使用独立组件key。
+- /v2/warehouse/list 和 /v2/product/info/stocks-by-warehouse/fbs 已真实只读测试成功；识别 RETS Harbin 2 与 OGL，保留平台 warehouse_type 区分。未执行真实库存写入。
+- 每批1至50件，支持搜索与跨页勾选、逐项数量、实时库存预览；目标数量为覆盖值而非增加值，用户确认后执行。
+- 使用 /v2/products/stocks 单次写入并核对逐项回执；目标仓写入且回读一致、原仓未变化后才清零原仓，再回读两仓。预览过期库存变化、目标仓拒绝、网络响应不明确均不清零原仓；部分完成独立记录。操作非平台事务，不迁移预留或已有订单、实物。平台若拒绝OGL兼容性会如实报错。
+- 各店独立数据库 warehouse_switch_plans 持久记录预览、执行阶段与最终结果；同一计划不可重复执行，未知状态须人工核对后重新预览；写请求不自动重试。
+- cargo check --locked、cargo test --locked warehouse_switch --lib（1通过，覆盖可售/预留区分、重复及缺失字段）、pnpm build 通过。
+- 使用 desktop-next/scripts/build-tauri-release.cmd 正式构建成功，覆盖根目录 EXE 并启动。34593280字节，SHA256 35D8C615B1376D8C16DF987AFBB54D69ED255951734C40FA02628686C9AB5CCF 与Release一致。
+- 用户物理Escape停止桌面控制，未完成可见界面验收与真实库存切仓端到端验证，不能声称真实切仓成功。
+
+## 2026-10-23 切仓全选与自动原仓识别增强
+- 新增表头全选和“全选筛选结果”，跨页保留选择，单批上限由50提高至5000（超过明确提示缩小筛选，不静默截断）。支持取消全部选择。
+- 读取店铺仓库与商品时按每100 SKU自动分页读取实时分仓库存，展示仓库、可售及预留数量；唯一可编辑原仓或唯一有正库存原仓自动识别，多原仓需逐项选择，不猜测；目标仓不作为原仓候选。
+- 选择目标仓，填写目标覆盖库存和原仓调整后库存，可批量应用到已选或逐项编辑；预览逐项显示两仓前后数量。后端支持每件商品不同原仓，原仓不再固定清零。
+- FBP及未知类型仓库仅显示，原仓和目标仓下拉不允许编辑，后端再次校验阻止FBP作为写入仓；不改动其他仓库存。旧预览缺少逐项原仓ID时禁止执行，要求重新预览。
+- 目标仓确认及回读成功、原仓未变化后才设置原仓指定数量；结果、部分完成与未知状态仍按店铺持久化，不自动重试写请求。
+- cargo check --locked、cargo test --locked warehouse_switch --lib（2通过：可售库存识别、FBP原仓/目标仓双向拦截）、pnpm build通过。
+- 正式 build-tauri-release.cmd 构建成功，根目录EXE已覆盖并启动；34733056字节，SHA256 2E6651D45F4B9CB71F6DE974D2D308D0DD9F4BBB38BCEA33146C2088A267C989 与Release一致。
+- 用户物理Escape停止桌面控制，未完成新版可见验收；未执行任何真实库存变更，不声称真实切仓端到端通过。
+
+## 2026-10-23 库存上传入口显式化与无效SKU读取修复
+- 针对用户找不到提交入口，增加列表顶部固定“①核对修改并生成预览”“②确认上传库存修改”操作栏；上传按钮始终可见，未预览时禁用并明确原因；预览完成提示尚未写入平台及下一步上传操作。
+- 修复SKU=0等非法数据导致整批读取400：前端跳过非法SKU，后端发送前再次拦截非正数SKU。批量读取400时拆分逐商品读取，跳过单品400继续其余商品；其他认证/限频/网络错误不持续重试。已成功读取的商品保留可提交。
+- cargo check --locked、cargo test --locked warehouse_switch --lib（3通过，新增无效SKU在网络前拦截）、pnpm build通过。正式build-tauri-release.cmd成功；根目录EXE覆盖启动，34733056字节，SHA256 2C19E5F6C871D0B2691690BB705013D0A4546A5A3C99C3E442DB343E60E3E177 与Release一致。
+- 补充 docs/warehouse-stock-upload.md 使用说明。未执行真实库存变更。用户物理Escape停止桌面控制，未完成新版可见验收。
+
+## 2026-10-23 实时执行进度及目标仓库存排除
+- 新增 warehouse_switch_progress：按当前店铺及计划ID读取持久执行快照，前端提交期间每1.5秒轮询，不重叠请求；执行结束取消轮询，并防止旧进度覆盖终态。
+- 逐商品持久化 actual_source/actual_target/observed_at，来源为真实分仓API回读；主列表及结果表显示阶段、原仓/目标仓最近回读数量和时间，不将填写目标值当成实际库存。
+- 增加总量、成功、失败、部分完成、待核对、跳过、处理中和待处理统计及结果筛选；历史记录支持查看逐项结果，未结束历史批次明确提示可能中断。
+- 增加“排除目标仓已有库存（含预留）”及“从已选中去除目标仓已有库存”；选择OGL后可隐藏并取消选择已有库存商品。预览和执行前再次检查目标仓 free_stock/reserved/present，勾选排除时有库存即跳过整件，原仓不修改；未勾选仍保留明确覆盖功能。
+- 只读核对已有最近完成批次：171件中144确认成功，27目标未确认且原仓未修改；未替用户重试或追加库存写入。
+- cargo check --locked、cargo test --locked warehouse_switch --lib（5通过：含预留库存排除、真实回读值区别于目标值）、pnpm build通过；正式 build-tauri-release.cmd 成功。
+- 根目录EXE已覆盖启动：34775040字节，SHA256 61438E35455B49DD4B3D8DE51DE8D670AFDB17FDA50BB8AD8BC2B9E8DA096E10，与Release一致。更新 docs/warehouse-stock-upload.md。
+- 用户物理Escape停止桌面控制，未完成新版可见验收或真实库存修改端到端验收。

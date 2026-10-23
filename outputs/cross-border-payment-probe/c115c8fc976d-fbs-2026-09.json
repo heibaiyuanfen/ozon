@@ -1,0 +1,16 @@
+{
+  "products": [
+    {
+      "free_stock": 1000,
+      "offer_id": "AUTO-20260902-E30BBC-2",
+      "product_id": 6195802382,
+      "present": 1000,
+      "reserved": 0,
+      "sku": 5673150757,
+      "warehouse_id": 1020002623569000,
+      "warehouse_name": "陆运仓库"
+    }
+  ],
+  "has_next": false,
+  "cursor": ""
+}
