@@ -2255,3 +2255,12 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 使用 desktop-next/scripts/build-tauri-release.cmd 成功构建 Release，已覆盖根目录 ozon-analytics-next.exe。两处均为 35,186,688 bytes，SHA-256：91BB6D457840B13A1D121A3DE1DABD85678729125BD35722800EDCA498F9275B。
 - 可见验收未完成：已通过 computer-use 检查旧程序为 http://tauri.localhost/，关闭旧程序并替换正式 EXE；启动新版验收时用户按物理 Escape 停止 Computer Use，因此停止 UI 操作，未确认新版页面加载、真实商品读取和真实发布结果。
 
+## 2026-10-26：增长中心日期与商品流量排行
+
+- 增长中心新增可见统计起止日期、自定义日期与近 7/30/90 天快捷切换；本页经营指标和流量排行共用所选范围，标注刷新读取本地缓存。店铺切换重新挂载页面，异步请求序号防止旧数据覆盖新范围，各模块独立处理读取错误。
+- 新增 product_traffic / product_traffic_days，只读查询当前店铺 sales_daily，按 SKU 聚合 hits_view 缓存，保留无销量商品；与商品目录合并以显示图片、货号、名称。无缓存与真实 0 次区分，不把缺失日期补零。
+- 新增商品流量排行、浏览量升降序、加购/下单/下单件数与浏览比排序，SKU/货号/名称搜索，每页 50 件、每日明细与 CSV 导出；展示所选范围、实际有记录首末日期和来源，不以首末日期宣称完整覆盖。
+- 验证：cargo check --locked、pnpm build、相关 Rust 聚合测试通过；测试覆盖区间过滤、零销量浏览、目录外 SKU、无缓存与真实零区分、总量对账和反向日期拦截。PETLOVE 实际缓存总浏览量 936；前五货号 kzn-1022-009 / kzn-1022-023 / kzn-1024-039 / kzn-1022-026 / kzn-1022-012 分别 54/40/32/30/28 次。
+- 经 desktop-next/scripts/build-tauri-release.cmd 构建正式 EXE，关闭旧程序后覆盖根目录，大小 35,305,472 bytes；根目录和 Release SHA-256 均为 4D1467C6CA39FAEDD2FFB1E53B007B42799CD03658FEC85E40CF62AFB00FDE70。
+- 已启动新版，返回 Ozon ERP 窗口。捕获新版界面时用户按物理 Escape 停止 Computer Use，已停止后续 UI 操作；新版内嵌地址、日期切换、排序及每日明细的可见验收尚未完成。更新前旧程序确认地址为 http://tauri.localhost/。
+

@@ -28,6 +28,7 @@ mod packing;
 mod price_center;
 mod price_intelligence;
 mod product_transfer;
+mod product_traffic;
 mod local_weekly_report;
 mod net_dashboard;
 mod posting_sync;
@@ -13845,6 +13846,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            product_traffic::product_traffic,
+            product_traffic::product_traffic_days,
             product_transfer::transfer_source_page,
             product_transfer::transfer_prepare,
             product_transfer::transfer_history,
