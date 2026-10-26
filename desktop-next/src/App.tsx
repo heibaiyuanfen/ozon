@@ -92,7 +92,6 @@ import {
   ReportsPage,
   SupplyPage,
   SyncPage,
-  WbPage,
 } from "./OperationsPages";
 import { AdvertisingSeriesPanel } from "./AdvertisingSeriesPanel";
 import { ProductInsights } from "./ProductInsights";
@@ -111,16 +110,16 @@ import { PurchaseContractPage } from "./PurchaseContractPage";
 import { PurchaseOrderPage } from "./PurchaseOrderPage";
 import { FreightQuotePage } from "./FreightQuotePage";
 import { ProductMasterPage } from "./ProductMasterPage";
-import { WbShopApiCenter } from "./WbShopApiCenter";
+import { WbWorkspace, type WbSection } from "./WbWorkspace";
 import { PackingDocumentsPage } from "./PackingDocumentsPage";
-import { PricePromotionCenter } from "./PricePromotionCenter";
+
 import { PromotionCenter } from "./PromotionCenter";
 import { DeliveryFeeQueryPage } from "./DeliveryFeeQueryPage";
 import { CompetitorShopPage } from "./CompetitorShopPage";
 import { PriceIntelligencePage } from "./PriceIntelligencePage";
 
 type Workspace = "ozon" | "product_library" | "wb" | "mercadolibre";
-type WbPageKey = "shop_api" | "price_center" | "daily" | "reports" | "orders" | "ads" | "inventory" | "costs" | "domestic_profit" | "cross_profit" | "settings";
+type WbPageKey = WbSection;
 
 const emptyDashboard: DashboardData = {
   revenue: 0,
@@ -318,16 +317,9 @@ function Sidebar({
           <nav>
             {(
               [
-                ["shop_api", "店铺与 API 中心", Store],
-                ["price_center", "价格与活动中心", BadgeRussianRuble],
                 ["daily", "经营总览", LayoutDashboard],
-                ["reports", "报告中心", BarChart3],
                 ["orders", "订单中心", ShoppingBag],
-                ["ads", "广告运营", Megaphone],
-                ["inventory", "仓库与库存", PackageSearch],
-                ["costs", "商品与成本", Box],
-                ["domestic_profit", "店铺利润", BarChart3],
-                ["settings", "WB API 与汇率", Settings2],
+                ["returns", "退货中心", Truck],
               ] as Array<
                 [WbPageKey, string, typeof LayoutDashboard]
               >
@@ -1393,7 +1385,7 @@ export function App() {
   const [page, setPage] = useState<PageKey>("dashboard"),
     [workspace, setWorkspace] = useState<Workspace>("ozon"),
     [sidebarCollapsed, setSidebarCollapsed] = useState(false),
-    [wbPage, setWbPage] = useState<WbPageKey>("shop_api"),
+    [wbPage, setWbPage] = useState<WbPageKey>("daily"),
     [shops, setShops] = useState<Shop[]>([]),
     [days, setDays] = useState(7),
     [dashboardMonthOffset, setDashboardMonthOffset] = useState<number | null>(null),
@@ -1514,7 +1506,7 @@ export function App() {
       />
       <main>
         {workspace === "product_library" && <ProductMasterPage />}
-        {workspace === "wb" && (wbPage === "shop_api" ? <WbShopApiCenter /> : wbPage === "price_center" ? <PricePromotionCenter /> : <WbPage range={range} section={wbPage} days={days} setDays={setDays} />)}
+        {workspace === "wb" && <WbWorkspace section={wbPage} onSection={setWbPage} />}
         {workspace === "mercadolibre" && <MercadoLibrePage />}
         {workspace === "ozon" && (
           <>
@@ -1646,7 +1638,7 @@ export function App() {
             {page === "packing" && <PackingDocumentsPage inventory={inventoryRows} shopName={activeShop?.name || "当前店铺"} />}{" "}
             {page === "sync" && <SyncPage range={range} />}{" "}
             {page === "feishu" && <FeishuPage range={range} />}{" "}
-            {page === "wb" && <WbPage range={range} section="daily" days={days} setDays={setDays} />}{" "}
+            {page === "wb" && <WbWorkspace section={wbPage} onSection={setWbPage} />}{" "}
             {page === "migration" && <MigrationPage range={range} />}{" "}
             {page === "listing" && <ListingLedgerPage />}{" "}
             {page === "cross_border_ops" && <CrossBorderOperationsPage range={range} shopName={activeShop?.name || "当前店铺"} enabled={activeShop?.kind === "cross_border"} />}{" "}

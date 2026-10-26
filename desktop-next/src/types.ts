@@ -137,7 +137,9 @@ export interface DashboardData {
 }
 
 export interface NetDashboardDay {
-  day: string; revenue: number; units: number; cancellationUnits: number;
+  day: string;
+  cancellationComplete: boolean;
+  cancellationSyncedAt: string | null; revenue: number; units: number; cancellationUnits: number;
   cancellationAmount: number; netRevenue: number; netUnits: number;
   adSpend: number; adRevenue: number; estimatedNetAdRevenue: number;
   estimatedAcos: number | null; tacos: number | null;

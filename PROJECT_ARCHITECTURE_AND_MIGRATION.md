@@ -2200,3 +2200,36 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - cargo check --locked、cargo test --locked warehouse_switch --lib（5通过：含预留库存排除、真实回读值区别于目标值）、pnpm build通过；正式 build-tauri-release.cmd 成功。
 - 根目录EXE已覆盖启动：34775040字节，SHA256 61438E35455B49DD4B3D8DE51DE8D670AFDB17FDA50BB8AD8BC2B9E8DA096E10，与Release一致。更新 docs/warehouse-stock-upload.md。
 - 用户物理Escape停止桌面控制，未完成新版可见验收或真实库存修改端到端验收。
+
+## 2026-10-24 WB 工作台重建：经营总览、订单中心、退货中心
+- 移除旧 WB 主导航和页面挂载，替换为 WbWorkspace 三个业务页面；店铺连接改为弹窗，保留历史数据库和本机加密凭据。
+- 对齐 Ozon 经营总览的指标卡、趋势、逐日经营明细、状态待办、分仓汇总、日期筛选和同步状态设计。
+- 新增 wb_operations 命令及按店铺隔离的 wb_ops_rows/wb_ops_sync 表；读取卖家仓库、FBS/DBS 订单与状态、当前 item-returns 实物退货及 claims 退货申请。逐资源显示同步结果，同步过程中刷新已完成的数据源。
+- 订单保留原始编号、RID、配送模式、仓库和平台状态，提供等待备货、已经备货、配送中、等待签收、已签收、退货/拒收、取消及未知状态。已备货是本地标记，平台终态优先；不向平台提交备货/发货操作。
+- 退货按原订单号/SRID 精确关联仓库，未匹配时手动指定；取件地址、截止日、到达核实、取件完成时间、备注独立保留，后续同步不覆盖。提醒跨日期显示；买家待签收状态不误用为卖家取件提醒。
+- 增加多仓及配送模式筛选、订单号/货号搜索、状态筛选、50条分页和 CSV 导出；可开启 WB 工作台打开时每小时同步。关闭程序后无系统通知。
+- cargo check --locked、cargo test --locked wb_operations::tests --lib（6项通过）、pnpm build 均通过；正式 scripts/build-tauri-release.cmd 构建成功。
+- 根目录 EXE 已覆盖：34889216 字节，2026-10-24 10:52:03；SHA256 976FEA8C3460942F86A743EC52F2847B286B9E00164F076A743C5DAF6828FAA9，与 Release 一致。可见验收结果后续追加。
+- 当前本机仅有一条 seller_type=local 的 WB 连接；未使用真实跨境店 Token 进行 FBS/DBS/退货端到端联调，不声称真实平台同步通过。DBS 官方文档抓取受限，提供新旧状态路径 404 兼容；首次接入前的历史在途 DBS 完整性仍需按店铺响应核验。使用说明见 docs/wb-operations-redesign.md。
+- 已通过桌面工具启动根目录新版 EXE；随后用户物理 Escape 停止桌面控制，因此未完成内嵌页面及 WB 三页面的可见验收。未执行真实跨境店平台写入或端到端同步。
+
+## 2026-10-24 WB 后台存在退货但退货中心为零：实际接口核对及修复
+- 根因：原同步把10/18—10/24的订单日期用于退回卖家接口，漏掉较早订单的实物退回；并未读取销售统计中的买家退货记录。截图9/24、10/02、10/12均早于原查询起日；查看全部缓存不会自动扩大接口查询窗口。
+- 当前跨境店官方接口只读核验：9/01起返回45条实物退回、5条买家退货；独立扩大到近90天7/27—10/24后返回64条实物退回、8条买家退货。截图三个日期各有一条R退货事件；近14天claims返回0不代表没有已发生买家退货。
+- 新增supplier/sales统计退货读取，只接收saleID的R事件，按lastChangeDate分页，保留saleID/SRID/date及平台仓库名；销售S事件不误判为退货。买家退货状态独立，不自动产生实物可取件提醒。
+- 实物退回和买家退货同步与订单日期解耦，固定回补近90天；退货申请仍读近14天。同步结果显示各来源缓存数量及实际查询范围。前端增加来源筛选和独立计数、买家退货状态、saleID显示及搜索、日期识别、CSV来源字段，明确不同来源不直接合计成物理件数。
+- 已将官方真实响应回补到对应跨境店缓存，共72条来源记录（64实物退回、8买家退货），未删除旧记录或覆盖本地取件/备货安排；回补前本地快照保存于outputs/wb-return-diagnosis/before-backfill.json。接口原始响应留在本机，未将Token写入文件或输出日志。
+- cargo check --locked、pnpm build通过；wb_operations 8项常规测试通过，另执行真实API响应fixture回归测试1项通过，确认截图三个日期均能被生产解析逻辑识别且不会误报可取件。无真实平台写操作。
+- 正式build-tauri-release.cmd成功，根目录EXE已覆盖，与Release SHA256一致：9048503887BDAA1002EEFF9293328C1785A6ABDF4490A6973D39ECFDBEF77107，34839040字节，2026-10-24 11:08:11。启动及可见验收结果后续追加。
+- 已通过桌面工具启动根目录正式EXE；用户物理Escape停止桌面控制，未完成新版退货中心的可见验收。实际官方接口读取、缓存回补及真实响应解析测试已完成，不能据此声称页面可见验收通过。
+
+## 2026-10-24 默认本土店净经营看板取消件数连续为0：订单接口迁移
+- 查明销量缓存正常更新，但posting_routes只更新到10/19；10/19后取消事件缺失，原显示0无法代表真实取消状态。
+- 使用当前店铺凭据只读核对旧/v3/posting/fbs/list和/v2/posting/fbo/list，均返回HTTP400/code9/obsolete method cannot be used；原三个销量同步入口let _忽略订单同步错误。
+- 新增posting_sync.rs，迁移/v4/posting/fbs/list及/v3/posting/fbo/list，按顶层postings/has_next/cursor分页，每页100，校验游标与响应结构；支持price.amount/currency金额对象，非RUB价格不误作为RUB精确扣减。
+- 订单与取消事件事务更新，重复同步不重复累计，取消状态恢复会移除对应取消事件。三个统一同步入口改为上报订单/取消错误，单独写Seller Orders FBS/FBO日志。
+- 新增posting_sync_coverage逐日逐履约模式记录成功/失败及核对时间。净看板仅在FBS+FBO最近24小时均完整核对时显示已核对取消数，否则显示待核对及缓存数量，并提示净值为缓存估算；显示最近核对时间。
+- 已读取真实新接口全部分页：FBS 1页20单，FBO 23页2220单；10/17—24取消数量依次34、39、26、31、21、9、15、2，合计177件（按订单日期归属、核对时点状态）。已回补默认本土店订单与取消事件，回补前快照在outputs/ozon-cancel-diagnosis/before-backfill.json，无任何平台写操作。
+- cargo check --locked、pnpm build通过；posting_sync常规3项、net_dashboard2项测试通过，另执行真实接口响应fixture测试1项通过，验证177件能够进入净看板。使用说明docs/ozon-cancellation-sync.md。正式构建与覆盖结果随后追加。
+- 正式build-tauri-release.cmd成功；根目录EXE已覆盖，34740736字节，2026-10-24 15:40:29，SHA256 6719209D4BE1A2308168BA28293B03191FC224C1AF00BAA8EAFEF96594AA2BA6，与Release一致。
+- 已通过桌面工具启动根目录EXE；随后用户物理Escape停止桌面控制，未完成内嵌页面及取消件数的可见验收。真实平台只读查询、完整分页、缓存回补及净看板解析测试已完成；不把这些等同于页面验收通过。

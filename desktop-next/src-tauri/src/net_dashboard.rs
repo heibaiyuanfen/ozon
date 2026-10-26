@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NetDay {
     pub day: String,
+    pub cancellation_complete: bool,
+    pub cancellation_synced_at: Option<String>,
     pub revenue: f64,
     pub units: i64,
     pub cancellation_units: i64,
@@ -38,6 +40,7 @@ pub(crate) struct NetProduct {
 }
 
 pub(crate) fn read(c: &Connection, from: &str, to: &str, divisor: f64) -> Result<Vec<NetDay>, String> {
+    crate::posting_sync::ensure_schema(c)?;
     // Events and analytics cancellations describe the same orders. Never add both.
     let sql = "WITH s AS (SELECT day,sku,SUM(revenue) revenue,SUM(ordered_units) units,SUM(cancellations) cancels,MAX(product_name) name FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY day,sku),
       e AS (SELECT e.day,e.sku,SUM(e.quantity) cancels,SUM(CASE WHEN r.order_price>0 AND r.quantity=e.quantity THEN e.quantity ELSE 0 END) priced_units,SUM(CASE WHEN r.order_price>0 AND r.quantity=e.quantity THEN e.quantity*r.order_price ELSE 0 END) amount FROM cancellation_events e LEFT JOIN posting_routes r ON e.event_id='posting:'||r.event_id WHERE e.day BETWEEN ?1 AND ?2 GROUP BY e.day,e.sku),
@@ -75,6 +78,9 @@ pub(crate) fn read(c: &Connection, from: &str, to: &str, divisor: f64) -> Result
         item.ad_spend = spend / divisor;
         item.ad_revenue = revenue / divisor;
     }
+    let mut coverage=c.prepare("SELECT day,COUNT(DISTINCT scheme),MIN(synced_at) FROM posting_sync_coverage WHERE day BETWEEN ?1 AND ?2 AND status='success' AND julianday(synced_at)>=julianday('now','-1 day') AND scheme IN('FBS','FBO') GROUP BY day").map_err(|e|e.to_string())?;
+    let coverage_rows=coverage.query_map(params![from,to],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?))).map_err(|e|e.to_string())?;
+    for row in coverage_rows {let (day,schemes,at)=row.map_err(|e|e.to_string())?;if let Some(item)=days.get_mut(&day){item.cancellation_complete=schemes==2;item.cancellation_synced_at=Some(at);}}
     for item in days.values_mut() {
         // No order-level advertising link exists. Proportional adjustment is explicitly an estimate.
         let retained = if item.revenue>0.0 {item.net_revenue/item.revenue} else {1.0};

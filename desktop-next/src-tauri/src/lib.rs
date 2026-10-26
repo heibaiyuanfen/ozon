@@ -29,6 +29,7 @@ mod price_center;
 mod price_intelligence;
 mod local_weekly_report;
 mod net_dashboard;
+mod posting_sync;
 mod finance_settlement;
 mod payment_rates;
 mod warehouse_switch;
@@ -40,6 +41,7 @@ mod secrets;
 mod selection_library;
 mod wb;
 mod wb_shop_center;
+mod wb_operations;
 static INVENTORY_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static SELLER_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static PERFORMANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
@@ -4096,144 +4098,14 @@ fn save_fbs_threshold(
     c.execute("INSERT INTO settings(key,value) VALUES('fbs_warning_hours',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[warning_hours.to_string()]).map_err(|e|e.to_string())?;
     Ok(())
 }
-fn sync_fbs_orders_blocking(range: DateRange, state: &AppState) -> Result<i64, String> {
-    let mut c = db(state)?;
-    let mut offset = 0;
-    let mut postings = vec![];
-    loop {
-        let response = seller_post(
-            &c,
-            "/v3/posting/fbs/list",
-            &serde_json::json!({"dir":"ASC","filter":{"since":format!("{}T00:00:00Z",range.from),"to":format!("{}T23:59:59Z",range.to),"status":""},"limit":1000,"offset":offset,"with":{"analytics_data":true,"financial_data":true}}),
-        )?;
-        let batch = response
-            .pointer("/result/postings")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let count = batch.len();
-        postings.extend(batch);
-        if count < 1000 {
-            break;
-        }
-        offset += count as i64;
-        if offset > 50000 {
-            return Err("FBS 订单超过 50000 条，请缩小日期范围".into());
-        }
-    }
-    let tx = c.transaction().map_err(|e| e.to_string())?;
-    let mut written = 0;
-    for posting in postings {
-        let number = json_text(posting.get("posting_number"));
-        let status = json_text(posting.get("status"));
-        let created = json_text(posting.get("in_process_at"));
-        let day = created.get(0..10).unwrap_or("").to_string();
-        let origin = json_text(posting.pointer("/analytics_data/warehouse_name"))
-            .or_else_empty(|| json_text(posting.pointer("/delivery_method/warehouse")));
-        let destination = json_text(posting.pointer("/analytics_data/region"))
-            .or_else_empty(|| json_text(posting.pointer("/analytics_data/city")));
-        for (index, item) in posting
-            .get("products")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
-            let sku = item
-                .get("sku")
-                .map(|v| {
-                    if let Some(n) = v.as_i64() {
-                        n.to_string()
-                    } else {
-                        json_text(Some(v))
-                    }
-                })
-                .unwrap_or_default();
-            let offer = json_text(item.get("offer_id"));
-            let name = json_text(item.get("name"));
-            let quantity = item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0);
-            let price = json_text(item.get("price")).parse::<f64>().unwrap_or(0.0);
-            let id = format!("seller_fbs:{number}:{sku}:{index}");
-            tx.execute("INSERT INTO posting_routes(event_id,day,sku,offer_id,product_name,quantity,scheme,status,posting_number,origin,destination,order_price,source,updated_at)VALUES(?1,?2,?3,?4,?5,?6,'FBS',?7,?8,?9,?10,?11,'seller_fbs',CURRENT_TIMESTAMP)ON CONFLICT(event_id)DO UPDATE SET day=excluded.day,product_name=excluded.product_name,quantity=excluded.quantity,status=excluded.status,origin=excluded.origin,destination=excluded.destination,order_price=excluded.order_price,updated_at=CURRENT_TIMESTAMP",params![id,day,sku,offer,name,quantity,status,number,origin,destination,price]).map_err(|e|e.to_string())?;
-            written += 1
-        }
-    }
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(written)
-}
-
-fn sync_fbo_orders_blocking(range: DateRange, state: &AppState) -> Result<i64, String> {
-    let mut c = db(state)?;
-    let mut offset = 0_i64;
-    let mut postings = Vec::new();
-    loop {
-        let response = seller_post(
-            &c,
-            "/v2/posting/fbo/list",
-            &serde_json::json!({
-                "dir":"ASC",
-                "filter":{
-                    "since":format!("{}T00:00:00Z",range.from),
-                    "to":format!("{}T23:59:59Z",range.to),
-                    "status":""
-                },
-                "limit":1000,
-                "offset":offset,
-                "translit":true,
-                "with":{"analytics_data":true,"financial_data":true}
-            }),
-        )?;
-        let batch = response
-            .get("result")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let count = batch.len();
-        postings.extend(batch);
-        if count < 1000 {
-            break;
-        }
-        offset += count as i64;
-        if offset > 50_000 {
-            return Err("FBO 订单超过 50000 条，请缩小日期范围".into());
-        }
-    }
-    let tx = c.transaction().map_err(|e| e.to_string())?;
-    let mut written = 0_i64;
-    for posting in postings {
-        let number = json_text(posting.get("posting_number"));
-        let status = json_text(posting.get("status"));
-        let created = json_text(posting.get("created_at"))
-            .or_else_empty(|| json_text(posting.get("in_process_at")));
-        let day = created.get(0..10).unwrap_or("").to_string();
-        let origin = json_text(posting.pointer("/analytics_data/warehouse_name"));
-        let destination = json_text(posting.pointer("/analytics_data/region"))
-            .or_else_empty(|| json_text(posting.pointer("/analytics_data/city")));
-        for (index, item) in posting
-            .get("products")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
-            let sku = item
-                .get("sku")
-                .map(|v| {
-                    v.as_i64()
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| json_text(Some(v)))
-                })
-                .unwrap_or_default();
-            let offer = json_text(item.get("offer_id"));
-            let quantity = item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0);
-            let price = json_text(item.get("price")).parse::<f64>().unwrap_or(0.0);
-            let id = format!("seller_fbo:{number}:{sku}:{index}");
-            tx.execute("INSERT INTO posting_routes(event_id,day,sku,offer_id,product_name,quantity,scheme,status,posting_number,origin,destination,order_price,source,updated_at)VALUES(?1,?2,?3,?4,?5,?6,'FBO',?7,?8,?9,?10,?11,'seller_fbo',CURRENT_TIMESTAMP)ON CONFLICT(event_id)DO UPDATE SET day=excluded.day,offer_id=excluded.offer_id,product_name=excluded.product_name,quantity=excluded.quantity,status=excluded.status,origin=excluded.origin,destination=excluded.destination,order_price=excluded.order_price,updated_at=CURRENT_TIMESTAMP",params![id,day,sku,offer,json_text(item.get("name")),quantity,status,number,origin,destination,price]).map_err(|e|e.to_string())?;
-            written += 1;
-        }
-    }
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(written)
+fn sync_fbs_orders_blocking(range:DateRange,state:&AppState)->Result<i64,String>{posting_sync::sync(&db(state)?,&range,"FBS")}
+fn sync_fbo_orders_blocking(range:DateRange,state:&AppState)->Result<i64,String>{posting_sync::sync(&db(state)?,&range,"FBO")}
+fn sync_posting_cancellations(range:&DateRange,state:&AppState)->Result<(),String>{
+    let mut errors=Vec::new();
+    if let Err(e)=sync_fbs_orders_blocking(range.clone(),state){errors.push(format!("FBS：{e}"))}
+    if let Err(e)=sync_fbo_orders_blocking(range.clone(),state){errors.push(format!("FBO：{e}"))}
+    rebuild_cancellation_events(range,state)?;
+    if errors.is_empty(){Ok(())}else{Err(format!("销量已缓存，但订单/取消状态同步失败，取消统计尚未核对：{}",errors.join("；")))}
 }
 
 #[tauri::command]
@@ -8650,9 +8522,7 @@ async fn sync_seller_sales(
         ad_experiments::after_sync(&owned);
         // Orders are a separate Seller endpoint. Cache them after analytics so
         // the order center is populated by the same user-visible sync action.
-        let _ = sync_fbs_orders_blocking(range.clone(), &owned);
-        let _ = sync_fbo_orders_blocking(range.clone(), &owned);
-        let _ = rebuild_cancellation_events(&range, &owned);
+        sync_posting_cancellations(&range, &owned)?;
         let _ = sync_customer_returns_blocking(&range, &owned);
         Ok(count)
     })
@@ -9882,9 +9752,7 @@ fn sync_one_shop_all(range: DateRange, force: bool, state: &AppState) -> SyncAll
     let seller = (|| {
         let count = sync_seller_sales_blocking(range.clone(), force, state)?;
         ad_experiments::after_sync(state);
-        let _ = sync_fbs_orders_blocking(range.clone(), state);
-        let _ = sync_fbo_orders_blocking(range.clone(), state);
-        let _ = rebuild_cancellation_events(&range, state);
+        sync_posting_cancellations(&range, state)?;
         let _ = sync_customer_returns_blocking(&range, state);
         Ok::<i64, String>(count)
     })();
@@ -10147,9 +10015,7 @@ async fn sync_all_data(
     let seller = tauri::async_runtime::spawn_blocking(move || {
         let count = sync_seller_sales_blocking(seller_range.clone(), force, &seller_state)?;
         ad_experiments::after_sync(&seller_state);
-        let _ = sync_fbs_orders_blocking(seller_range.clone(), &seller_state);
-        let _ = sync_fbo_orders_blocking(seller_range.clone(), &seller_state);
-        let _ = rebuild_cancellation_events(&seller_range, &seller_state);
+        sync_posting_cancellations(&seller_range, &seller_state)?;
         let _ = sync_customer_returns_blocking(&seller_range, &seller_state);
         Ok::<i64, String>(count)
     });
@@ -14147,6 +14013,7 @@ pub fn run() {
             wb::test_wb_feishu,
             wb::send_wb_weekly,
             wb_shop_center::wb_shop_center,
+            wb_operations::wb_operations,
             product_master::product_master,
             price_center::price_center,
             purchase_orders::purchase_order_command,

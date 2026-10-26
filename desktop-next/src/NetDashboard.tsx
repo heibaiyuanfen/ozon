@@ -17,7 +17,7 @@ export default function NetDashboard({ days, currency, to }: { days: NetDashboar
   const cards = row ? [
     ["扣除取消后销售额", money(row.netRevenue)],
     ["扣除取消后销量", `${row.netUnits} 件`],
-    ["取消件数 / 扣减金额", `${row.cancellationUnits} 件 / ${money(row.cancellationAmount)}`],
+    ["取消件数 / 扣减金额", row.cancellationComplete ? `${row.cancellationUnits} 件 / ${money(row.cancellationAmount)}` : `待核对（缓存 ${row.cancellationUnits} 件）`],
     ["广告花费", money(row.adSpend)],
     ["扣除取消后广告销售额（估算）", money(row.estimatedNetAdRevenue)],
     ["广告 ACOS（估算）", pct(row.estimatedAcos)],
@@ -30,14 +30,14 @@ export default function NetDashboard({ days, currency, to }: { days: NetDashboar
         {[...new Set([to, ...days.map(d=>d.day)])].sort().reverse().map(d=><option key={d} value={d}>{d}</option>)}
       </select></label>
     </div>
-    {row ? <><div className="net-metrics">{cards.map(([label,value])=><div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>
+    {row ? <>{!row.cancellationComplete && <p className="net-warning">此日期的 FBS/FBO 订单状态尚未完整核对，缓存中的0不代表没有取消；净销售额、净销量和广告比例暂按现有缓存估算。请同步订单状态并检查同步错误。</p>}<div className="net-metrics">{cards.map(([label,value])=><div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>
       <p className="net-basis">原销售额 {money(row.revenue)} · 原销量 {row.units} 件 · 平台广告销售额 {money(row.adRevenue)}。
-        取消金额优先使用对应订单价格；{row.estimatedProducts} 个商品使用均价估算或缺少可匹配数据。
+        订单状态核对：{row.cancellationSyncedAt ? new Date(row.cancellationSyncedAt).toLocaleString("zh-CN") : "尚未完成"}。取消金额优先使用对应订单价格；{row.estimatedProducts} 个商品使用均价估算或缺少可匹配数据。
         广告净销售额按当天净销售额 / 原销售额同比例估算，ACOS = 广告花费 / 估算广告净销售额；TACOS = 广告花费 / 净销售额。广告花费不因取消而扣减，退货不在本看板扣除。</p>
       {row.unmatchedUnits > 0 && <p className="net-warning">有 {row.unmatchedUnits} 件取消无法匹配当天销量，未重复扣减；请查看商品明细并同步对应订单日期的数据。</p>}
     </> : <p className="net-basis">{selected} 暂无销售或广告缓存，请同步此日期的数据。</p>}
     <details className="net-details" open><summary>逐日明细（点击日期查看商品）</summary><div className="net-table-wrap"><table><thead><tr><th>日期</th><th>原销售额</th><th>取消件数</th><th>扣减金额</th><th>净销售额</th><th>净销量</th><th>广告花费</th><th>广告净销售额（估算）</th><th>ACOS（估算）</th><th>净 TACOS</th></tr></thead><tbody>
-      {[...days].reverse().map(d=><tr key={d.day} className={selected===d.day ? "net-selected" : ""}><td><button className="net-day-button" onClick={()=>setSelected(d.day)}>{d.day}</button></td><td>{money(d.revenue)}</td><td>{d.cancellationUnits}</td><td>{money(d.cancellationAmount)}</td><td>{money(d.netRevenue)}</td><td>{d.netUnits}</td><td>{money(d.adSpend)}</td><td>{money(d.estimatedNetAdRevenue)}</td><td>{pct(d.estimatedAcos)}</td><td>{pct(d.tacos)}</td></tr>)}
+      {[...days].reverse().map(d=><tr key={d.day} className={selected===d.day ? "net-selected" : ""}><td><button className="net-day-button" onClick={()=>setSelected(d.day)}>{d.day}</button></td><td>{money(d.revenue)}</td><td>{d.cancellationComplete ? d.cancellationUnits : `待核对（缓存 ${d.cancellationUnits}）`}</td><td>{d.cancellationComplete ? money(d.cancellationAmount) : "待核对"}</td><td>{money(d.netRevenue)}</td><td>{d.netUnits}</td><td>{money(d.adSpend)}</td><td>{money(d.estimatedNetAdRevenue)}</td><td>{pct(d.estimatedAcos)}</td><td>{pct(d.tacos)}</td></tr>)}
       {!days.length && <tr><td colSpan={10}>当前日期范围暂无数据</td></tr>}
     </tbody></table></div></details>
     <details className="net-details"><summary>{selected} 商品明细 · {row?.products.length ?? 0} 个商品</summary>
