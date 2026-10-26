@@ -2233,3 +2233,25 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - cargo check --locked、pnpm build通过；posting_sync常规3项、net_dashboard2项测试通过，另执行真实接口响应fixture测试1项通过，验证177件能够进入净看板。使用说明docs/ozon-cancellation-sync.md。正式构建与覆盖结果随后追加。
 - 正式build-tauri-release.cmd成功；根目录EXE已覆盖，34740736字节，2026-10-24 15:40:29，SHA256 6719209D4BE1A2308168BA28293B03191FC224C1AF00BAA8EAFEF96594AA2BA6，与Release一致。
 - 已通过桌面工具启动根目录EXE；随后用户物理Escape停止桌面控制，未完成内嵌页面及取消件数的可见验收。真实平台只读查询、完整分页、缓存回补及净看板解析测试已完成；不把这些等同于页面验收通过。
+
+## 2026-10-26 Windows x64 离线安装包
+
+- 用户要求新电脑无开发环境即可安装。Tauri 改为 NSIS，currentUser 安装，中英双语、开始菜单 Ozon ERP 分组，内置 offlineInstaller WebView2 完整运行库。构建入口 scripts/build-tauri-release.cmd 新增 --installer 参数；默认仍只构建正式内嵌前端程序。
+- 数据资源核验：只含空白 data-next-template（shops.json/database-generation.json/ozon_next_default.db），settings/products/sales_daily/finance_transactions 均为 0 行；无密钥或历史业务数据。首次安装复制到 %LOCALAPPDATA%/com.ozonanalytics.desktop/data-next。
+- 检查主程序 x64 PE：无 Python/Node/Rust/VC++ vcruntime 外部 DLL 导入；SQLite 已 bundled，系统 DLL/UCRT 由支持的 Windows 10/11 提供。浏览器采集需系统 Edge 或 Chrome，联网业务仍需网络。
+- cargo check --locked 通过；首次安装可写数据目录初始化测试通过；指定正式脚本执行的 tsc/vite 前端构建与 release 成功。首次打包发生 DNS 错误；随后用 tauri bundle --bundles nsis --verbose 对同一个正式产物重试成功（无另行 cargo release）。微软 WebView2 离线安装程序 214823632 字节，Authenticode Valid / Microsoft Corporation。
+- 安装包：安装包/Ozon-ERP-Windows-x64-Setup.exe，226810758 字节，SHA256 CF7400BABD826AA4F3F5308673769FD28C9BD05713B135A4D9A67FCA61CC2B5F；附安装说明.txt、SHA256SUMS.txt。
+- 实际 /S 试装到独立 TEMP/OzonERP-Installer-Smoke-20261026：退出码 0；主程序、卸载器和空白数据库资源齐全，安装后主程序 SHA256 与 release 相同。启动安装版后自动创建本地空白数据目录；UI 窗口 265214 已读取到 http://tauri.localhost/、默认本土店和经营总览，尚未同步且销售/广告缓存为空，证明脱离源码目录可启动。当前主机已有 WebView2；未做无 WebView2 的干净虚拟机测试，不宣称全新系统实测。
+- 根目录启动器已关闭旧进程后覆盖启动；大小 34740736，时间 2026-10-26 10:03:25 +08:00，与 release/试装版一致的 SHA256：245CA20C31CD4378DAC43D48D32B71D4AE764936B5ACE0024F7A70CB6E306538。
+- 最后继续核验根目录窗口时用户按物理 Escape 停止 Computer Use；已停止 UI 操作，根目录本次页面捕获未完成。试装进程关闭并静默卸载，未要求卸载器删除应用数据，原项目业务数据库未改动。
+## 2026-10-26：跨境店铺商品搬家（首版）
+
+- 新增“跨境运营 → 商品搬家”，支持源店分页/全量读取、图片预览、筛选勾选、货号前缀、同币种售价倍率、迁移草稿详情与 JSON 导出。
+- 后端新增 product_transfer 模块，显式绑定源店与目标店，拒绝同店、相同 Seller Client ID 和本土店迁移；读取源商品详情、属性和描述，并向目标类目查询必填属性。
+- 目标货号预检及提交前双重查重，默认不覆盖已有商品；不迁移库存。发布只使用预检通过的持久化草稿，单件提交记录 Ozon task_id，支持手动刷新导入/审核结果。
+- 独立 product-transfer.db 保存迁移草稿、任务和结果；事务认领防止重复点击，未知响应、缺失 task_id 和网络异常进入待核对，不自动重发。已提交、审核中、已导入及待核对记录不可被重新预检覆盖。
+- 第一版限制：不自动换汇，不承诺视频/变体关系/资质迁移；图片使用源商品公开链接，需由平台实际抓取审核。真实平台发布尚未验证。
+- 验证：cargo check --locked、pnpm build 通过；product_transfer::tests 共 5 passed，覆盖字段/图片顺序、币种与尺寸拦截、异常响应结构、状态保护、持久化及跨店隔离。
+- 使用 desktop-next/scripts/build-tauri-release.cmd 成功构建 Release，已覆盖根目录 ozon-analytics-next.exe。两处均为 35,186,688 bytes，SHA-256：91BB6D457840B13A1D121A3DE1DABD85678729125BD35722800EDCA498F9275B。
+- 可见验收未完成：已通过 computer-use 检查旧程序为 http://tauri.localhost/，关闭旧程序并替换正式 EXE；启动新版验收时用户按物理 Escape 停止 Computer Use，因此停止 UI 操作，未确认新版页面加载、真实商品读取和真实发布结果。
+

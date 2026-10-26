@@ -1,0 +1,17 @@
+Ozon ERP 安装说明
+适用：Windows 10 / Windows 11 64 位（x64）。
+
+1. 将同目录的 Ozon-ERP-Windows-x64-Setup.exe 复制到新电脑，双击安装。
+2. 安装程序内置 WebView2 离线运行库；缺少运行库时自动安装，无需预先安装 Python、Node.js、Rust、Visual Studio 或数据库软件。
+3. 安装完成后从桌面或开始菜单启动 Ozon Analytics。
+4. 首次启动为空白店铺。请在“店铺管理/连接设置”中配置店铺及 API 凭证，再同步业务数据。
+
+安装不需要下载 WebView2；Ozon 数据同步、广告、AI 和飞书等联网功能仍需网络及对应账号/API 权限。
+浏览器采集功能需 Microsoft Edge 或 Google Chrome；常规 Windows 10/11 通常已自带 Edge。
+
+此安装包不携带原电脑的店铺数据库、API 密钥、采购成本及历史订单。原电脑业务数据请另行备份；Windows 加密的凭证不能直接以数据库文件复制的方式跨电脑使用，必要时在新电脑重新配置密钥。
+
+卸载程序时，如希望保留业务数据，请勿勾选删除应用数据。安装目录与数据目录分开，首次启动数据目录为：
+%LOCALAPPDATA%\com.ozonanalytics.desktop\data-next
+
+本包未使用商业代码签名证书。请核对 SHA256SUMS.txt 的校验值；如系统阻止运行，请联系维护人员确认来源。

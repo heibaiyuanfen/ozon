@@ -32,6 +32,7 @@ export type PageKey =
   | "product_analysis"
   | "selection_library"
   | "delivery_fee_query"
+  | "product_transfer"
   | "competitor_shop"
   | "mind_map"
   | "shops"

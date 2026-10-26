@@ -11,7 +11,12 @@ call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
 if errorlevel 1 exit /b %errorlevel%
 set "PATH=%NODE_BIN%;%PNPM_BIN%;%USERPROFILE%\.cargo\bin;%PATH%"
 cd /d "%~dp0.."
+if /I "%~1"=="--installer" goto installer
 "%NODE_BIN%\node.exe" "node_modules\@tauri-apps\cli\tauri.js" build --no-bundle
+exit /b %errorlevel%
+
+:installer
+"%NODE_BIN%\node.exe" "node_modules\@tauri-apps\cli\tauri.js" build --bundles nsis
 exit /b %errorlevel%
 
 :node_missing
