@@ -2264,3 +2264,44 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 经 desktop-next/scripts/build-tauri-release.cmd 构建正式 EXE，关闭旧程序后覆盖根目录，大小 35,305,472 bytes；根目录和 Release SHA-256 均为 4D1467C6CA39FAEDD2FFB1E53B007B42799CD03658FEC85E40CF62AFB00FDE70。
 - 已启动新版，返回 Ozon ERP 窗口。捕获新版界面时用户按物理 Escape 停止 Computer Use，已停止后续 UI 操作；新版内嵌地址、日期切换、排序及每日明细的可见验收尚未完成。更新前旧程序确认地址为 http://tauri.localhost/。
 
+
+## 2026-10-27 商品搬家：补充属性与 AI 帮助
+- 将“查看草稿”改为“补充资料 / AI”，读取目标类目的缺失必填属性；支持文本填写、平台字典选项（前 500 项）、保存后重检与本机持久化。复合属性明确提示到目标后台处理。
+- 新增 transfer_edit 后端命令；写入时再次核验属性和字典选项，事务内重读草稿状态，禁止编辑已提交任务。保留其他预检阻塞项并再次检查目标同货号。
+- AI 使用现有连接设置，读取当前商品草稿及类目属性，提供中文建议，用户核实后手动填写；不自动保存或发布。
+- 验证：cargo check --locked --offline 通过；cargo test --locked --offline product_transfer::tests --lib 6 项通过；pnpm build 通过；git diff --check 通过。新增必填值检测测试，覆盖空白值、字典 ID 和复合属性。
+- 正式构建：desktop-next/scripts/build-tauri-release.cmd 成功；关闭旧程序后覆盖项目根目录 ozon-analytics-next.exe。大小 35,300,352 字节，产物和根目录 SHA-256 均为 2B83A573945B7FF310E1C3F1D8339AC9525FE9246C16828BFEC2D93520D72DA7。
+- 启动验收：新版根目录 EXE 已启动，窗口可见，Web 内容地址为 http://tauri.localhost/，确认加载内嵌页面。后续 UI 点击持续被 computer-use 的 user input was detected 保护阻止，未完成补填弹窗、真实 AI 响应和真实保存/发布验收，未发布任何商品。
+
+## 2026-10-27 商品搬家：目标仓库和库存设置
+- 新增目标店仓库读取（/v2/warehouse/list，游标分页）、每件商品可售库存设置（支持 0），设置随预检草稿保存，支持批量应用到当前目标店待发布草稿。
+- 导入完成后，在刷新平台结果时执行 /v2/products/stocks；按源草稿指定的目标店、货号、仓库、数量写入，逐条匹配平台响应。库存状态与商品导入状态独立显示，失败/结果不明确支持确认后单独重试，不重复创建商品。成功记录不自动重发。
+- 写入前重新核验目标仓库，事务抢占防重复，已中断写入超过 120 秒转为待核对；库存参数兼容旧草稿缺省值。确认发布和搬家记录及 CSV 均显示仓库库存。
+- 验证：pnpm build、cargo check --locked --offline、cargo test --locked --offline product_transfer::tests --lib（7 项）通过；包含库存参数、商品/仓库响应匹配及旧草稿兼容测试。git diff --check 通过。
+- 使用 desktop-next/scripts/build-tauri-release.cmd 成功构建正式程序，并复制覆盖根目录 EXE。启动和页面验收待执行；未对线上商品/库存进行写入测试。
+
+## 2026-10-27 调整为独立“导入后库存”模块
+- 商品搬家与库存设置拆为独立页签。移除预检时仓库库存设置和导入刷新时自动写库存；旧草稿库存计划保留为历史信息，不再自动执行。
+- 新模块可按目标货号识别、从当前目标店搬家记录识别、读取目标店已有商品（分页）及重新识别列表。区分有效商品 ID、暂未找到和已归档；识别操作不修改线上商品或库存。
+- 识别后独立读取仓库，勾选已存在且未归档商品，输入可售库存，确认后写入。写前重新查询目标商品、核对仓库、校验记录版本并事务抢占，防止并发重复；平台尚不允许写入时记录错误，超时结果待核对。
+- 使用独立 inventory_operations 表按目标店和目标货号持久化识别与库存结果，不依赖导入任务，不污染搬家去重记录。库存成功后允许以后再次人工设置同一数量，以支持库存变化后的补货。
+- 验证：cargo check --locked --offline 通过；cargo test --locked --offline product_transfer::tests --lib 8 项通过；pnpm build 通过；git diff --check 通过。新增无导入任务商品识别、未创建/归档、保留库存结果和店铺隔离验证。
+- 正式构建、覆盖和界面验收结果后续追加。未执行线上库存写入验收。
+- 独立库存正式程序已通过 desktop-next/scripts/build-tauri-release.cmd 构建并覆盖根目录 EXE；两者 SHA-256 一致：5FD5C37C807B13DB5C2A80E18FFA3BB2DCF53DC22FD4FB94B837A70B5E1444BA。准备启动与界面验收。
+
+## 2026-10-27 修复仓库读取“分页游标重复”
+- 原逻辑仅凭 cursor 判定是否继续，未读取 /v2/warehouse/list 的 has_next；终页保留游标时继续请求并丢弃已获取列表，导致界面仓库下拉框为空。
+- 修复为 has_next=false 优先结束；缺少结束标志的旧响应按不足一页结束，正常多页按游标读取。仓库按 ID 去重；确实仍有下一页但游标不前进、缺失游标或异常结构继续明确报错，避免静默遗漏。
+- 验证：cargo check --locked --offline、pnpm build 通过；cargo test --locked --offline product_transfer::tests --lib 共 10 项通过。新增保留终页游标、嵌套结果、空仓库、旧格式短页、有效多页去重及真正异常分页回归测试。
+- 正式 Release 构建、根目录 EXE 覆盖、启动和界面验收结果后续追加。
+- 仓库分页修复正式构建成功（build-tauri-release.cmd）；关闭旧程序并覆盖根目录 EXE。文件 35,585,024 字节，根目录与 Release SHA-256 均为 1F3DC09B57B1D3666D4C94D3D05B2F0B961F91B4A5CF822CB6ED389991818061。准备启动并进行只读仓库验收，尚未完成真实店铺读取验证。
+
+## 2026-10-27 1.0.1 覆盖升级安装包
+- 保持 productName=Ozon Analytics、identifier=com.ozonanalytics.desktop、currentUser 安装模式与此前 1.0.0 安装包一致；同步提升前端、Rust、Tauri 和 Cargo.lock 中应用版本为 1.0.1。
+- 使用与 Tauri CLI 2.11.4 对应的官方 NSIS 模板，定制为直接覆盖安装：删除调用旧卸载器的维护页面/逻辑，恢复原安装目录，已有主程序时跳过改目录页，初始化检查拒绝版本降级。保留用户自行卸载功能，但升级流程不会调用它。
+- 数据目录标识不变，安装仅更新程序及干净初始化模板，升级不删除用户本地数据库、配置或操作记录。
+- 验证：cargo check --locked --offline、正式构建前端检查通过；cargo test --locked --offline data --lib 的 3 项数据初始化和店铺隔离测试通过；模板和生成后的 NSIS 脚本检查确认版本/标识稳定、恢复旧路径、没有旧卸载器调用和升级时的数据删除。
+- desktop-next/scripts/build-tauri-release.cmd --installer 构建成功，包含 WebView2 离线安装资源；交付到 发布安装包/Ozon-Analytics-1.0.1-覆盖升级安装包.exe，附安装说明和 SHA256。
+- 尚未在真实用户已安装版本上执行覆盖升级；准备启动程序进行可见验收，不自动执行安装。
+- 交付安装包 SHA-256：4CE65C8E18894E5F25B426B4637BD48E77371E334FEEE914C711E79E9B9EB1DB（与原构建产物一致）。
+- 根目录 EXE 已同步为 1.0.1，SHA-256 与 Release 主程序一致：050E6154B7E112AA3B225DB4ADF983ACE6A9F1C2D57E78E0670266808DB9E795。覆盖升级包已交付，未对用户系统执行实际安装。
