@@ -11153,6 +11153,22 @@ mod supply_draft_tests {
     }
 
     #[test]
+    fn draft_empty_message_does_not_hide_platform_failure() {
+        let payload = serde_json::json!({"clusters":[],"status":"FAILED","errors":[{
+            "error_message":"ITEMS_COUNT_MORE_THAN_MAX","message":"",
+            "macrolocal_cluster_ids":[4042],"skus":[],"error_reasons":[],"items_validation":[]
+        }]});
+        let (count, _, reasons) = draft_status_diagnostics(&payload);
+        assert_eq!(count, 0);
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].contains("ITEMS_COUNT_MORE_THAN_MAX"));
+        assert!(reasons[0].contains("4042"));
+        assert!(reasons[0].contains("接口未提供具体上限"));
+        let wrapped = serde_json::json!({"result":payload});
+        assert_eq!(draft_status_diagnostics(&wrapped).2, reasons);
+    }
+
+    #[test]
     fn explains_clusters_without_destination_warehouses() {
         let payload = serde_json::json!({"clusters":[
             {"cluster_name":"Samara","macrolocal_cluster_id":4042,"warehouses":[]},
@@ -11550,9 +11566,20 @@ fn draft_status_diagnostics(payload: &serde_json::Value) -> (usize, Vec<String>,
         .or_else(|| payload.pointer("/result/errors"))
         .and_then(|value| value.as_array());
     for error in errors.into_iter().flatten() {
-        let message = json_text(error.get("message").or_else(|| error.get("error_message")));
-        if !message.is_empty() && message != "UNSPECIFIED" && !reasons.contains(&message) {
-            reasons.push(message);
+        // Ozon can return an empty message alongside a populated error_message.
+        // Read both fields instead of letting an empty string hide the error code.
+        for field in ["error_message", "message"] {
+            let value = json_text(error.get(field));
+            if value.is_empty() || value == "UNSPECIFIED" { continue; }
+            let mut message = if value == "ITEMS_COUNT_MORE_THAN_MAX" {
+                format!("商品数量超过平台上限（{value}）；请调整相关集群数量后重新创建草稿，接口未提供具体上限")
+            } else { value };
+            for (key, label) in [("macrolocal_cluster_ids", "集群"), ("skus", "SKU")] {
+                let ids = error.get(key).and_then(|v| v.as_array()).map(|items| items.iter()
+                    .map(|item| supply_identifier(Some(item))).filter(|id| !id.is_empty()).collect::<Vec<_>>()).unwrap_or_default();
+                if !ids.is_empty() { message.push_str(&format!("；{label}：{}", ids.join("、"))); }
+            }
+            if !reasons.contains(&message) { reasons.push(message); }
         }
         for reason in error
             .get("error_reasons")
@@ -11615,7 +11642,7 @@ async fn supply_workflow_draft_status(
             }
             let message = if message.is_empty() && destinations.is_empty() {
                 if !error_reasons.is_empty() {
-                    format!("Ozon 未返回平台分配仓：{}", error_reasons.join("；"))
+                    format!("Ozon 草稿校验结果：{}", error_reasons.join("；"))
                 } else if cluster_count > 0 {
                     format!("Ozon 已校验 {cluster_count} 个集群，但没有返回内部转运路由，暂时无法查询集中配送地址的时段")
                 } else {

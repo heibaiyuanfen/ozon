@@ -32,3 +32,11 @@ export function ozonClusterZh(name: string): string {
   if (!normalized) return "未命名集群";
   return OZON_CLUSTER_ZH[normalized] ?? normalized;
 }
+
+/** Resolve only known cluster IDs; unknown identifiers remain visible for diagnosis. */
+export function ozonClusterIdsLabel(ids: string, names: Record<string, string>): string {
+  return ids.replace(/\b\d+\b/g, (id) => names[id]?.trim() ? `${ozonClusterZh(names[id])}（${id}）` : `未知集群（${id}）`);
+}
+export function ozonDraftErrorLabel(text: string, names: Record<string, string>): string {
+  return text.replace(/；集群：([^；]+)/g, (_, ids: string) => `；集群：${ozonClusterIdsLabel(ids, names)}`);
+}

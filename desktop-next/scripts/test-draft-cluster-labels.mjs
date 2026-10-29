@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+const source = readFileSync(new URL('../src/ozon-clusters.ts', import.meta.url), 'utf8');
+const compiled = ts.transpileModule(source, {compilerOptions:{module:ts.ModuleKind.ESNext}}).outputText;
+const {ozonClusterIdsLabel, ozonDraftErrorLabel} = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
+assert.equal(ozonClusterIdsLabel('4042, 4036', {'4042':'Самара','4036':'Москва, МО и Дальние регионы'}), '萨马拉（4042）, 莫斯科、莫斯科州及偏远地区（4036）');
+assert.equal(ozonClusterIdsLabel('9999', {}), '未知集群（9999）');
+assert.equal(ozonDraftErrorLabel('ITEMS_COUNT_MORE_THAN_MAX；集群：4042；SKU：4042', {'4042':'Самара'}), 'ITEMS_COUNT_MORE_THAN_MAX；集群：萨马拉（4042）；SKU：4042');
+console.log('Cluster display regression checks passed');

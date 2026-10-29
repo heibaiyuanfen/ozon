@@ -2323,3 +2323,22 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 新规则只在库存分页全部成功完成后生效；网络/平台错误、异常结构、分页不完整不会伪装成空仓库。已有目标仓库记录但数量无法解析时保留异常状态。
 - 前端 pnpm --config.verify-deps-before-run=false run build 和 cargo check --locked --offline 通过。回归覆盖完整空列表、无目标仓库记录、其他仓库有库存、真实零库存、预留库存、数据异常和分页异常；测试与正式构建结果后续追加。
 - 新品首次库存修复已通过 11 项 Rust 回归测试；使用 build-tauri-release.cmd（无 --installer）成功生成正式 EXE，覆盖根目录后 SHA-256 与 Release 一致：E49E4BB36E910E1BAE1F1CDA25A5FDF977C43465097DBCEAC31A3041B0954D8A。本次没有构建或更新安装包。准备启动可见验收，未执行线上库存写入。
+
+## 2026-10-29 最终定价直接改价
+- 按用户要求，RepriceDialog 手动、预警和目标利润率调价均移除活动目录/成员查询依赖，以及逐活动改价与退出请求；直接调用现有商品价格更新接口，由 Ozon 联动活动参与。
+- 保留当前跨境店铺、商品 ID、CNY 币种、有效两位小数、目标利润率校验及预警自动涨幅限制。提交后回读价格，不一致提示尚未确认，不宣称促销退出成功。
+- cargo check --locked 通过；seller_api_error_tests：12 通过、1 维护测试跳过；pnpm run build 通过（设置 pnpm_config_verify_deps_before_run=false，避免环境自动重装）；git diff --check 通过。
+- 使用 desktop-next/scripts/build-tauri-release.cmd 构建成功；已关闭旧程序、覆盖并启动根目录 EXE。大小 35742208，根目录与 Release SHA256 均为 8EDBEB167BC66C555C43B79A882A3B0B1DA61EF19E42DD3D9AD4C71AE794B94E。
+- computer-use 已读取新版经营总览，确认内嵌页面 http://tauri.localhost/ 正常加载。打开改价页验收时用户按 Escape 停止了 Computer Use，因此改价窗口可见验收未完成；未执行真实店铺改价，平台促销联动未实测。
+
+## 2026-10-29 草稿失败错误字段修复
+- 修复草稿校验响应 message 为空时遮蔽 error_message 的问题；两字段分别读取，保留平台错误码、关联集群 ID 与 SKU。
+- ITEMS_COUNT_MORE_THAN_MAX 显示商品数量超限及重新调整创建提示，不推测平台未返回的具体上限；FAILED 无路线按钮显示草稿校验失败。
+- 以草稿 135597461 的真实响应形状补充回归测试，覆盖数字集群 ID、空 message、顶层及 result 包装；supply_draft_tests 共 8 项通过，cargo check --locked、pnpm run build、git diff --check 通过。
+- 正式构建成功，已覆盖并启动根目录 EXE，大小 35744256；两份 SHA256 一致：F591F9E123E9ABBD15F4542FB3F8CDA3EEE4E6DF5A2F62D15BE04DB2A7666D51。确认内嵌 tauri.localhost 页面加载；进入约仓页验收时用户按 Escape 停止 Computer Use，草稿错误可见验收未完成。未修改或重新创建真实草稿。
+
+## 2026-10-29 草稿集群中文名称展示
+- 草稿错误关联集群、包含集群列表、配送路线统一显示中文名称（ID）；匹配当前店铺配货计划、配货篮与草稿商品校验中的集群名称，保留原始请求标识。
+- 未匹配名称显示未知集群（ID），不猜测；仅替换错误中集群段，不误替换 SKU。
+- 新增 test-draft-cluster-labels.mjs 验证中文映射、多集群、未知 ID 和 SKU 不受影响；检查通过。cargo check --locked、8 项 supply_draft_tests、pnpm run build、git diff --check 均通过。
+- 正式入口构建成功并覆盖重启根目录 EXE；大小 35744256，根目录和 Release SHA256 一致：1EC6B5FBF3DB55BEF9135B4B13EBCB60FBA95AECBDE52EEC4B5302E2FA78068F。可见读取确认 tauri.localhost 内嵌页面正常；打开约仓页时工具检测到用户正在操作窗口，未继续争用界面，具体草稿名称展示可见验收未完成。

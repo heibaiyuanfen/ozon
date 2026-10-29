@@ -3,7 +3,7 @@ import { FinanceSettlementView } from "./FinanceSettlementView";
 import "./analytics.css";
 import "./listing.css";
 import { displayTime } from "./time";
-import { ozonClusterZh } from "./ozon-clusters";
+import { ozonClusterZh, ozonClusterIdsLabel, ozonDraftErrorLabel } from "./ozon-clusters";
 import {
   officialCrossdockEstimate,
   officialLogisticsTariff,
@@ -4088,6 +4088,13 @@ export function SupplyPage() {
     } catch { /* 损坏的草稿不应阻塞约仓页面 */ }
   }, []);
   const planKey = (plan: SupplyClusterPlan) => `${plan.sku}|${plan.macrolocalClusterId}`;
+  const draftClusterNames: Record<string, string> = {};
+  for (const row of [...plans, ...Object.values(workflowCart)]) {
+    if (row.clusterName) draftClusterNames[row.macrolocalClusterId] = row.clusterName;
+  }
+  for (const draft of draftStatuses) for (const row of draft.productChecks ?? []) {
+    if (row.clusterName) draftClusterNames[row.clusterId] = row.clusterName;
+  }
   const isMoscowPlan = (plan: SupplyClusterPlan) => /莫斯科|Москва/i.test(plan.clusterName);
   const visibleWorkflowPlans = plans.filter((plan) => workflowMode === "DIRECT" ? isMoscowPlan(plan) : true);
   const selectedWorkflowPlans = Object.values(workflowCart).filter((plan) => workflowMode === "DIRECT" ? isMoscowPlan(plan) : true);
@@ -4442,18 +4449,18 @@ export function SupplyPage() {
           </>}
         </div>
         <div className={`supply-monitor-state ${monitorEnabled ? "active" : ""}`}><Clock3 size={16}/><span>{monitorStatus}{lastMonitorAt ? ` · 最近检查 ${lastMonitorAt}` : ""}</span></div>
-        {!!createdDrafts.length && <><div className="supply-created-drafts">{createdDrafts.map((draft) => <span key={draft.draftId}><b>草稿 {draft.draftId}</b><small>包含集群 {draft.macrolocalClusterId}{draft.status ? ` · ${draft.status}` : ""}</small></span>)}</div><button className="outline-button supply-draft-refresh" disabled={busy} onClick={() => void refreshDraftStatuses()}><RefreshCw size={14}/>读取草稿校验与平台路由</button></>}
+        {!!createdDrafts.length && <><div className="supply-created-drafts">{createdDrafts.map((draft) => <span key={draft.draftId}><b>草稿 {draft.draftId}</b><small>包含集群 {ozonClusterIdsLabel(draft.macrolocalClusterId, draftClusterNames)}{draft.status ? ` · ${draft.status}` : ""}</small></span>)}</div><button className="outline-button supply-draft-refresh" disabled={busy} onClick={() => void refreshDraftStatuses()}><RefreshCw size={14}/>读取草稿校验与平台路由</button></>}
         {!!draftStatuses.length && <div className="supply-draft-statuses">{draftStatuses.map((draft) => <article key={draft.draftId}>
-          <header><div><b>草稿 {draft.draftId}</b><small>{draft.status || "校验中"}{draft.message ? ` · ${draft.message}` : ""}</small></div><button className="outline-button" disabled={busy || !draft.destinations.length} title={!draft.destinations.length ? "Ozon 尚未返回可用配送路线" : ""} onClick={() => void queryDraftSlots(draft)}>{draft.destinations.length ? "查询集中配送时段" : "等待配送路线"}</button></header>
+          <header><div><b>草稿 {draft.draftId}</b><small>{draft.status || "校验中"}{draft.message ? ` · ${ozonDraftErrorLabel(draft.message, draftClusterNames)}` : ""}</small></div><button className="outline-button" disabled={busy || !draft.destinations.length} title={!draft.destinations.length ? "Ozon 尚未返回可用配送路线" : ""} onClick={() => void queryDraftSlots(draft)}>{draft.destinations.length ? "查询集中配送时段" : draft.status === "FAILED" ? "草稿校验失败" : "等待配送路线"}</button></header>
           <div className="supply-draft-diagnostics"><span>集群 {draft.clusterCount}</span><span>可用路线 {draft.destinations.length}</span>{!!draft.clustersWithoutWarehouses.length && <span className="warning">未返回路线集群 {draft.clustersWithoutWarehouses.length}</span>}</div>
           {!!draft.clustersWithoutWarehouses.length && <div className="supply-monitor-state"><AlertTriangle size={14}/><span>以下集群尚未获得 Ozon 内部转运路由：{draft.clustersWithoutWarehouses.join("、")}</span></div>}
-          {!!draft.errorReasons.length && <div className="error-banner"><AlertTriangle size={14}/><span>Ozon：{draft.errorReasons.join("；")}</span></div>}
+          {!!draft.errorReasons.length && <div className="error-banner"><AlertTriangle size={14}/><span>Ozon：{draft.errorReasons.map((reason) => ozonDraftErrorLabel(reason, draftClusterNames)).join("；")}</span></div>}
           <div className="supply-product-checks">
             <b>商品 × 集群配送数量校验</b><small>{draft.planSource}。可用路线不代表全部商品和数量可配送；“—”表示平台尚未确认。</small>
             <div className="supply-draft-diagnostics"><span>全部可送 {(draft.productChecks ?? []).filter((r) => r.status === "全部可配送").length} 行</span><span className="warning">部分/不可送 {(draft.productChecks ?? []).filter((r) => ["部分可配送", "不可配送"].includes(r.status)).length} 行</span><span>未确认 {(draft.productChecks ?? []).filter((r) => !["全部可配送", "部分可配送", "不可配送"].includes(r.status)).length} 行</span></div>
             <div className="supply-product-check-table"><table><thead><tr><th>商品 / SKU</th><th>集群</th><th>计划数量</th><th>确认可送</th><th>缺口</th><th>结果</th><th>原因</th></tr></thead><tbody>{(draft.productChecks ?? []).map((r, index) => <tr key={`${r.clusterId}-${r.sku}-${index}`} className={r.status === "全部可配送" ? "" : "warning-row"}><td><b>{r.offerId || r.sku || "商品计划缺失"}</b><small>{r.productName}{r.sku ? ` · SKU ${r.sku}` : ""}</small></td><td>{ozonClusterZh(r.clusterName || `集群 ${r.clusterId}`)}<small>ID {r.clusterId}</small></td><td>{r.plannedQuantity ?? "—"}</td><td>{r.acceptedQuantity ?? "—"}</td><td>{r.shortageQuantity ?? "—"}</td><td>{r.status}</td><td>{r.reason || "平台校验通过"}</td></tr>)}</tbody></table></div>
           </div>
-          {draft.destinations.map((destination) => <p key={`${destination.macrolocalClusterId}-${destination.storageWarehouseId}`}><MapPin size={13}/><span>{destination.name || (destination.storageWarehouseId === 0 ? "统一发运（Ozon 自动分配）" : `平台分配仓 ${destination.storageWarehouseId}`)}<small>{destination.address ? `${destination.address} · ` : ""}{destination.storageWarehouseId === 0 ? "无需指定内部目的仓" : "Ozon 内部转运"} · 集群 {destination.macrolocalClusterId}</small></span></p>)}
+          {draft.destinations.map((destination) => <p key={`${destination.macrolocalClusterId}-${destination.storageWarehouseId}`}><MapPin size={13}/><span>{destination.name || (destination.storageWarehouseId === 0 ? "统一发运（Ozon 自动分配）" : `平台分配仓 ${destination.storageWarehouseId}`)}<small>{destination.address ? `${destination.address} · ` : ""}{destination.storageWarehouseId === 0 ? "无需指定内部目的仓" : "Ozon 内部转运"} · 集群 {ozonClusterIdsLabel(destination.macrolocalClusterId, draftClusterNames)}</small></span></p>)}
           {draftSlotMessages[draft.draftId] && <div className="supply-monitor-state"><Clock3 size={14}/><span>{draftSlotMessages[draft.draftId]}</span></div>}
           {(draftSlots[draft.draftId] ?? []).map((slot) => <button className="supply-draft-slot" key={slot.from} disabled={busy} onClick={() => void finalizeDraft(draft, slot)}><span>{slot.from}—{slot.to}</span><b>确认约仓</b></button>)}
         </article>)}</div>}
