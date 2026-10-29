@@ -13857,6 +13857,7 @@ pub fn run() {
             product_transfer::inventory_history,
             product_transfer::inventory_lookup,
             product_transfer::inventory_apply,
+            product_transfer::inventory_warehouse_stocks,
             product_transfer::transfer_refresh,
             warehouse_switch::warehouse_switch_options,
             warehouse_switch::warehouse_switch_stocks,

@@ -197,16 +197,67 @@ pub async fn inventory_lookup(target: String,offers: Vec<String>,state: State<'_
         }c.execute_batch("COMMIT").map_err(|e|e.to_string())?; Ok(out)
     }).await.map_err(|e|e.to_string())?
 }
+#[derive(Clone,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct WarehouseStock { offer: String, warehouse_id: i64, quantity: Option<i64>, free: Option<i64>, reserved: Option<i64>, checked_at: String, record_found: bool }
+fn stock_integer(v: &Value) -> Option<i64> {v.as_i64().or_else(||v.as_str().and_then(|v|v.parse().ok())).filter(|n|*n>=0)}
+fn parse_warehouse_stocks(mut fetch: impl FnMut(&str)->Result<Value,String>, offers: &[String], warehouse_id: i64) -> Result<Vec<WarehouseStock>,String> {
+    let mut out:Vec<WarehouseStock>=offers.iter().map(|offer|WarehouseStock{offer:offer.clone(),warehouse_id,quantity:None,free:None,reserved:None,checked_at:now(),record_found:false}).collect();
+    let mut cursor=String::new();let mut seen=std::collections::HashSet::new();
+    for _ in 0..1000 {
+        let v=fetch(&cursor)?;
+        let products=v.get("products").or_else(||v.pointer("/result/products")).and_then(Value::as_array).ok_or("仓库库存响应结构异常，不能将查询失败视为零库存")?;
+        for p in products {
+            if stock_integer(&p["warehouse_id"])!=Some(warehouse_id){continue;}
+            let Some(row)=out.iter_mut().find(|r|p["offer_id"]==r.offer) else {continue;};
+            row.record_found=true;
+            let free=stock_integer(&p["free_stock"]);let reserved=stock_integer(&p["reserved"]);let present=stock_integer(&p["present"]);
+            let total=present.or_else(||free.zip(reserved).map(|(a,b)|a.saturating_add(b)));
+            // Never underestimate stock if the platform returns overlapping SKU rows.
+            row.quantity=row.quantity.into_iter().chain(total).max();row.free=row.free.into_iter().chain(free).max();row.reserved=row.reserved.into_iter().chain(reserved).max();
+            if let Some(total)=row.quantity {row.quantity=Some(total.max(row.free.unwrap_or(0).saturating_add(row.reserved.unwrap_or(0))));}
+        }
+        let has_next=v.get("has_next").or_else(||v.pointer("/result/has_next")).and_then(Value::as_bool);
+        if has_next==Some(false) || (has_next.is_none() && products.len()<1000){return Ok(finish_warehouse_stocks(out));}
+        let next=v.get("cursor").or_else(||v.pointer("/result/cursor")).and_then(Value::as_str).unwrap_or("");
+        if next.is_empty() || next==cursor || products.is_empty() || !seen.insert(next.to_string()){return Err("仓库库存分页不完整，请重新查询后提交".into());}cursor=next.into();
+    }Err("仓库库存分页过多，请缩小查询范围".into())
+}
+// A successful, fully paginated query with no target-warehouse row is normal
+// for newly created products. A returned row with invalid quantities is different.
+fn finish_warehouse_stocks(mut rows: Vec<WarehouseStock>) -> Vec<WarehouseStock> {
+    for row in &mut rows {
+        if !row.record_found { row.quantity=Some(0);row.free=Some(0);row.reserved=Some(0); }
+    }
+    rows
+}
+fn warehouse_stocks(t: &Connection, offers: &[String], warehouse_id: i64) -> Result<Vec<WarehouseStock>,String> {
+    if warehouse_id<=0 || offers.is_empty() || offers.len()>100 {return Err("请选择目标仓库，每次查询 1～100 个商品".into());}
+    parse_warehouse_stocks(|cursor|seller_post(t,"/v2/product/info/stocks-by-warehouse/fbs",&json!({"offer_id":offers,"limit":1000,"cursor":cursor})),offers,warehouse_id)
+}
 #[tauri::command]
-pub async fn inventory_apply(target: String,offer: String,plan: StockPlan,revision: String,state: State<'_,AppState>) -> Result<InventoryProduct,String> {
+pub async fn inventory_warehouse_stocks(target: String,offers: Vec<String>,warehouse_id: i64,state: State<'_,AppState>)->Result<Vec<WarehouseStock>,String>{
+    let owned=state.inner().clone();tauri::async_runtime::spawn_blocking(move||warehouse_stocks(&shop(&owned,&target)?,&offers,warehouse_id)).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+pub async fn inventory_apply(target: String,offer: String,plan: StockPlan,revision: String,exclude_existing: bool,state: State<'_,AppState>) -> Result<InventoryProduct,String> {
     let owned=state.inner().clone();tauri::async_runtime::spawn_blocking(move || {
         let t=shop(&owned,&target)?;let plan=checked_plan(&t,&plan)?;
         let remote=target_items(&t,&offer)?;
+        let existing_stock=if exclude_existing {Some(warehouse_stocks(&t,&[offer.clone()],plan.warehouse_id)?.into_iter().next().ok_or("未能确认目标仓库库存")?)}else{None};
         let c=inventory_store(&owned)?;c.execute_batch("BEGIN IMMEDIATE").map_err(|e|e.to_string())?;
         let mut row=inventory_load(&c,&target,&offer)?.ok_or("请先识别目标商品")?;
         if row.updated_at!=revision || row.stock_status=="applying" {return Err("记录已更新或正在写入，请刷新后操作".into());}
         inventory_detect(&mut row,remote.iter().find(|v|v["offer_id"]==offer));
         if !row.exists || row.archived {return Err("目标商品尚未创建或已归档，请重新识别，未写入库存".into());}
+        if let Some(stock)=existing_stock {
+            match stock.quantity {
+                Some(n) if n>0=>{row.stock_status="skipped_stock".into();row.message=format!("目标仓库 {} 已有库存 {n} 件，已跳过，未写入",plan.warehouse_name);row.updated_at=now();inventory_save(&c,&row)?;c.execute_batch("COMMIT").map_err(|e|e.to_string())?;return Ok(row);},
+                Some(0)=>{},
+                _=>return Err("目标仓库库存未查明，已阻止写入；请刷新库存，或明确关闭已有库存剔除后操作".into()),
+            }
+        }
         row.plan=Some(plan.clone());row.stock_status="applying".into();row.message="正在写入，请勿重复操作".into();row.updated_at=now();inventory_save(&c,&row)?;c.execute_batch("COMMIT").map_err(|e|e.to_string())?;
         match seller_post_once(&t,"/v2/products/stocks",&json!({"stocks":[{"offer_id":offer,"warehouse_id":plan.warehouse_id,"stock":plan.quantity}]})) {
             Ok(v)=>match stock_response(&v,&offer,plan.warehouse_id) {Ok(())=>{row.stock_status="success".into();row.message="平台已确认库存写入".into();},Err(e)=>{row.stock_status="failed".into();row.message=e;}},
@@ -705,6 +756,21 @@ mod tests {
         assert!(read_warehouse_pages(|_|Ok(json!({"warehouses":[{"warehouse_id":5}],"has_next":true,"cursor":"repeated"}))).is_err());
         assert!(read_warehouse_pages(|_|Ok(json!({"unexpected":[]}))).is_err());
         assert!(read_warehouse_pages(|_|Ok(json!({"warehouses":[{"warehouse_id":0}],"has_next":false}))).is_err());
+    }
+    #[test]
+    fn warehouse_stock_filter_allows_new_products_after_complete_query() {
+        let offers=vec!["A".into(),"B".into(),"C".into()];let mut calls=0;
+        let rows=parse_warehouse_stocks(|_|{calls+=1;Ok(if calls==1{json!({"products":[{"offer_id":"A","warehouse_id":1,"present":10,"free_stock":8,"reserved":2},{"offer_id":"B","warehouse_id":2,"present":999}],"has_next":true,"cursor":"n"})}else{json!({"products":[{"offer_id":"B","warehouse_id":1,"present":0,"free_stock":0,"reserved":0}],"has_next":false,"cursor":"n"})})},&offers,1).unwrap();
+        assert_eq!(calls,2);assert_eq!(rows[0].quantity,Some(10));assert_eq!(rows[1].quantity,Some(0));assert_eq!(rows[2].quantity,Some(0));assert!(!rows[2].record_found);
+        let rows=parse_warehouse_stocks(|_|Ok(json!({"products":[{"offer_id":"A","warehouse_id":1,"free_stock":0,"reserved":4}],"has_next":false})),&offers,1).unwrap();assert_eq!(rows[0].quantity,Some(4));
+        let empty=parse_warehouse_stocks(|_|Ok(json!({"products":[],"has_next":false})),&offers,1).unwrap();
+        assert!(empty.iter().all(|r|r.quantity==Some(0) && !r.record_found));
+        let other=parse_warehouse_stocks(|_|Ok(json!({"products":[{"offer_id":"A","warehouse_id":2,"present":1000}],"has_next":false})),&offers,1).unwrap();
+        assert_eq!(other[0].quantity,Some(0));assert!(!other[0].record_found);
+        let malformed=parse_warehouse_stocks(|_|Ok(json!({"products":[{"offer_id":"A","warehouse_id":1,"present":"invalid"}],"has_next":false})),&offers,1).unwrap();
+        assert!(malformed[0].record_found);assert_eq!(malformed[0].quantity,None);
+        assert!(parse_warehouse_stocks(|_|Ok(json!({"error":"failed"})),&offers,1).is_err());
+        assert!(parse_warehouse_stocks(|_|Ok(json!({"products":[],"has_next":true,"cursor":"x"})),&offers,1).is_err());
     }
     fn sample() -> (Value, Value) {
         (
