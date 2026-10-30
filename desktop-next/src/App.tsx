@@ -1608,7 +1608,7 @@ export function App() {
             )}{" "}
             {page === "price_intelligence" && <PriceIntelligencePage key={activeShop?.id} shops={shops} activeShop={activeShop} onSelectShop={changeShop} />}{" "}
             {page === "ai" && <AiPage range={range} />}{" "}
-            {page === "growth_center" && <GrowthCenterPage key={activeShop?.id} range={range} currency={currency} shopName={activeShop?.name || "当前店铺"} />}{" "}
+            {page === "growth_center" && <GrowthCenterPage key={activeShop?.id} range={range} currency={currency} shopName={activeShop?.name || "当前店铺"} crossBorder={activeShop?.kind === "cross_border"} shopId={activeShop?.id || ""} />}{" "}
             {page === "product_analysis" && <ProductAnalysisPage currency={currency} shopId={activeShop?.id || ""} />}{" "}
             {page === "selection_library" && <SelectionLibraryPage key={activeShop?.id} shopId={activeShop?.id || ""} />}{" "}
             {page === "competitor_shop" && <CompetitorShopPage key={activeShop?.id} />}{" "}

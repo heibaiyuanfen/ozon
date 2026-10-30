@@ -603,3 +603,22 @@ mod tests {
         assert!(!path.contains("vewjxSkHXu"));
     }
 }
+
+#[tauri::command]
+pub(crate) fn export_competitor_shop_xlsx(shop_name: String, state: State<AppState>) -> Result<String,String> {
+    if shop_name.trim().is_empty() { return Err("请选择店铺".into()); }
+    let c=db(&state)?; ensure(&c)?; crate::competitor_capture::ensure(&c)?;
+    let mut stmt=c.prepare("SELECT p.*,x.seller_price_rub AS seerfar_price_rub,x.weight_g AS seerfar_weight_g,x.dimensions_mm AS seerfar_dimensions_mm,x.category AS seerfar_category,x.stock AS seerfar_stock,x.seller AS seerfar_seller,x.listing_date AS seerfar_listing_date,x.image_url AS seerfar_image_url,x.captured_at AS seerfar_captured_at FROM competitor_shop_products p LEFT JOIN competitor_shop_seerfar_capture x ON x.product_id=p.id WHERE p.shop_name=?1 ORDER BY p.id").map_err(|e|e.to_string())?;
+    let columns:Vec<String>=stmt.column_names().iter().map(|s|s.to_string()).collect();
+    let mut data:Vec<Vec<String>>=vec![columns];
+    let n=stmt.column_count();let mut query=stmt.query([shop_name.clone()]).map_err(|e|e.to_string())?;
+    while let Some(row)=query.next().map_err(|e|e.to_string())? { let mut values=Vec::new(); for i in 0..n { values.push(match row.get_ref(i).map_err(|e|e.to_string())? {rusqlite::types::ValueRef::Null=>String::new(),rusqlite::types::ValueRef::Integer(v)=>v.to_string(),rusqlite::types::ValueRef::Real(v)=>v.to_string(),rusqlite::types::ValueRef::Text(v)=>String::from_utf8_lossy(v).to_string(),rusqlite::types::ValueRef::Blob(_)=>String::new()});} data.push(values); }
+    if data.len()==1 { return Err("该店铺没有已导入的商品".into()); }
+    let escape=|v:&str| v.chars().filter(|c| *c=='\t'||*c=='\n'||*c=='\r'||(*c as u32)>=32).collect::<String>().replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;").replace('"',"&quot;");
+    let mut xml=String::from(r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" state="frozen"/></sheetView></sheetViews><sheetData>"#);
+    for (i,row) in data.iter().enumerate(){xml.push_str(&format!("<row r=\"{}\">",i+1));for value in row {xml.push_str(&format!("<c t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",escape(value)));}xml.push_str("</row>");}xml.push_str("</sheetData></worksheet>");
+    let dir=state.data_dir.join("exports");std::fs::create_dir_all(&dir).map_err(|e|e.to_string())?;
+    let safe:String=shop_name.chars().map(|c|if c.is_alphanumeric()||c=='-'||c=='_' {c} else {'_'}).take(80).collect();
+    let path=dir.join(format!("竞品店铺_{}_{}.xlsx",safe,chrono::Local::now().format("%Y%m%d_%H%M%S")));
+    crate::ozon_monthly::write_xlsx(&path,xml)?;Ok(path.to_string_lossy().to_string())
+}

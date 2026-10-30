@@ -341,7 +341,7 @@ fn sheet_xml(
     )
 }
 
-fn write_xlsx(path: &Path, sheet: String) -> Result<(), String> {
+pub(crate) fn write_xlsx(path: &Path, sheet: String) -> Result<(), String> {
     write_xlsx_extra(path, sheet, Vec::new())
 }
 

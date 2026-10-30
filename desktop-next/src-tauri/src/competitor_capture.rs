@@ -212,7 +212,7 @@ pub(crate) fn start_competitor_seerfar_capture(
     let capture_url = format!("{}#ozon-erp-capture={port}.{token}", url.split('#').next().unwrap_or(&url));
     let owned = crate::background_state(&state)?;
     thread::spawn(move || serve_once(listener, owned, product_id, sku, url, token));
-    open::that(&capture_url).map_err(|e| format!("无法打开浏览器：{e}"))?;
+    open_seerfar_chrome(&capture_url)?;
     Ok("已打开 Ozon 页面；等待已安装的辅助扩展读取可见的 Seerfar 面板（最多 90 秒）。".into())
 }
 
@@ -275,4 +275,29 @@ mod tests {
         ).unwrap();
         assert_eq!(captured, (248.0, 65.0, "150×150×20mm".into(), 749));
     }
+}
+
+#[tauri::command]
+pub(crate) fn start_competitor_shop_capture(url: String) -> Result<String, String> {
+    let parsed = tauri::Url::parse(url.trim()).map_err(|_| "店铺链接格式错误")?;
+    if parsed.scheme() != "https" || !matches!(parsed.host_str(), Some("www.ozon.ru" | "ozon.ru")) || !parsed.path().starts_with("/seller/") || parsed.path().trim_end_matches('/').split('/').count() < 3 {
+        return Err("请填写 https://www.ozon.ru/seller/ 开头的店铺链接".into());
+    }
+    let mut clean = parsed;
+    clean.set_fragment(Some("ozon-erp-shop"));
+    open_seerfar_chrome(clean.as_str())?;
+    Ok("已使用 Chrome 打开店铺。请在安装新版辅助扩展的 Chrome 中使用右上角整店采集面板；导出前核对翻页和缺失字段。".into())
+}
+
+// Use the normal Chrome profile so the user's installed Seerfar extension is available.
+// Never fall back to the OS default browser or an isolated automation profile.
+fn open_seerfar_chrome(url: &str) -> Result<(), String> {
+    let candidates = ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"]
+        .into_iter().filter_map(std::env::var_os)
+        .map(|base| std::path::PathBuf::from(base).join("Google/Chrome/Application/chrome.exe"));
+    let chrome = candidates.into_iter().find(|path| path.is_file())
+        .ok_or("未找到 Google Chrome。请安装 Chrome，或将采集链接复制到已安装 Seerfar 的 Chrome 中打开；不会使用 Edge 替代")?;
+    std::process::Command::new(chrome).arg("--new-tab").arg(url).spawn()
+        .map_err(|e| format!("Chrome 启动失败：{e}"))?;
+    Ok(())
 }

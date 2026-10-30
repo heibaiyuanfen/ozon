@@ -115,6 +115,17 @@ pub async fn product_traffic_days(
         .map_err(|e| e.to_string())?;
     Ok(rows)
 }
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct GrowthDay { day: String, views: Option<i64>, ordered_units: Option<i64> }
+#[tauri::command]
+pub async fn cross_growth_daily(range: DateRange, state: State<'_, AppState>) -> Result<Vec<GrowthDay>, String> {
+    validate(&range)?; let c=db(&state)?;
+    let mut stmt=c.prepare("SELECT day,SUM(views),SUM(ordered_units) FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY day ORDER BY day DESC").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(params![range.from,range.to],|r|Ok(GrowthDay{day:r.get(0)?,views:r.get(1)?,ordered_units:r.get(2)?})).map_err(|e|e.to_string())?;
+    rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

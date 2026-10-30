@@ -13874,6 +13874,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             product_traffic::product_traffic,
+            product_traffic::cross_growth_daily,
             product_traffic::product_traffic_days,
             product_transfer::transfer_source_page,
             product_transfer::transfer_prepare,
@@ -13928,6 +13929,7 @@ pub fn run() {
             selection_library::delete_selection_item,
             competitor_shop::import_competitor_shop_excel,
             competitor_shop::competitor_shop_products,
+            competitor_shop::export_competitor_shop_xlsx,
             competitor_shop::competitor_shop_names,
             competitor_shop::add_competitor_to_selection,
             competitor_shop::sync_competitor_shop_feishu,
@@ -13936,6 +13938,7 @@ pub fn run() {
             competitor_shop::save_competitor_feishu_target,
             competitor_shop::test_competitor_feishu_target,
             competitor_capture::start_competitor_seerfar_capture,
+            competitor_capture::start_competitor_shop_capture,
             competitor_capture::competitor_seerfar_captures,
             sync_inventory,
             inventory_alert_state,

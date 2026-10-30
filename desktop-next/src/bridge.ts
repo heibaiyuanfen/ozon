@@ -1002,3 +1002,7 @@ export async function competitorSeerfarCaptures(shopName:string):Promise<import(
 export async function competitorFeishuTarget():Promise<string>{return invoke("competitor_feishu_target")}
 export async function saveCompetitorFeishuTarget(url:string):Promise<string>{return invoke("save_competitor_feishu_target",{url})}
 export async function testCompetitorFeishuTarget(url:string):Promise<string>{return invoke("test_competitor_feishu_target",{url})}
+
+export async function startCompetitorShopCapture(url:string):Promise<string>{return invoke("start_competitor_shop_capture",{url})}
+
+export async function exportCompetitorShopXlsx(shopName:string):Promise<string>{return invoke("export_competitor_shop_xlsx",{shopName})}
