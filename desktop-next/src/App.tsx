@@ -463,17 +463,15 @@ function Stat({
 
 function TrendChart({
   data,
-  mode,
 }: {
   data: DashboardData["trend"];
-  mode: "revenue" | "units";
 }) {
   useEffect(() => {
     const el = document.getElementById("trend-chart");
     if (!el) return;
     const chart = echarts.init(el);
     chart.setOption({
-      grid: { left: 20, right: 62, top: 46, bottom: 28, containLabel: true },
+      grid: { left: 20, right: 125, top: 46, bottom: 28, containLabel: true },
       tooltip: { trigger: "axis" },
       xAxis: {
         type: "category",
@@ -494,20 +492,21 @@ function TrendChart({
           splitLine: { show: false },
           axisLabel: { color: "#c28b46" },
         },
+        { type: "value", position: "right", offset: 65, name: "销量/件", splitLine: { show: false }, axisLabel: { color: "#31a36b" } },
       ],
       legend: {
         left: "center",
         top: 6,
         itemGap: 24,
-        data: [mode === "revenue" ? "销售额" : "销量", "广告花费"],
+        data: ["销售额", "销量", "广告花费"],
       },
       series: [
         {
-          name: mode === "revenue" ? "销售额" : "销量",
+          name: "销售额",
           type: "line",
           smooth: true,
           symbol: "none",
-          data: data.map((x) => (mode === "revenue" ? x.revenue : x.units)),
+          data: data.map((x) => x.revenue),
           lineStyle: { color: "#3478f6", width: 3 },
           areaStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -516,6 +515,7 @@ function TrendChart({
             ]),
           },
         },
+        { name: "销量", type: "line", smooth: true, symbol: "none", yAxisIndex: 2, data: data.map((x) => x.units), lineStyle: { color: "#31a36b", width: 2 }, itemStyle: { color: "#31a36b" } },
         {
           name: "广告花费",
           type: "line",
@@ -533,7 +533,7 @@ function TrendChart({
       window.removeEventListener("resize", resize);
       chart.dispose();
     };
-  }, [data, mode]);
+  }, [data]);
   return <div id="trend-chart" className="chart" />;
 }
 
@@ -564,8 +564,7 @@ function Dashboard({
   range: DateRange;
   to: string;
 }) {
-  const [chartMode, setChartMode] = useState<"revenue" | "units">("revenue"),
-    [syncRange, setSyncRange] = useState<DateRange>(range),
+  const [syncRange, setSyncRange] = useState<DateRange>(range),
     [forceSync, setForceSync] = useState(false),
     [syncingAll, setSyncingAll] = useState(false),
     [syncMessage, setSyncMessage] = useState("");
@@ -696,24 +695,10 @@ function Dashboard({
           <div>
             <h2>业绩趋势</h2>
             <p>
-              {chartMode === "revenue" ? "销售额" : "销量"}与广告花费的日度变化
+              销售额、销量与广告花费的日度变化
             </p>
           </div>
           <div className="trend-actions">
-            <div className="tabs">
-              <button
-                className={chartMode === "revenue" ? "selected" : ""}
-                onClick={() => setChartMode("revenue")}
-              >
-                销售额
-              </button>
-              <button
-                className={chartMode === "units" ? "selected" : ""}
-                onClick={() => setChartMode("units")}
-              >
-                销量
-              </button>
-            </div>
             <RangeTabs days={days} setDays={setDays} monthOffset={monthOffset} setMonthOffset={setMonthOffset} customRange={customRange} setCustomRange={setCustomRange} />
           </div>
         </div>
@@ -743,7 +728,7 @@ function Dashboard({
             note="本地快照"
           />
         </div>
-        <TrendChart data={data.trend} mode={chartMode} />
+        <TrendChart data={data.trend} />
       </section>
       <div className="health-grid">
         <section className="card health-card">

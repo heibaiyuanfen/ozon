@@ -2372,3 +2372,6 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - 商品创建日期通过源店商品详情读取，按北京时间归日；分页重复或不完整时报错，存在缺失创建时间时不显示可能不完整的新增数量。创建时间不等于实际上架时间，当前商品列表也不保证包含已删除及归档商品。
 - cargo check --locked --offline、product_traffic 相关测试通过；前端和正式 EXE 正在构建。用户要求本次不生成安装包。
 - 正式构建及前端构建通过，product_traffic 测试 1 项通过；已覆盖根目录 EXE，SHA-256 与 Release 一致：6BC66ED3BDE41AB4EB4C10A2F3E6469596D1B108858564376C0E16CF291D6B5E。未构建安装包；真实店铺数据和页面待验收。
+
+## 2026-11-03 经营总览趋势图
+- 销售额、销量和广告费同时显示，销量使用独立坐标轴；移除指标切换。前端构建与 cargo check 通过，正式 Release 构建并覆盖根目录 EXE，哈希一致；已启动，界面可见验收尚未完成。
