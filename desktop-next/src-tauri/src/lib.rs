@@ -6788,6 +6788,7 @@ fn missing_cost_rows(
     state: State<AppState>,
 ) -> Result<Vec<MissingCostRow>, String> {
     let c = db(&state)?;
+    apply_month_costs(&c,&range)?;
     // Finance is the canonical settled-unit source for the Finance P&L. A
     // posting event is only a fallback when that SKU has no attributable
     // Finance delivery, because migrated posting history can be partial.
@@ -6824,8 +6825,53 @@ fn missing_cost_rows(
     Ok(rows)
 }
 
+const MONTH_COST_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS monthly_purchase_costs(
+    month TEXT NOT NULL, sku TEXT NOT NULL, cny REAL NOT NULL,
+    PRIMARY KEY(month,sku))";
+
+fn apply_month_costs(c: &Connection, range: &DateRange) -> Result<(), String> {
+    let month: Option<String> = c.query_row(
+        "SELECT CASE WHEN ?1=date(?1,'start of month') AND ?2 BETWEEN ?1 AND date(?1,'+1 month','-1 day') THEN substr(?1,1,7) END",
+        params![range.from, range.to], |r| r.get(0)
+    ).map_err(|e|e.to_string())?;
+    let Some(month) = month else {return Ok(())};
+    c.execute_batch(MONTH_COST_SCHEMA).map_err(|e|e.to_string())?;
+    let has: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM monthly_purchase_costs WHERE month=?1)",[&month],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if has {
+        c.execute_batch("CREATE TEMP TABLE product_costs AS SELECT * FROM main.product_costs;
+            CREATE UNIQUE INDEX temp.month_report_sku ON product_costs(sku);").map_err(|e|e.to_string())?;
+        c.execute("UPDATE temp.product_costs AS p SET unit_cost_cny=m.cny,unit_cost=NULL FROM monthly_purchase_costs m WHERE m.month=?1 AND m.sku=p.sku",[month]).map_err(|e|e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn sync_month_purchase_cost(month:String, offer:String, expected:Option<f64>, state:State<AppState>) -> Result<f64,String> {
+    let first=chrono::NaiveDate::parse_from_str(&format!("{month}-01"),"%Y-%m-%d").map_err(|_|"月份无效")?;
+    let end=first.checked_add_months(chrono::Months::new(1)).and_then(|d|d.pred_opt()).ok_or("月份无效")?;
+    let mut c=db(&state)?;
+    let tx=c.transaction().map_err(|e|e.to_string())?;
+    let mut stmt=tx.prepare("SELECT p.sku,pc.unit_cost_cny FROM products p LEFT JOIN product_costs pc USING(sku) WHERE p.offer_id=?1").map_err(|e|e.to_string())?;
+    let matches=stmt.query_map([offer.trim()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<f64>>(1)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    drop(stmt);
+    let [(sku,Some(cost))]=matches.as_slice() else {return Err("请核对本店完整货号及商品中心的人民币采购成本，必须唯一匹配一个 SKU".into())};
+    if let Some(expected)=expected {
+        if expected!=*cost {return Err("商品中心成本已变化，请重新预览".into())}
+        tx.execute_batch(MONTH_COST_SCHEMA).map_err(|e|e.to_string())?;
+        tx.execute("INSERT OR REPLACE INTO monthly_purchase_costs(month,sku,cny) VALUES(?1,?2,?3)",params![month,sku,cost]).map_err(|e|e.to_string())?;
+        let start_key=format!("{first}|{first}"); let end_key=format!("{first}|{end}");
+        for table in ["business_report_cache","analytics_detail_cache"] {
+            let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",[table],|r|r.get(0)).map_err(|e|e.to_string())?;
+            if exists {tx.execute(&format!("DELETE FROM {table} WHERE range_key BETWEEN ?1 AND ?2"),[&start_key,&end_key]).map_err(|e|e.to_string())?;}
+        }
+        tx.commit().map_err(|e|e.to_string())?;
+    }
+    Ok(*cost)
+}
+
 fn business_report_blocking(range: DateRange, state: &AppState) -> Result<BusinessReport, String> {
     let mut c = db(state)?;
+    apply_month_costs(&c,&range)?;
     let rate = rub_per_cny_for(state, &c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS business_report_cache(range_key TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
     repair_finance_accrual_attribution(&mut c, &range)?;
@@ -7491,6 +7537,7 @@ fn analytics_detail_blocking(
     state: &AppState,
 ) -> Result<AnalyticsDetail, String> {
     let c = db(&state)?;
+    apply_month_costs(&c,&range)?;
     let rate = rub_per_cny_for(state, &c)?;
     let freight_threshold = price_intelligence::freight_threshold(&c)?;
     let freight_totals = cross_border_freight_totals(&c, &range, rate)?;
@@ -13994,6 +14041,7 @@ pub fn run() {
             import_competitor_html,
             remove_competitor,
             business_report,
+            sync_month_purchase_cost,
             local_weekly_report::local_weekly_report,
             ozon_monthly::export_ozon_monthly_report,
             ozon_monthly::export_ozon_cross_border_report,

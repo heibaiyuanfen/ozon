@@ -1,3 +1,4 @@
+import { invoke as invokeMonthlyCost } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import { FinanceSettlementView } from "./FinanceSettlementView";
 import "./analytics.css";
@@ -2566,6 +2567,8 @@ export function ReportsPage({
       chart.dispose();
     };
   }, [data]);
+  const [costOffer,setCostOffer]=useState("");
+  const [costPreview,setCostPreview]=useState<{month:string;offer:string;cost:number}|null>(null);
   if (tab === "summary" && !data)
     return <div className="empty">正在读取月度缓存…</div>;
   const m = (v: number) => money(v, currency);
@@ -2702,6 +2705,24 @@ export function ReportsPage({
               {choice.label}
             </button>
           ))}
+          <input aria-label="成本同步货号" placeholder="输入完整货号" value={costOffer} onChange={e=>{setCostOffer(e.target.value);setCostPreview(null);}} />
+          <button disabled={!!busy || !costOffer.trim()} onClick={async()=>{
+            const offer=costOffer.trim();
+            const preview=costPreview?.month===month && costPreview.offer===offer ? costPreview : null;
+            setBusy("cost");
+            try {
+              const cost=await invokeMonthlyCost<number>("sync_month_purchase_cost",{month,offer,expected:preview?.cost??null});
+              if(preview){
+                clearReportCache();
+                setData(await businessReport(effectiveRange));
+                setCostPreview(null);
+                setMessage(month+" 的 "+offer+" 采购成本已更新为 ¥"+cost+"/件。");
+              }else{
+                setCostPreview({month,offer,cost});
+                setMessage("商品中心采购成本 ¥"+cost+"/件。确认后仅用于 "+month+" 的 "+offer+"。");
+              }
+            }catch(e){setMessage(String(e));setCostPreview(null);}finally{setBusy("");}
+          }}>{costPreview?.month===month && costPreview.offer===costOffer.trim()?"确认更新本月采购成本":"预览本月采购成本"}</button>
           <button disabled={!!busy} onClick={() => syncMonth("seller")}>
             同步本月销量
           </button>
