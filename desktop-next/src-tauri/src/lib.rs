@@ -44,6 +44,7 @@ mod selection_library;
 mod wb;
 mod wb_shop_center;
 mod wb_operations;
+mod wb_pricing;
 static INVENTORY_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static SELLER_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static PERFORMANCE_SYNC_LOCK: Mutex<()> = Mutex::new(());
@@ -14107,6 +14108,7 @@ pub fn run() {
             wb::send_wb_weekly,
             wb_shop_center::wb_shop_center,
             wb_operations::wb_operations,
+            wb_pricing::wb_pricing,
             product_master::product_master,
             price_center::price_center,
             purchase_orders::purchase_order_command,

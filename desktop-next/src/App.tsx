@@ -321,6 +321,7 @@ function Sidebar({
                 ["daily", "经营总览", LayoutDashboard],
                 ["orders", "订单中心", ShoppingBag],
                 ["returns", "退货中心", Truck],
+                ["pricing", "价格与利润监控", BarChart3],
               ] as Array<
                 [WbPageKey, string, typeof LayoutDashboard]
               >

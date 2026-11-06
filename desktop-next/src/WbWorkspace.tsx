@@ -3,8 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { ArrowDownLeft, BellRing, Boxes, CheckCheck, Download, RefreshCw, Search, Settings2, ShoppingBag, Truck, X } from "lucide-react";
 import { wbShopCenter } from "./bridge";
 import "./wb-workspace.css";
+import { WbPricing } from "./wb-pricing/WbPricing";
 
-export type WbSection = "daily" | "orders" | "returns";
+export type WbSection = "daily" | "orders" | "returns" | "pricing";
 type Json = Record<string, any>;
 type Row = { id: string; raw: Json; local: Json; updatedAt: string; status: string; day: string; warehouseId?: string | number | null };
 type Snapshot = { warehouses: Row[]; orders: Row[]; returns: Row[]; sync: {message?: string; updatedAt?: string}; running: boolean };
@@ -29,9 +30,9 @@ export function WbWorkspace({section,onSection}:{section:WbSection;onSection:(s:
   useEffect(()=>{localStorage.setItem("wb-ops-shop",shop)},[shop]);
   async function saveConnection(){setSaving(true);setError("");try{if(form.name.trim()){const result=await wbShopCenter<{shopId:string}>("create_shop",{name:form.name,sellerType:"cross_border",currency:"RUB",timezone:"Europe/Moscow",token:form.token});setShop(result.shopId)}else{if(!shop)throw new Error("请输入新店铺名称");await wbShopCenter("rotate_token",{shopId:shop,token:form.token})}setForm({name:"",token:""});await loadShops();setSettings(false)}catch(e){setError(String(e))}finally{setSaving(false)}}
   return <div className="wb-workspace">
-    <header className="wbo-header"><div><span className="wbo-eyebrow">WILDBERRIES · 跨境经营工作台</span><h1>{section==="daily"?"经营总览":section==="orders"?"订单中心":"退货中心"}</h1><p>每日经营、履约进度与海外仓协同</p></div><div className="wbo-actions"><select aria-label="WB 店铺" value={shop} onChange={e=>setShop(e.target.value)}>{!shops.length&&<option value="">请接入 WB 店铺</option>}{shops.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select><button onClick={()=>setSettings(true)}><Settings2 size={16}/>店铺连接</button></div></header>
+    <header className="wbo-header"><div><span className="wbo-eyebrow">WILDBERRIES · 跨境经营工作台</span><h1>{section==="pricing"?"价格与利润监控":section==="daily"?"经营总览":section==="orders"?"订单中心":"退货中心"}</h1><p>每日经营、履约进度与海外仓协同</p></div><div className="wbo-actions"><select aria-label="WB 店铺" value={shop} onChange={e=>setShop(e.target.value)}>{!shops.length&&<option value="">请接入 WB 店铺</option>}{shops.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select><button onClick={()=>setSettings(true)}><Settings2 size={16}/>店铺连接</button></div></header>
     {error&&<div role="alert" className="wbo-error">{error}</div>}
-    {shop?<Operations key={shop} shopId={shop} section={section} onSection={onSection}/>:<section className="wbo-panel wbo-empty"><Boxes size={40}/><h2>连接店铺，开始管理多个海外仓</h2><p>同步 FBS、DBS 订单和平台退货记录，按仓库安排备货与取件。</p><button className="primary" onClick={()=>setSettings(true)}>接入 WB 店铺</button></section>}
+    {shop?section==="pricing"?<WbPricing key={shop} shopId={shop}/>:<Operations key={shop} shopId={shop} section={section} onSection={onSection}/>:<section className="wbo-panel wbo-empty"><Boxes size={40}/><h2>连接店铺，开始管理多个海外仓</h2><p>同步 FBS、DBS 订单和平台退货记录，按仓库安排备货与取件。</p><button className="primary" onClick={()=>setSettings(true)}>接入 WB 店铺</button></section>}
     {settings&&<div className="wbo-overlay"><form className="wbo-dialog" onSubmit={e=>{e.preventDefault();void saveConnection()}}><div className="wbo-heading"><h2>店铺连接</h2><button type="button" aria-label="关闭" onClick={()=>setSettings(false)}><X size={18}/></button></div><p>已有店铺选择后更新 Token；新增店铺填写名称。凭据沿用本机加密保存。</p><label>当前店铺<select value={shop} onChange={e=>setShop(e.target.value)}><option value="">新增店铺</option>{shops.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label><label>新增店铺名称（更新现有连接时留空）<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label><label>API Token<input required type="password" autoComplete="new-password" value={form.token} onChange={e=>setForm({...form,token:e.target.value})}/></label><p>订单与仓库需要 Marketplace 权限；退货件需要 Analytics 权限；退货申请需要 Buyers returns 权限。仅执行数据读取。</p>{error&&<p className="wbo-error">{error}</p>}<button className="primary" disabled={saving}>{saving?"保存中…":"保存连接"}</button></form></div>}
   </div>
 }
