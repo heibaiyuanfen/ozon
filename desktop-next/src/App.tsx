@@ -3,6 +3,7 @@ import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -1285,7 +1286,9 @@ function CampaignMonitorModal({ campaignId, currency, initialData, cacheFresh, o
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [ai, setAi] = useState("");
+  const loadVersion = useRef(0);
   const load = async () => {
+    const version = ++loadVersion.current;
     const next = await campaignMonitor(campaignId);
     setData(next); setBudget(next.budgetKnown ? String(next.budget) : ""); onLoaded(next);
   };
@@ -1397,10 +1400,15 @@ export function App() {
     monthRange = useMemo(currentMonthRange, []),
     deferredQuery = useDeferredValue(query);
   useEffect(()=>{setExperimentSeed(undefined);},[activeShop?.id]);
+  const loadVersion = useRef(0);
   const load = async () => {
+    const version = ++loadVersion.current;
     setRefreshing(true);
     try {
-      if (page === "dashboard") setDash(await dashboard(range));
+      if (page === "dashboard") {
+        const result = await dashboard(range);
+        if (version === loadVersion.current) setDash(result);
+      }
       if (page === "orders") {
         const key = `${activeShop?.id || ""}|${range.from}|${range.to}|${deferredQuery}`;
         if (!orderCache.has(key)) orderCache.set(key, orders(range, deferredQuery));
@@ -1413,7 +1421,7 @@ export function App() {
         setInventoryRows(await inventory(deferredQuery, targetDays, leadTimeDays, safetyDays));
       if (page === "settings") setConnection(await connectionStatus());
     } finally {
-      setRefreshing(false);
+      if (version === loadVersion.current) setRefreshing(false);
     }
   };
   useEffect(() => {

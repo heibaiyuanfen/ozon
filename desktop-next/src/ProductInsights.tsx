@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 import { Layers3, Plus, RefreshCw, Search, Target, Trash2 } from "lucide-react";
 import * as echarts from "./charts";
 import {
@@ -36,17 +36,23 @@ export function ProductInsights({
     [page, setPage] = useState(0),
     [detail, setDetail] = useState<ProductDetail | null>(null);
   const deferred = useDeferredValue(query);
+  const requestId = useRef(0);
   const load = async () => {
+    const id = ++requestId.current;
+    try {
     const [p, s] = await Promise.all([
-      productInsights(to, deferred),
+      productInsights(to, ""),
       seriesInsights(to),
     ]);
+    if (id !== requestId.current) return;
     setProducts(p);
     setSeries(s);
+    } catch (e) { if (id === requestId.current) setMessage(String(e)); }
   };
   useEffect(() => {
     void load();
-  }, [to, deferred]);
+    return () => { requestId.current++; };
+  }, [to]);
   const create = async () => {
     setBusy(true);
     setMessage("");
@@ -62,9 +68,9 @@ export function ProductInsights({
       setBusy(false);
     }
   };
-  const rows = tab === "products" ? products : series,
+  const rows = (tab === "products" ? products : series).filter(row => `${row.name} ${row.skus.join(" ")} ${row.offerIds.join(" ")}`.toLowerCase().includes(deferred.trim().toLowerCase())),
     pages = Math.max(1, Math.ceil(rows.length / 20)),
-    visible = rows.slice(page * 20, page * 20 + 20);
+    visible = rows.slice(Math.min(page,pages-1) * 20, Math.min(page,pages-1) * 20 + 20);
   useEffect(() => setPage(0), [tab, deferred]);
   return (
     <section className="card product-insights">
@@ -274,7 +280,19 @@ function ProductDetailModal({
   useEffect(() => {
     const line = echarts.init(document.getElementById("product-detail-trend")!);
     line.setOption({
-      tooltip: { trigger: "axis" },
+      tooltip: {
+        trigger: "axis",
+        formatter: (params: { dataIndex: number; marker: string; seriesName: string; value: number }[]) => {
+          const day = data.trend[params[0]?.dataIndex];
+          if (!day) return "";
+          const tacos = day.revenue > 0
+            ? `${(day.adSpend / day.revenue * 100).toFixed(2)}%`
+            : "—（当日无销售额）";
+          return [day.day, ...params.map((item) =>
+            `${item.marker} ${item.seriesName}：${Number(item.value).toLocaleString()}`),
+            `每日 TACOS：<b>${tacos}</b>`].join("<br/>");
+        },
+      },
       legend: { top: 0 },
       grid: { left: 50, right: 55, top: 40, bottom: 28 },
       xAxis: { type: "category", data: data.trend.map((x) => x.day.slice(5)) },

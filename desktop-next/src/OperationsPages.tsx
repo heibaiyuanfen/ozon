@@ -1,3 +1,4 @@
+import {LocalProfitDetail} from "./LocalProfitDetail";
 import { invoke as invokeMonthlyCost } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import { FinanceSettlementView } from "./FinanceSettlementView";
@@ -2648,6 +2649,7 @@ export function ReportsPage({
           <p>{initialTab === "cross" ? "Finance 入账订单、实际扣费与对应采购成本；银行卡到账尚未核实" : "销售、广告、Finance 与成本缓存的经营预估"}</p>
         </div>
       </header>
+      {initialTab === "summary" && <LocalProfitDetail from={effectiveRange.from} to={effectiveRange.to}/>}
       {initialTab === "weekly" && (
         <div className="month-toolbar">
           <b>本期结束日（周日）</b>
@@ -3173,7 +3175,7 @@ export function ReportsPage({
               <button
                 onClick={() =>
                   openMetric("税额", "本地税费设置", [
-                    ["计税销售额", m(data.revenue), "Seller 下单销售额"],
+                    ["计税销售额", m(Math.max(0, data.salesReturns)), "Finance 销售和退货（净额为负时按零计）"],
                     ["税率", `${data.taxRate}%`, "连接设置中的本地税率"],
                     ["税额", m(data.taxAmount), "计税销售额 × 税率"],
                   ])

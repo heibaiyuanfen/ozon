@@ -621,6 +621,7 @@ export interface BusinessReport {
   }>;
 }
 export interface LocalWeeklyReport {
+  financeSales: number;
   from: string; to: string;
   revenue: number; adRevenue: number; units: number; adUnits: number;
   acos: number | null; tacos: number | null; profit: number | null;

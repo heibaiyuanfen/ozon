@@ -1,3 +1,4 @@
+mod local_profit_detail;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -2597,7 +2598,13 @@ fn delete_shop(
 }
 
 #[tauri::command]
-fn dashboard(range: DateRange, state: State<AppState>) -> Result<DashboardData, String> {
+async fn dashboard(range: DateRange, state: State<'_, AppState>) -> Result<DashboardData, String> {
+    let snapshot = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || dashboard_blocking(range, &snapshot))
+        .await.map_err(|e| format!("看板查询任务异常：{e}"))?
+}
+
+fn dashboard_blocking(range: DateRange, state: &AppState) -> Result<DashboardData, String> {
     let c = db(&state)?;
     let cross_border = active_shop_kind(&state)? == "cross_border";
     let rate = rub_per_cny_for(&state, &c)?;
@@ -6876,7 +6883,7 @@ fn business_report_blocking(range: DateRange, state: &AppState) -> Result<Busine
     let rate = rub_per_cny_for(state, &c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS business_report_cache(range_key TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
     repair_finance_accrual_attribution(&mut c, &range)?;
-    let fingerprint:String=c.query_row("SELECT 'finance-v9-stable-accrual-types|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let fingerprint:String=c.query_row("SELECT 'finance-v10-finance-sales-tax|'||printf('%d|%s|%d|%d|%d|%d',COALESCE((SELECT MAX(id)FROM sync_logs WHERE status='success' AND source IN('Seller Analytics','Seller Finance','Performance Ads')),0),COALESCE((SELECT MAX(updated_at)FROM product_costs),''),(SELECT COUNT(*)FROM sales_daily),(SELECT COUNT(*)FROM delivery_events),(SELECT COUNT(*)FROM finance_transactions),(SELECT COUNT(*)FROM ad_daily))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     let cache_key = format!("{}|{}", range.from, range.to);
     if let Ok(payload) = c.query_row(
         "SELECT payload FROM business_report_cache WHERE range_key=?1 AND fingerprint=?2",
@@ -7097,7 +7104,7 @@ fn business_report_blocking(range: DateRange, state: &AppState) -> Result<Busine
         .parse::<f64>()
         .unwrap_or(10.0)
         .max(0.0);
-    let tax_amount = -revenue.max(0.0) * tax_rate / 100.0;
+    let tax_amount = -sales_returns.max(0.0) * tax_rate / 100.0;
     let payout_fee = -finance_net.max(0.0) * payout_fee_rate / 100.0;
     let settled_profit = if finance_operations > 0 && missing == 0 {
         Some(finance_net - purchase - first_mile)
@@ -14044,6 +14051,7 @@ pub fn run() {
             business_report,
             sync_month_purchase_cost,
             local_weekly_report::local_weekly_report,
+            local_profit_detail::local_profit_detail,
             ozon_monthly::export_ozon_monthly_report,
             ozon_monthly::export_ozon_cross_border_report,
             analytics_detail,

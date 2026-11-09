@@ -43,7 +43,7 @@ pub(crate) fn read(c: &Connection, from: &str, to: &str, divisor: f64) -> Result
     crate::posting_sync::ensure_schema(c)?;
     // Events and analytics cancellations describe the same orders. Never add both.
     let sql = "WITH s AS (SELECT day,sku,SUM(revenue) revenue,SUM(ordered_units) units,SUM(cancellations) cancels,MAX(product_name) name FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY day,sku),
-      e AS (SELECT e.day,e.sku,SUM(e.quantity) cancels,SUM(CASE WHEN r.order_price>0 AND r.quantity=e.quantity THEN e.quantity ELSE 0 END) priced_units,SUM(CASE WHEN r.order_price>0 AND r.quantity=e.quantity THEN e.quantity*r.order_price ELSE 0 END) amount FROM cancellation_events e LEFT JOIN posting_routes r ON e.event_id='posting:'||r.event_id WHERE e.day BETWEEN ?1 AND ?2 GROUP BY e.day,e.sku),
+      e AS (SELECT e.day,e.sku,SUM(e.quantity) cancels,SUM(CASE WHEN r.order_price>0 AND r.quantity=e.quantity THEN e.quantity ELSE 0 END) priced_units,SUM(CASE WHEN r.order_price>0 AND r.quantity=e.quantity THEN e.quantity*r.order_price ELSE 0 END) amount FROM cancellation_events e LEFT JOIN posting_routes r ON r.event_id=CASE WHEN substr(e.event_id,1,8)='posting:' THEN substr(e.event_id,9) END WHERE e.day BETWEEN ?1 AND ?2 GROUP BY e.day,e.sku),
       keys AS (SELECT day,sku FROM s UNION SELECT day,sku FROM e)
       SELECT k.day,k.sku,COALESCE(p.offer_id,''),COALESCE(NULLIF(p.name,''),s.name,''),COALESCE(s.revenue,0),COALESCE(s.units,0),MAX(COALESCE(s.cancels,0),COALESCE(e.cancels,0)),COALESCE(e.priced_units,0),COALESCE(e.amount,0)
       FROM keys k LEFT JOIN s ON s.day=k.day AND s.sku=k.sku LEFT JOIN e ON e.day=k.day AND e.sku=k.sku LEFT JOIN products p ON p.sku=k.sku ORDER BY k.day,k.sku";

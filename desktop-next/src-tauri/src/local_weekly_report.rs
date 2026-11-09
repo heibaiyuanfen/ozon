@@ -10,6 +10,7 @@ pub struct LocalWeeklyReport {
     to: String,
     revenue: f64,
     ad_revenue: f64,
+    finance_sales: f64,
     units: i64,
     ad_units: i64,
     acos: Option<f64>,
@@ -83,7 +84,7 @@ pub async fn local_weekly_report(week_end: String, state: State<'_, AppState>) -
         let profit_note=if profit_report.finance_operations==0 {"本周尚无 Finance 结算数据，请先同步财务".into()}
             else if profit_report.missing_cost_units>0 {format!("本周 {} 件已结算商品缺少采购或头程成本，请完善成本",profit_report.missing_cost_units)}
             else {"沿用月度盈亏：Finance 净额 − 已结算商品采购成本 − 头程成本 − 税费 − 回款手续费；Finance 已含平台广告扣费，不重复扣广告费".into()};
-        Ok(LocalWeeklyReport { from:range.from,to:range.to,revenue,ad_revenue,units,ad_units,
+        Ok(LocalWeeklyReport { from:range.from,to:range.to,revenue,ad_revenue,finance_sales:profit_report.sales_returns,units,ad_units,
             acos:(ad_revenue>0.0).then(||spend/ad_revenue*100.0),
             tacos:(revenue>0.0).then(||spend/revenue*100.0),
             profit:profit_report.after_tax_profit,profit_note,sales_days,ad_days,daily,products,
@@ -91,7 +92,7 @@ pub async fn local_weekly_report(week_end: String, state: State<'_, AppState>) -
                 ProfitBreakdownRow{label:"Finance 结算净额".into(),amount:profit_report.finance_net,note:"含平台销售结算、广告及各项费用".into()},
                 ProfitBreakdownRow{label:"采购成本".into(),amount:-profit_report.purchase_cost,note:"本周已结算商品的采购成本".into()},
                 ProfitBreakdownRow{label:"头程成本".into(),amount:-profit_report.first_mile_cost,note:"本周已结算商品的头程成本".into()},
-                ProfitBreakdownRow{label:"税费".into(),amount:profit_report.tax_amount,note:format!("销售额 × {}%",profit_report.tax_rate)},
+                ProfitBreakdownRow{label:"税费".into(),amount:profit_report.tax_amount,note:format!("Finance 销售和退货 × {}%",profit_report.tax_rate)},
                 ProfitBreakdownRow{label:"回款手续费".into(),amount:profit_report.payout_fee,note:format!("正结算净额 × {}%",profit_report.payout_fee_rate)},
             ] })
     }).await.map_err(|e|format!("本土店周报读取失败：{e}"))?
