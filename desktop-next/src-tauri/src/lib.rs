@@ -14155,6 +14155,7 @@ pub fn run() {
             insights::product_insights,
             insights::product_analysis,
             insights::series_insights,
+            insights::series_daily_tacos,
             insights::save_product_series,
             insights::delete_product_series,
             insights::product_detail,

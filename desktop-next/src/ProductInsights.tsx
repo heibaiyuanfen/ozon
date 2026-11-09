@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { useDeferredValue, useEffect, useRef, useState } from "react";
 import { Layers3, Plus, RefreshCw, Search, Target, Trash2 } from "lucide-react";
 import * as echarts from "./charts";
@@ -35,6 +36,11 @@ export function ProductInsights({
     [message, setMessage] = useState(""),
     [page, setPage] = useState(0),
     [detail, setDetail] = useState<ProductDetail | null>(null);
+  const [dailySeries, setDailySeries] = useState<{id:string;name:string;rows:{day:string;revenue:number|null;spend:number|null;tacos:number|null}[]}|null>(null);
+  const [dailyError,setDailyError] = useState("");
+  const [dailyLoading,setDailyLoading] = useState(false);
+  const loadSeriesDaily = async (row:InsightRow) => { setDailyLoading(true);setDailyError("");setDailySeries(null);try { const result=await invoke<{day:string;revenue:number|null;spend:number|null;tacos:number|null}[]>("series_daily_tacos",{seriesId:Number(row.id),to});setDailySeries({id:row.id,name:row.name,rows:result}); } catch(e) {setDailyError(String(e))} finally {setDailyLoading(false)} };
+  useEffect(()=>{setDailySeries(null);setDailyError("")},[to]);
   const deferred = useDeferredValue(query);
   const requestId = useRef(0);
   const load = async () => {
@@ -203,6 +209,7 @@ export function ProductInsights({
               ))}
               {!row.clusters.length && <small>近 30 天无可识别订单集群</small>}
             </div>
+            {tab === "series" && <button type="button" className="insight-experiment-button" onClick={()=>void loadSeriesDaily(row)}>每日 TACOS</button>}
             <button
               type="button"
               className="insight-experiment-button"
@@ -245,6 +252,9 @@ export function ProductInsights({
         单品广告仅使用可精确归属 SKU
         的真实广告缓存；全店广告不会按比例猜测分摊。
       </p>
+      {dailyLoading && <p className="insight-source">正在读取系列每日数据…</p>}
+      {dailyError && <p role="alert">{dailyError}</p>}
+      {dailySeries && <section className="series-daily-tacos"><div><h3>{dailySeries.name} · 每日 TACOS</h3><button onClick={()=>setDailySeries(null)}>关闭</button></div><p>近 30 天 · 系列当天 SKU 广告费合计 ÷ 系列当天销售额合计。仅使用商品级广告，未归属店铺广告不分摊；缺少广告或销售数据、销售额不大于零时显示“—”。</p><div className="series-daily-scroll"><table><thead><tr><th>日期</th><th>销售额</th><th>广告费</th><th>TACOS</th></tr></thead><tbody>{dailySeries.rows.map(r=><tr key={r.day}><td>{r.day}</td><td>{r.revenue==null?"—":cash(r.revenue,currency)}</td><td>{r.spend==null?"—":cash(r.spend,currency)}</td><td>{r.tacos==null?"—":`${r.tacos.toFixed(2)}%`}</td></tr>)}</tbody></table></div></section>}
       {detail && (
         <ProductDetailModal
           data={detail}

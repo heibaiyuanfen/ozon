@@ -1083,3 +1083,10 @@ pub fn delete_product_series(id: i64, state: State<AppState>) -> Result<(), Stri
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+#[tauri::command]
+pub fn series_daily_tacos(series_id:i64,to:String,state:State<AppState>)->Result<Vec<serde_json::Value>,String>{
+ let c=db(&state)?;ensure(&c)?;
+ let mut q=c.prepare("WITH RECURSIVE days(day) AS (SELECT date(?2,'-29 day') UNION ALL SELECT date(day,'+1 day') FROM days WHERE day<?2), sales AS (SELECT s.day,SUM(s.revenue) revenue FROM sales_daily s JOIN product_series_members m ON m.sku=s.sku WHERE m.series_id=?1 AND s.day BETWEEN date(?2,'-29 day') AND ?2 GROUP BY s.day), ads AS (SELECT a.day,SUM(ABS(a.spend)) spend FROM ad_daily a JOIN product_series_members m ON m.sku=a.sku WHERE m.series_id=?1 AND a.sku<>'' AND a.day BETWEEN date(?2,'-29 day') AND ?2 GROUP BY a.day) SELECT d.day,s.revenue,a.spend FROM days d LEFT JOIN sales s ON s.day=d.day LEFT JOIN ads a ON a.day=d.day ORDER BY d.day DESC").map_err(|e|e.to_string())?;
+ let rows=q.query_map(params![series_id,to],|r|{let revenue:Option<f64>=r.get(1)?;let spend:Option<f64>=r.get(2)?;Ok(serde_json::json!({"day":r.get::<_,String>(0)?,"revenue":revenue,"spend":spend,"tacos":revenue.zip(spend).filter(|(r,_)|*r>0.0).map(|(r,s)|s/r*100.0)}))}).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;Ok(rows)
+}
