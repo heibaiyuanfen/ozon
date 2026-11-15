@@ -8,6 +8,7 @@ export type PageKey =
   | "ad_attribution"
   | "daily_tasks"
   | "contracts"
+  | "procurement_board"
   | "purchase_orders"
   | "freight_quotes"
   | "reports"

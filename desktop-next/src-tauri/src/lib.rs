@@ -40,6 +40,7 @@ mod rets_shipping;
 mod product_master;
 mod product_worker;
 mod purchase_orders;
+mod procurement_board;
 mod secrets;
 mod selection_library;
 mod wb;
@@ -14120,6 +14121,7 @@ pub fn run() {
             product_master::product_master,
             price_center::price_center,
             purchase_orders::purchase_order_command,
+            procurement_board::procurement_board_command,
             freight_quotes::freight_quote_command,
             listing::listing_settings,
             listing::save_listing_settings,
