@@ -1,3 +1,4 @@
+import { downloadProductBarcodeLabels } from "./product-barcode-label";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   Boxes,
@@ -148,6 +149,14 @@ export function ProductsPage({
       setBarcodeBusy(false);
     }
   };
+  const downloadBarcodeLabels = (products: ProductRow[]) => {
+    try {
+      const result = downloadProductBarcodeLabels(products);
+      if (result.skipped) window.alert(`已生成 ${result.count} 个条码标签；跳过 ${result.skipped} 项缺少条码或含不支持字符的记录。`);
+    } catch (error) {
+      window.alert(String(error));
+    }
+  };
   const exportBarcodes = async () => {
     setBarcodeExportBusy(true);
     try {
@@ -222,6 +231,9 @@ export function ProductsPage({
             <Download size={15} />
             {barcodeExportBusy ? "正在导出" : `导出所选条码${selectedSkus.size ? `（${selectedSkus.size}）` : ""}`}
           </button>
+          <button className="outline-button" disabled={!selectedSkus.size} onClick={() => downloadBarcodeLabels(rows.filter(row => selectedSkus.has(row.sku)))}>
+            <Download size={15} /> 下载所选条码标签
+          </button>
           <button className="outline-button" onClick={exportCosts}>
             <Download size={15} />
             导出成本
@@ -291,6 +303,9 @@ export function ProductsPage({
                     </span>
                     <button className="icon-button" title="设置条形码" onClick={() => setBarcodeEditing(row)}>
                       <Barcode size={15} />
+                    </button>
+                    <button className="icon-button" title="下载条码标签（SVG）" aria-label="下载条码标签" disabled={!row.barcodes.length} onClick={() => downloadBarcodeLabels([row])}>
+                      <Download size={15} />
                     </button>
                   </div>
                 </td>
