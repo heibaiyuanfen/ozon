@@ -40,7 +40,10 @@ pub fn local_profit_detail(range:DateRange,state:State<AppState>)->Result<Value,
  let net=row["net"].as_f64().unwrap_or(0.0);
  let tax=if !sku.is_empty() && positive_sales>0.0 {total_tax*financial_sales.get(sku).copied().unwrap_or(0.0).max(0.0)/positive_sales} else {0.0};
  let payout=if !sku.is_empty() && positive_net>0.0 {total_payout*net.max(0.0)/positive_net} else {0.0};
- let profit=row["profit"].as_f64().zip(row["spend"].as_f64()).map(|(p,a)|p+booked-a-tax-payout);
+ // Keep actual Finance deductions in net when there is no SKU statistic to replace them.
+ let spend=row["spend"].as_f64();
+ let booked=if spend.is_some(){booked}else{0.0};
+ let profit=row["profit"].as_f64().map(|p|p+booked-spend.unwrap_or(0.0)-tax-payout);
  row["bookedAds"]=json!(booked);row["tax"]=json!(tax);row["payout"]=json!(payout);row["afterTaxProfit"]=json!(profit);
  }
  Ok(json!({"rows":rows,"details":details,"taxRate":tax_rate,"payoutRate":payout_rate}))

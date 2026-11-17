@@ -22,6 +22,7 @@ pub struct LocalWeeklyReport {
     daily: Vec<WeeklyDailyRow>,
     products: Vec<WeeklyProductRow>,
     profit_breakdown: Vec<ProfitBreakdownRow>,
+    profit_log: Vec<ProfitLogEntry>,
 }
 
 #[derive(Serialize)]
@@ -33,6 +34,55 @@ struct WeeklyProductRow { sku:String, offer_id:String, name:String, revenue:f64,
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfitBreakdownRow { label:String, amount:f64, note:String }
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfitSnapshot {
+    profit: Option<i64>,
+    items: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfitLogEntry {
+    id: i64,
+    recorded_at: String,
+    snapshot: ProfitSnapshot,
+}
+
+fn profit_cents(amount: f64) -> i64 {
+    (amount * 100.0).round() as i64
+}
+
+fn save_profit_log(c: &mut Connection, week_end: &str, current: ProfitSnapshot) -> Result<Vec<ProfitLogEntry>, String> {
+    c.execute_batch("CREATE TABLE IF NOT EXISTS weekly_profit_log (
+        id INTEGER PRIMARY KEY, week_end TEXT NOT NULL, recorded_at TEXT NOT NULL, snapshot TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_weekly_profit_log_week ON weekly_profit_log(week_end,id);")
+        .map_err(|e| e.to_string())?;
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+    let mut history = {
+        let mut stmt = tx.prepare("SELECT id,recorded_at,snapshot FROM weekly_profit_log WHERE week_end=?1 ORDER BY id DESC")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([week_end], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        }).map_err(|e| e.to_string())?;
+        rows.map(|row| {
+            let (id, recorded_at, raw) = row.map_err(|e| e.to_string())?;
+            let snapshot = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            Ok(ProfitLogEntry { id, recorded_at, snapshot })
+        }).collect::<Result<Vec<_>, String>>()?
+    };
+    if history.first().map(|entry| &entry.snapshot) != Some(&current) {
+        let recorded_at = chrono::Utc::now().to_rfc3339();
+        let raw = serde_json::to_string(&current).map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO weekly_profit_log(week_end,recorded_at,snapshot) VALUES(?1,?2,?3)",
+            params![week_end, recorded_at, raw]).map_err(|e| e.to_string())?;
+        history.insert(0, ProfitLogEntry { id: tx.last_insert_rowid(), recorded_at, snapshot: current });
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(history)
+}
 
 fn weekly_details(c:&Connection,range:&DateRange)->Result<(Vec<WeeklyDailyRow>,Vec<WeeklyProductRow>),String> {
     let mut q=c.prepare("WITH RECURSIVE days(day) AS(SELECT ?1 UNION ALL SELECT date(day,'+1 day') FROM days WHERE day<?2), sales AS(SELECT day,SUM(revenue) revenue,SUM(ordered_units) units FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY day), ads AS(SELECT a.day,SUM(ABS(a.spend)) spend,SUM(a.revenue) revenue,SUM(a.orders) units FROM ad_daily a WHERE a.day BETWEEN ?1 AND ?2 AND (a.sku='' OR NOT EXISTS(SELECT 1 FROM ad_daily x WHERE x.day=a.day AND x.sku='')) GROUP BY a.day) SELECT d.day,COALESCE(s.revenue,0),COALESCE(s.units,0),COALESCE(a.revenue,0),COALESCE(a.units,0),COALESCE(a.spend,0) FROM days d LEFT JOIN sales s ON s.day=d.day LEFT JOIN ads a ON a.day=d.day ORDER BY d.day").map_err(|e|e.to_string())?;
@@ -80,14 +130,38 @@ pub async fn local_weekly_report(week_end: String, state: State<'_, AppState>) -
         let (revenue,units,spend,ad_revenue,ad_units,sales_days,ad_days)=weekly_totals(&c,&range)?;
         let (daily,products)=weekly_details(&c,&range)?;
         drop(c);
+        static PROFIT_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = PROFIT_LOG_LOCK.lock().map_err(|e| e.to_string())?;
         let profit_report=business_report_blocking(range.clone(),&snapshot)?;
+        let current = ProfitSnapshot {
+            profit: profit_report.after_tax_profit.map(profit_cents),
+            items: [
+                ("Finance 结算净额", profit_report.finance_net),
+                ("采购成本", -profit_report.purchase_cost),
+                ("头程成本", -profit_report.first_mile_cost),
+                ("税费", profit_report.tax_amount),
+                ("回款手续费", profit_report.payout_fee),
+                ("财务销售和退货（结算组成）", profit_report.sales_returns),
+                ("应计费用（结算组成）", profit_report.accrual_fees),
+                ("其他收入及调整（结算组成）", profit_report.other_adjustments),
+                ("平台佣金（费用明细）", profit_report.commission),
+                ("Finance 广告（费用明细）", profit_report.finance_advertising),
+                ("配送费用（费用明细）", profit_report.delivery_fees),
+                ("退货物流（费用明细）", profit_report.return_fees),
+                ("收单支付（费用明细）", profit_report.acquiring),
+                ("仓储包装（费用明细）", profit_report.storage_packaging),
+                ("罚款与调整（费用明细）", profit_report.penalties_adjustments),
+                ("其他 Finance 项目（费用明细）", profit_report.other_finance_fees),
+            ].into_iter().map(|(name, amount)| (name.to_string(), profit_cents(amount))).collect(),
+        };
+        let profit_log = save_profit_log(&mut db(&snapshot)?, &week_end, current)?;
         let profit_note=if profit_report.finance_operations==0 {"本周尚无 Finance 结算数据，请先同步财务".into()}
             else if profit_report.missing_cost_units>0 {format!("本周 {} 件已结算商品缺少采购或头程成本，请完善成本",profit_report.missing_cost_units)}
             else {"沿用月度盈亏：Finance 净额 − 已结算商品采购成本 − 头程成本 − 税费 − 回款手续费；Finance 已含平台广告扣费，不重复扣广告费".into()};
         Ok(LocalWeeklyReport { from:range.from,to:range.to,revenue,ad_revenue,finance_sales:profit_report.sales_returns,units,ad_units,
             acos:(ad_revenue>0.0).then(||spend/ad_revenue*100.0),
             tacos:(revenue>0.0).then(||spend/revenue*100.0),
-            profit:profit_report.after_tax_profit,profit_note,sales_days,ad_days,daily,products,
+            profit:profit_report.after_tax_profit,profit_note,sales_days,ad_days,daily,products,profit_log,
             profit_breakdown:vec![
                 ProfitBreakdownRow{label:"Finance 结算净额".into(),amount:profit_report.finance_net,note:"含平台销售结算、广告及各项费用".into()},
                 ProfitBreakdownRow{label:"采购成本".into(),amount:-profit_report.purchase_cost,note:"本周已结算商品的采购成本".into()},
@@ -101,6 +175,25 @@ pub async fn local_weekly_report(week_end: String, state: State<'_, AppState>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn weekly_profit_history_keeps_baselines_and_changed_items_by_week() {
+        let mut c = Connection::open_in_memory().unwrap();
+        let baseline = ProfitSnapshot {
+            profit: Some(10000),
+            items: [("采购成本".to_string(), -4000), ("税费".to_string(), -600)].into(),
+        };
+        let first = save_profit_log(&mut c, "2026-11-15", baseline.clone()).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(save_profit_log(&mut c, "2026-11-15", baseline.clone()).unwrap().len(), 1);
+        let mut changed = baseline.clone();
+        changed.profit = Some(9800);
+        changed.items.insert("采购成本".into(), -4200);
+        let history = save_profit_log(&mut c, "2026-11-15", changed.clone()).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].snapshot, changed);
+        assert_eq!(history[1].snapshot, baseline);
+        assert_eq!(save_profit_log(&mut c, "2026-11-08", changed).unwrap().len(), 1);
+    }
     #[test]
     fn calendar_week_has_seven_days_across_month_boundary() {
         let range=week_range("2026-10-04").unwrap();
