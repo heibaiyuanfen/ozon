@@ -57,6 +57,7 @@ import {
   acknowledgeInventoryAlert,
   listShops,
   orders,
+  syncFboOrders,
   openListingSupplierUrl,
   products,
   selectShop,
@@ -799,6 +800,10 @@ function Orders({
   query,
   setQuery,
   crossBorder,
+  pickupOnly,
+  setPickupOnly,
+  range,
+  reload,
 }: {
   rows: OrderRow[];
   currency: string;
@@ -809,11 +814,30 @@ function Orders({
   query: string;
   setQuery: (q: string) => void;
   crossBorder: boolean;
+  pickupOnly: boolean;
+  setPickupOnly: (value: boolean) => void;
+  range: DateRange;
+  reload: () => void;
 }) {
   const [page, setPage] = useState(0),
     pages = Math.max(1, Math.ceil(rows.length / 50)),
     visible = rows.slice(page * 50, page * 50 + 50);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState("");
   useEffect(() => setPage(0), [rows]);
+  async function syncSources() {
+    setSyncing(true);
+    setSyncMessage("");
+    try {
+      await syncFboOrders(range);
+      reload();
+      setSyncMessage(`${range.from} 至 ${range.to} 的发货来源已同步。`);
+    } catch (error) {
+      setSyncMessage(`同步发货来源失败：${String(error)}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
   return (
     <>
       <Header
@@ -835,6 +859,17 @@ function Orders({
         </label>
         <span>匹配 {rows.length} 笔订单</span>
       </div>
+      <div className="order-origin-tools">
+        <label>
+          <input type="checkbox" checked={pickupOnly} onChange={e => setPickupOnly(e.target.checked)} />
+          只看从取货点发货
+        </label>
+        <button className="date-pill" disabled={syncing || refreshing} onClick={() => void syncSources()}>
+          <RefreshCw size={14} />
+          {syncing ? "正在同步…" : "同步发货来源"}
+        </button>
+        <span role="status">{syncMessage || "历史订单可同步当前日期范围，补齐发货来源。"}</span>
+      </div>
       <section className="card table-card">
         <table>
           <thead>
@@ -854,6 +889,7 @@ function Orders({
               <tr key={row.eventId}>
                 <td>
                   <b>{row.postingNumber}</b>
+                  {row.storageType === "pvz" && <span className="badge purple order-pickup-badge">从取货点</span>}
                   <small>{row.offerId || row.sku}</small>
                 </td>
                 <td>
@@ -1383,6 +1419,8 @@ export function App() {
     [dashboardCustomRange, setDashboardCustomRange] = useState<DateRange | null>(null),
     [dash, setDash] = useState(emptyDashboard),
     [orderRows, setOrderRows] = useState<OrderRow[]>([]),
+    [pickupOnly, setPickupOnly] = useState(false),
+    [orderRevision, setOrderRevision] = useState(0),
     [ads, setAds] = useState(emptyAds),
     [refreshing, setRefreshing] = useState(false),
     [query, setQuery] = useState(""),
@@ -1411,9 +1449,13 @@ export function App() {
         if (version === loadVersion.current) setDash(result);
       }
       if (page === "orders") {
-        const key = `${activeShop?.id || ""}|${range.from}|${range.to}|${deferredQuery}`;
-        if (!orderCache.has(key)) orderCache.set(key, orders(range, deferredQuery));
-        setOrderRows(await orderCache.get(key)!);
+        const key = JSON.stringify([activeShop?.id, range.from, range.to, deferredQuery, pickupOnly]);
+        if (!orderCache.has(key)) orderCache.set(key, orders(range, deferredQuery, pickupOnly).catch(error => {
+          orderCache.delete(key);
+          throw error;
+        }));
+        const result = await orderCache.get(key)!;
+        if (version === loadVersion.current) setOrderRows(result);
       }
       if (page === "advertising") setAds(await advertising(range));
       if (page === "products")
@@ -1450,7 +1492,7 @@ export function App() {
   }, []);
   useEffect(() => {
     void load();
-  }, [page, range.from, range.to, activeShop?.id, deferredQuery, targetDays, leadTimeDays, safetyDays]);
+  }, [page, range.from, range.to, activeShop?.id, deferredQuery, pickupOnly, orderRevision, targetDays, leadTimeDays, safetyDays]);
   const changeShop = async (id: string) => {
     await selectShop(id);
     clearReportCache();
@@ -1524,6 +1566,7 @@ export function App() {
             )}{" "}
             {page === "orders" && (
               <Orders
+                key={activeShop?.id}
                 rows={orderRows}
                 currency={currency}
                 days={days}
@@ -1536,6 +1579,13 @@ export function App() {
                 query={query}
                 setQuery={setQuery}
                 crossBorder={activeShop?.kind === "cross_border"}
+                pickupOnly={pickupOnly}
+                setPickupOnly={setPickupOnly}
+                range={range}
+                reload={() => {
+                  orderCache.clear();
+                  setOrderRevision(revision => revision + 1);
+                }}
               />
             )}{" "}
             {page === "fbs" && <FbsPage currency={currency} />}{" "}

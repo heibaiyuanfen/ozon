@@ -21,13 +21,22 @@ type Goods = {
   vendorCode: string;
   currencyIsoCode4217: string;
   discount: number;
+  clubDiscount?: number;
+  editableSizePrice?: boolean;
   sizes: {
     sizeID: number;
     price: number;
     discountedPrice: number;
+    clubDiscountedPrice?: number;
     techSizeName: string;
   }[];
 };
+const priceFields = {
+  price: "原价",
+  discount: "普通折扣",
+  clubDiscount: "WB Club 会员折扣",
+};
+type PriceField = keyof typeof priceFields;
 const defaults: Cost = {
   mode: "overseas",
   purchase: "",
@@ -68,7 +77,8 @@ export function WbPricing({ shopId }: { shopId: string }) {
     [message, setMessage] = useState(""),
     [ready, setReady] = useState(false),
     [updated, setUpdated] = useState("");
-  const [repricing, setRepricing] = useState<Goods | null>(null),
+  const [repricing, setRepricing] = useState<{ goods: Goods; sizeID: number } | null>(null),
+    [field, setField] = useState<PriceField>("price"),
     [newPrice, setNewPrice] = useState(""),
     [task, setTask] = useState<number | null>(null);
   const [edit, setEdit] = useState<number | null>(null),
@@ -126,19 +136,45 @@ export function WbPricing({ shopId }: { shopId: string }) {
     }
   }
   async function submit() {
-    if (!repricing) return;
+    if (!repricing || busy || newPrice === "") return;
+    const { goods: product, sizeID } = repricing;
     setBusy(true);
+    setMessage("");
     try {
       const r = await api<{ data?: { id?: number } }>("submit", {
-        nmID: repricing.nmID,
-        price: Number(newPrice),
-        discount: repricing.discount,
+        nmID: product.nmID,
+        field,
+        value: Number(newPrice),
+        ...(field === "price" && product.editableSizePrice ? { sizeID } : {}),
       });
-      setTask(r.data?.id ?? null);
+      const id = r.data?.id;
+      if (id && id > 0) setTask(id);
       setMessage(
-        `改价已提交，等待 WB 处理。任务 ${r.data?.id ?? "请在后台核对"}`,
+        id && id > 0
+          ? `${priceFields[field]}已提交，等待 WB 处理。任务 #${id}，生效后可重新读取当前价格。`
+          : "WB 已响应，但未返回有效任务编号。请重新读取当前价格或在 WB 后台核对。",
       );
       setRepricing(null);
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function readCurrent(product: Goods, sizeID: number) {
+    setBusy(true);
+    setMessage("");
+    try {
+      const current = await api<Goods>("read", { nmID: product.nmID });
+      setGoods(rows => rows.map(row => row.nmID === current.nmID ? current : row));
+      const size = current.sizes.find(row => row.sizeID === sizeID);
+      if (!size) {
+        setMessage("当前规格已变更，请在更新后的列表中重新选择。");
+        return;
+      }
+      setRepricing({ goods: current, sizeID });
+      setField("price");
+      setNewPrice(String(size.price));
     } catch (e) {
       setMessage(String(e));
     } finally {
@@ -207,7 +243,7 @@ export function WbPricing({ shopId }: { shopId: string }) {
           onChange={(e) => setQuery(e.target.value)}
         />
         <button disabled={busy || !ready} onClick={() => void sync()}>
-          同步商品价格
+          读取全店当前价格
         </button>
       </div>
       {task && (
@@ -217,7 +253,7 @@ export function WbPricing({ shopId }: { shopId: string }) {
       )}
       <p>
         成本按店铺、商品和配送模式分别保存。费用填写单件人民币金额，利润按卖家折后价扣除佣金、广告和损耗预留计算。
-        {updated && `同步时间 ${new Date(updated).toLocaleString("zh-CN")}`}
+        {updated && ` 全店价格上次同步于 ${new Date(updated).toLocaleString("zh-CN")}`}
       </p>
       {message && <p role="status">{message}</p>}
       <div className="wbo-table-wrap">
@@ -227,6 +263,8 @@ export function WbPricing({ shopId }: { shopId: string }) {
               <th>商品 / 货号</th>
               <th>规格</th>
               <th>原价 / 折后价</th>
+              <th>普通折扣</th>
+              <th>WB Club 折扣 / 会员价</th>
               <th>单件利润 CNY</th>
               <th>利润率</th>
               <th>保本价 RUB</th>
@@ -254,6 +292,12 @@ export function WbPricing({ shopId }: { shopId: string }) {
                       <td>
                         {s.price} / {s.discountedPrice} {g.currencyIsoCode4217}
                       </td>
+                      <td>{g.discount == null ? "—" : `${g.discount}%`}</td>
+                      <td>
+                        {g.clubDiscount == null ? "—" : `${g.clubDiscount}%`}
+                        {" / "}
+                        {s.clubDiscountedPrice == null ? "—" : `${s.clubDiscountedPrice} ${g.currencyIsoCode4217}`}
+                      </td>
                       <td>{result?.profit.toFixed(2) ?? "待补成本或汇率"}</td>
                       <td>
                         {result ? `${(result.margin * 100).toFixed(1)}%` : "—"}
@@ -275,13 +319,10 @@ export function WbPricing({ shopId }: { shopId: string }) {
                           设置成本
                         </button>
                         <button
-                          disabled={busy || g.currencyIsoCode4217 !== "RUB"}
-                          onClick={() => {
-                            setRepricing(g);
-                            setNewPrice(String(s.price));
-                          }}
+                          disabled={busy}
+                          onClick={() => void readCurrent(g, s.sizeID)}
                         >
-                          改价
+                          读取现价 / 编辑
                         </button>
                       </td>
                     </tr>
@@ -292,7 +333,15 @@ export function WbPricing({ shopId }: { shopId: string }) {
         </table>
       </div>
       {!goods.length && <p>同步商品后开始核价，Token 需具备价格与折扣权限。</p>}
-      {repricing && (
+      {repricing && (() => {
+        const product = repricing.goods;
+        const size = product.sizes.find(row => row.sizeID === repricing.sizeID)!;
+        const current = field === "price" ? size.price : product[field];
+        const estimated = field === "clubDiscount"
+          ? size.discountedPrice * (1 - Number(newPrice) / 100)
+          : (field === "price" ? Number(newPrice) : size.price)
+            * (1 - Number(field === "discount" ? newPrice : product.discount) / 100);
+        return (
         <div className="wbo-overlay">
           <form
             className="wbo-dialog"
@@ -301,37 +350,41 @@ export function WbPricing({ shopId }: { shopId: string }) {
               void submit();
             }}
           >
-            <h2>确认修改商品 {repricing.nmID}</h2>
-            <p>
-              此操作向 WB 提交该商品全部规格的统一原价，折扣为{" "}
-              {repricing.discount}%。
-            </p>
+            <h2>{product.vendorCode || product.nmID} · 当前价格</h2>
+            <p>WB 商品 {product.nmID} · 规格 {size.techSizeName || size.sizeID}</p>
+            <p>原价 {size.price} · 普通折后价 {size.discountedPrice} · 会员价 {size.clubDiscountedPrice ?? "—"} {product.currencyIsoCode4217}</p>
+            <p>普通折扣 {product.discount == null ? "—" : `${product.discount}%`} · WB Club 折扣 {product.clubDiscount == null ? "—" : `${product.clubDiscount}%`}</p>
             <label>
-              新原价 RUB
+              修改项目
+              <select value={field} disabled={busy} onChange={e => {
+                const nextField = e.target.value as PriceField;
+                const value = nextField === "price" ? size.price : product[nextField];
+                setField(nextField);
+                setNewPrice(value == null ? "" : String(value));
+                setMessage("");
+              }}>
+                {Object.entries(priceFields).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+              </select>
+            </label>
+            <label>
+              新{priceFields[field]}（{field === "price" ? product.currencyIsoCode4217 : "%"}）
               <input
                 required
                 type="number"
-                min="1"
-                max="100000000"
+                disabled={busy}
+                min={field === "price" ? 1 : 0}
+                max={field === "price" ? 100000000 : 99}
                 step="1"
                 value={newPrice}
                 onChange={(e) => setNewPrice(e.target.value)}
               />
             </label>
-            <p>
-              新折后价{" "}
-              {(Number(newPrice) * (1 - repricing.discount / 100)).toFixed(2)}{" "}
-              RUB
-            </p>
-            <p>
-              测算单件利润{" "}
-              {calculate(
-                repricing,
-                Number(newPrice) * (1 - repricing.discount / 100),
-              )?.profit.toFixed(2) ?? "成本未完整设置"}{" "}
-              CNY
-            </p>
-            <button disabled={busy}>确认提交至 WB</button>
+            <p>生效范围 · {field === "price" && product.editableSizePrice ? "当前规格" : "该商品全部规格"}</p>
+            {newPrice !== "" && Number.isFinite(estimated) && (
+              <p>当前规格预计{field === "clubDiscount" ? "会员价" : "普通折后价"} {estimated.toFixed(2)} {product.currencyIsoCode4217}</p>
+            )}
+            {message && <p role="status">{message}</p>}
+            <button disabled={busy || newPrice === "" || Number(newPrice) === current}>确认提交至 WB</button>
             <button
               type="button"
               disabled={busy}
@@ -341,7 +394,8 @@ export function WbPricing({ shopId }: { shopId: string }) {
             </button>
           </form>
         </div>
-      )}
+        );
+      })()}
       {edit != null && (
         <div className="wbo-overlay">
           <form

@@ -2480,3 +2480,20 @@ desktop-next\src-tauri\target\release\ozon-analytics-next.exe
 - cargo check --locked 与 Rust 全量测试通过（265通过、9忽略），含持久化、资料移动、重复单号与版本冲突测试；pnpm build 通过。正式构建及界面验收结果待追加。
 - 正式 build-tauri-release.cmd 构建通过，根目录 EXE 已覆盖并启动；与 Release 均为 36,010,496 字节，修改时间 2026-11-14 00:27:52，SHA256 7397C49D33A8A5AECDC284CBF5FD98787DE01DEBB783A36E8F16F4E87AE6A928。
 - 启动后读取确认 http://tauri.localhost/ 内嵌前端及采购履约看板导航入口。点击工具两次返回 coordinate input geometry is unavailable，刷新窗口后仍失败，未完成看板实际可见与文件/在线表格编辑端到端验收。未创建真实业务链路。
+
+## 2026-11-16 GitHub 51ff1fb 启动器更新
+使用 Ozon_analytics_server 已拉取的 51ff1fb 正式构建。构建前从原工作目录恢复缺失的同名运费 JSON，复用相同前端锁文件对应依赖。TypeScript/Vite 与 Tauri Release 构建通过。原工作目录 EXE 已覆盖，35984896 字节，SHA-256 820D01B7C6D346F4CBB89534FE110B5B4CF1234FE8F7E4369D799B2C27D4CDEE，与构建产物一致。已确认 Ozon ERP 窗口响应，未逐项验收采购功能。
+
+## 2026-11-16 采购看板与单品广告补齐
+从原工作副本 51ff1fb 重建，前次误用旁边的服务器源码目录。正式前端与 Release 构建通过，前端产物已确认包含采购履约看板。单品详情使用历史唯一归属且与货号同名的活动补齐没有 SKU 记录的日期，实际缓存验证 GJJB002-BLACK 11/14 为 858.06 RUB。已覆盖并启动原目录 EXE，36004352 字节，SHA256 CD2B095DB9E46A7417DCAB49114EE1C21FC55261FCB94AA1FE90A6D0F0590573，与产物一致。窗口正常响应，两处功能尚未完成桌面可见验收。
+
+## 2026-11-16 WB 经营总览广告指标
+新增今日、最近 7 天及所选日期的广告费、ACOS、TACOS，按店铺与莫斯科日期缓存推广统计；TACOS 采用已同步 FBS/DBS 有效订单金额。cargo check --locked、WB 8 项测试（1 忽略）、前端及指定 Release 构建通过。根目录 EXE 已覆盖，36082688 字节，SHA256 3382785D5EC1ACB9813AB2DA1A7D6E902B71A1417C4F8CEF8A63AF67E4AF66DE，与正式产物一致。启动确认内嵌前端，已在 WB 经营总览查看三个期间并实际同步，近 7 天覆盖 7/7。
+
+## 2026-11-16 Ozon 订单发货来源
+
+- 用真实货件验证 Ozon FBO 列表和详情的顶层 storage_type。pvz 对应从取货点发货，独立于买家收货方式。
+- 每店数据库按货件号保存 FBO 发货来源。订单中心支持“从取货点”标签、服务端筛选及按当前区间同步来源。
+- cargo check --locked、4 项订单同步测试、订单筛选 SQL 验证和 pnpm build 通过。另有 1 项依赖本地认证响应文件的旧测试按原配置跳过。
+- build-tauri-release.cmd 构建完成，根目录启动器已覆盖、核对并启动。大小 36101120 字节，修改时间 2026-11-16 17:59:22，SHA-256 5C9145B4AF003ED39ECE765AE1FBE3A0A06F2109528DC64BC43415695E1D08E3。
+- 正式版使用内嵌 tauri.localhost 页面。已在默认本土店验收最近 7 天取货点筛选，界面显示匹配 129 条，2026-11-16 的 6 笔 API 样本全部显示“从取货点”标签。

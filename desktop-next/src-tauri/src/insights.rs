@@ -767,9 +767,14 @@ pub fn product_detail(
     let c = db(&state)?;
     ensure(&c)?;
     let (offer_id,name)=c.query_row("SELECT COALESCE(offer_id,''),COALESCE(NULLIF(name,''),(SELECT MAX(product_name) FROM sales_daily WHERE sku=?1),'') FROM products WHERE sku=?1",[&sku],|r|Ok((r.get(0)?,r.get(1)?))).unwrap_or_default();
-    let mut stmt=c.prepare("WITH RECURSIVE days(day)AS(SELECT date(?2,'-29 day')UNION ALL SELECT date(day,'+1 day')FROM days WHERE day<?2)SELECT d.day,COALESCE(s.ordered_units,0),COALESCE(s.revenue,0),COALESCE((SELECT SUM(spend)FROM ad_daily a WHERE a.sku=?1 AND a.day=d.day),0)FROM days d LEFT JOIN sales_daily s ON s.sku=?1 AND s.day=d.day ORDER BY d.day").map_err(|e|e.to_string())?;
+    let mut stmt=c.prepare("WITH RECURSIVE days(day)AS(SELECT date(?2,'-29 day')UNION ALL SELECT date(day,'+1 day')FROM days WHERE day<?2)SELECT d.day,COALESCE(s.ordered_units,0),COALESCE(s.revenue,0),COALESCE((SELECT SUM(a.spend) FROM ad_daily a WHERE a.day=d.day AND (
+      a.sku=?1 OR (a.sku='' AND a.campaign_id<>'' AND ?3<>''
+        AND lower(trim(a.campaign_name))=lower(trim(?3))
+        AND (SELECT COUNT(*) FROM products WHERE lower(trim(offer_id))=lower(trim(?3)))=1
+        AND EXISTS(SELECT 1 FROM ad_daily h WHERE h.campaign_id=a.campaign_id AND h.sku=?1)
+        AND NOT EXISTS(SELECT 1 FROM ad_daily h WHERE h.campaign_id=a.campaign_id AND h.sku<>'' AND (h.day=a.day OR h.sku<>?1))))),0)FROM days d LEFT JOIN sales_daily s ON s.sku=?1 AND s.day=d.day ORDER BY d.day").map_err(|e|e.to_string())?;
     let trend = stmt
-        .query_map(params![sku, to], |r| {
+        .query_map(params![sku, to, offer_id], |r| {
             Ok(ProductTrend {
                 day: r.get(0)?,
                 units: r.get(1)?,

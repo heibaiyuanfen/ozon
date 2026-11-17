@@ -4,7 +4,10 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 
 pub(crate) fn ensure_schema(c: &Connection) -> Result<(), String> {
-    c.execute_batch("CREATE TABLE IF NOT EXISTS posting_sync_coverage(day TEXT NOT NULL,scheme TEXT NOT NULL,status TEXT NOT NULL,synced_at TEXT NOT NULL,error TEXT NOT NULL DEFAULT '',PRIMARY KEY(day,scheme));").map_err(|e|e.to_string())
+    c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS posting_sync_coverage(day TEXT NOT NULL,scheme TEXT NOT NULL,status TEXT NOT NULL,synced_at TEXT NOT NULL,error TEXT NOT NULL DEFAULT '',PRIMARY KEY(day,scheme));
+         CREATE TABLE IF NOT EXISTS fbo_posting_storage(posting_number TEXT PRIMARY KEY, storage_type TEXT NOT NULL);",
+    ).map_err(|e| e.to_string())
 }
 fn coverage(
     c: &Connection,
@@ -56,6 +59,7 @@ fn page(v: &Value) -> Result<(Vec<Value>, bool, String), String> {
     Ok((rows, has_next, cursor))
 }
 pub(crate) fn ingest(c: &Connection, scheme: &str, postings: &[Value]) -> Result<i64, String> {
+    ensure_schema(c)?;
     let tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
     let mut written = 0;
     for posting in postings {
@@ -73,6 +77,16 @@ pub(crate) fn ingest(c: &Connection, scheme: &str, postings: &[Value]) -> Result
             text(posting.get("in_process_at").or(posting.get("created_at")))
         };
         let day = created.get(..10).ok_or("订单缺少有效创建日期")?;
+        if let Some(storage_type) = posting["storage_type"].as_str().filter(|s| !s.is_empty()) {
+            if scheme == "FBO" {
+                tx.execute(
+                    "INSERT INTO fbo_posting_storage(posting_number,storage_type) VALUES(?1,?2)
+                     ON CONFLICT(posting_number) DO UPDATE SET storage_type=excluded.storage_type",
+                    params![number, storage_type],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
         let origin = text(
             posting
                 .pointer("/analytics_data/warehouse_name")
@@ -162,6 +176,31 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch("CREATE TABLE posting_routes(event_id TEXT PRIMARY KEY,day TEXT,sku TEXT,offer_id TEXT,product_name TEXT,quantity INTEGER,scheme TEXT,status TEXT,posting_number TEXT,origin TEXT,destination TEXT,order_price REAL,source TEXT,updated_at TEXT);CREATE TABLE cancellation_events(event_id TEXT PRIMARY KEY,day TEXT,sku TEXT,offer_id TEXT,product_name TEXT,quantity INTEGER,scheme TEXT,source TEXT,updated_at TEXT);CREATE TABLE sales_daily(day TEXT,sku TEXT,product_name TEXT,revenue REAL,ordered_units INTEGER,cancellations INTEGER);CREATE TABLE products(sku TEXT,name TEXT,offer_id TEXT);CREATE TABLE ad_daily(day TEXT,sku TEXT,spend REAL,revenue REAL);").unwrap();
         c
+    }
+    #[test]
+    fn fbo_storage_comes_from_the_posting_and_survives_missing_values() {
+        let c = storage();
+        let mut posting = json!({
+            "posting_number":"p", "status":"awaiting_packaging", "created_at":"2026-11-16T00:00:00Z",
+            "storage_type":"pvz", "analytics_data":{"delivery_type":"PVZ"},
+            "products":[{"sku":1,"quantity":1},{"sku":2,"quantity":1}]
+        });
+        let read = || {
+            c.query_row(
+                "SELECT storage_type FROM fbo_posting_storage WHERE posting_number='p'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        ingest(&c, "FBO", &[posting.clone()]).unwrap();
+        assert_eq!(read(), "pvz");
+        posting["storage_type"] = json!("warehouse");
+        ingest(&c, "FBO", &[posting.clone()]).unwrap();
+        assert_eq!(read(), "warehouse");
+        posting.as_object_mut().unwrap().remove("storage_type");
+        ingest(&c, "FBO", &[posting]).unwrap();
+        assert_eq!(read(), "warehouse");
     }
     #[test]
     fn cancelled_quantities_and_money_survive_resync() {

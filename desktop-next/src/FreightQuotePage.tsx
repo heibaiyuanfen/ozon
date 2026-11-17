@@ -4,7 +4,8 @@ import { FileDown, FilePlus2, Image as ImageIcon, Plus, Save, Trash2, Truck } fr
 import "./freight-quotes.css";
 
 type Item = { imageUrl:string; productName:string; sku:string; packageLengthCm:string; packageWidthCm:string; packageHeightCm:string; unitWeightKg:string; unitsPerCarton:string; cartonLengthCm:string; cartonWidthCm:string; cartonHeightCm:string; cartonWeightKg:string; cartonCount:string; note:string };
-type Form = { inquiryNo:string; title:string; route:string; destination:string; contact:string; note:string; items:Item[] };
+type PurchaseOption = { id: number; orderNo: string; title: string; orderDate: string };
+type Form = { sourceOrderNo?: string; inquiryNo:string; title:string; route:string; destination:string; contact:string; note:string; items:Item[] };
 const key="ozon-freight-quote-draft-v1", today=()=>new Date().toISOString().slice(0,10).replaceAll("-","");
 const emptyItem=():Item=>({imageUrl:"",productName:"",sku:"",packageLengthCm:"",packageWidthCm:"",packageHeightCm:"",unitWeightKg:"",unitsPerCarton:"",cartonLengthCm:"",cartonWidthCm:"",cartonHeightCm:"",cartonWeightKg:"",cartonCount:"",note:""});
 const blank=():Form=>({inquiryNo:`XJ-${today()}-001`,title:"物流询价",route:"中国 → 俄罗斯",destination:"",contact:"",note:"",items:[emptyItem()]});
@@ -13,15 +14,74 @@ const fmt=(value:number,digits=2)=>value?value.toLocaleString("zh-CN",{minimumFr
 
 export function FreightQuotePage(){
   const [form,setForm]=useState<Form>(()=>{try{return JSON.parse(localStorage.getItem(key)||"")||blank()}catch{return blank()}}),[message,setMessage]=useState(""),[busy,setBusy]=useState(false);
+  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOption[]>([]);
+  const [purchaseId, setPurchaseId] = useState("");
+  const [loadingOrders, setLoadingOrders] = useState(true);
+  const [importing, setImporting] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    invoke<{ orders: PurchaseOption[] }>("purchase_order_command", { command: "list", id: null, payload: null })
+      .then(({ orders }) => { if (active) setPurchaseOrders(orders); })
+      .catch(error => { if (active) setMessage("读取采购单失败：" + String(error)); })
+      .finally(() => { if (active) setLoadingOrders(false); });
+    return () => { active = false; };
+  }, []);
+
+  async function importPurchaseOrder() {
+    if (!purchaseId || importing) return;
+    setImporting(true);
+    try {
+      const order = await invoke<{ orderNo: string; title: string; items: Partial<Item>[] }>(
+        "purchase_order_command", { command: "detail", id: Number(purchaseId), payload: null },
+      );
+      const items = order.items.map(source => {
+        const row = emptyItem();
+        for (const field of Object.keys(row) as (keyof Item)[]) {
+          row[field] = String(source[field] ?? "");
+        }
+        return row;
+      }).filter(row => Object.values(row).some(value => value.trim()));
+      if (!items.length) {
+        setMessage("该采购单没有可带入的产品明细。");
+        return;
+      }
+      if (form.items.some(row => Object.values(row).some(value => value.trim())) &&
+          !window.confirm("带入采购单将替换当前产品明细，保留线路、目的地和联系人。继续吗？")) return;
+      setForm(current => ({
+        ...current,
+        sourceOrderNo: order.orderNo,
+        title: order.title.trim() ? order.title + " · 物流询价" : "物流询价",
+        items,
+      }));
+      setMessage("已从采购单 " + order.orderNo + " 带入 " + items.length + " 项产品，请核对实际箱数、箱规和重量。");
+    } catch (error) {
+      setMessage("带入采购单失败：" + String(error));
+    } finally {
+      setImporting(false);
+    }
+  }
   useEffect(()=>{const timer=window.setTimeout(()=>localStorage.setItem(key,JSON.stringify(form)),500);return()=>window.clearTimeout(timer)},[form]);
   const set=<K extends keyof Form>(field:K,value:Form[K])=>setForm(old=>({...old,[field]:value}));
   const item=(index:number,field:keyof Item,value:string)=>setForm(old=>({...old,items:old.items.map((row,i)=>i===index?{...row,[field]:value}:row)}));
   const totals=useMemo(()=>form.items.reduce((sum,row)=>{const cartons=n(row.cartonCount),quantity=n(row.unitsPerCarton)*cartons,weight=n(row.cartonWeightKg)*cartons,volume=n(row.cartonLengthCm)*n(row.cartonWidthCm)*n(row.cartonHeightCm)/1e6*cartons;return{cartons:sum.cartons+cartons,quantity:sum.quantity+quantity,weight:sum.weight+weight,volume:sum.volume+volume}}, {cartons:0,quantity:0,weight:0,volume:0}),[form.items]);
   const density=totals.volume?totals.weight/totals.volume:0;
   const save=()=>{localStorage.setItem(key,JSON.stringify(form));setMessage("配货询价草稿已保存到本机")};
-  const exportExcel=async()=>{setBusy(true);setMessage("正在生成 Excel 并下载产品图片…");try{const result=await invoke<{path:string;embeddedImages:number;totalImages:number}>("freight_quote_command",{command:"export_excel",payload:form});setMessage(`Excel 已导出：${result.path}；成功嵌入 ${result.embeddedImages}/${result.totalImages} 张产品图片。`)}catch(error){setMessage(`导出失败：${String(error)}`)}finally{setBusy(false)}};
+  const exportExcel=async()=>{setBusy(true);setMessage("正在生成 Excel 并下载产品图片…");try{const result=await invoke<{path:string;embeddedImages:number;totalImages:number}>("freight_quote_command",{command:"export_excel",payload:{...form,note:[form.sourceOrderNo ? "来源采购单 "+form.sourceOrderNo : "",form.note].filter(Boolean).join(" · ")}});setMessage(`Excel 已导出：${result.path}；成功嵌入 ${result.embeddedImages}/${result.totalImages} 张产品图片。`)}catch(error){setMessage(`导出失败：${String(error)}`)}finally{setBusy(false)}};
   return <div className="fq-page">
     <header className="fq-hero"><div><span>FREIGHT QUOTATION</span><h1>物流询价配货表</h1><p>整理产品包装与整票货物数据，生成带图片和公式的 Excel 发给物流商询价。</p></div><div><button onClick={()=>{setForm(blank());setMessage("已新建配货表")}}><FilePlus2/>新建</button><button onClick={save}><Save/>保存草稿</button><button className="primary" disabled={busy} onClick={()=>void exportExcel()}><FileDown/>{busy?"正在生成…":"导出 Excel"}</button></div></header>
+    <section className="fq-card fq-meta">
+      <div className="fq-section-title"><FilePlus2/><div><h2>从采购单生成</h2>
+        <p>带入品名、SKU、图片、包装尺寸、重量、装箱率、箱规、箱数及行备注。生成后可按实际发货信息调整。</p></div></div>
+      <div className="fq-meta-grid">
+        <label>已保存的采购单<select value={purchaseId} disabled={loadingOrders || importing} onChange={e=>setPurchaseId(e.target.value)}>
+          <option value="">{loadingOrders ? "正在读取采购单…" : purchaseOrders.length ? "请选择采购单" : "暂无已保存采购单"}</option>
+          {purchaseOrders.map(order=><option key={order.id} value={order.id}>{order.orderNo} · {order.title} · {order.orderDate}</option>)}
+        </select></label>
+        <div className="fq-import-action"><button disabled={!purchaseId || importing || busy} onClick={()=>void importPurchaseOrder()}>{importing?"正在带入…":"带入采购单明细"}</button>
+        {form.sourceOrderNo && <small>来源采购单 {form.sourceOrderNo}</small>}</div>
+      </div>
+    </section>
     <section className="fq-summary">
       <div><span>总箱数</span><b>{fmt(totals.cartons,0)}</b><small>箱</small></div><div><span>总数量</span><b>{fmt(totals.quantity,0)}</b><small>件</small></div><div><span>总重</span><b>{fmt(totals.weight)}</b><small>kg</small></div><div><span>总体积</span><b>{fmt(totals.volume,3)}</b><small>m³</small></div><div><span>总密度</span><b>{fmt(density)}</b><small>kg/m³</small></div>
     </section>

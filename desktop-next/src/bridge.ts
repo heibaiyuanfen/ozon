@@ -124,8 +124,9 @@ export async function dashboard(range: DateRange): Promise<DashboardData> {
 export async function orders(
   range: DateRange,
   query: string,
+  pickupOnly = false,
 ): Promise<OrderRow[]> {
-  if (isTauri()) return invoke("orders", { range, query });
+  if (isTauri()) return invoke("orders", { range, query, pickupOnly });
   const products = ["马克杯收纳网包", "双层加固焊接夹", "男士旅行洗漱包"];
   return Array.from({ length: 14 }, (_, i) => ({
     eventId: `event-${i}`,
@@ -145,7 +146,13 @@ export async function orders(
     estimateBasis: "集群权重预估",
     imageUrl: "",
     supplierUrl: "",
-  }));
+    storageType: i % 8 === 0 ? "pvz" : null,
+  })).filter(row => !pickupOnly || row.storageType === "pvz");
+}
+
+export async function syncFboOrders(range: DateRange): Promise<number> {
+  if (isTauri()) return invoke("sync_fbo_orders", { range });
+  return 0;
 }
 
 export async function advertising(range: DateRange): Promise<AdvertisingData> {

@@ -197,6 +197,7 @@ struct OrderRow {
     product_name: String,
     quantity: i64,
     scheme: String,
+    storage_type: Option<String>,
     status: String,
     amount: f64,
     created_at: String,
@@ -2699,18 +2700,22 @@ fn dashboard_blocking(range: DateRange, state: &AppState) -> Result<DashboardDat
 fn orders(
     range: DateRange,
     query: String,
+    pickup_only: Option<bool>,
     state: State<AppState>,
 ) -> Result<Vec<OrderRow>, String> {
     let c = db(&state)?;
+    posting_sync::ensure_schema(&c)?;
     let cross_border = active_shop_kind(&state)? == "cross_border";
     let rate = rub_per_cny_for(&state, &c)?;
     let needle = format!("%{}%", query.trim());
     let mut stmt = c.prepare(
-        "SELECT r.event_id,r.posting_number,r.sku,r.offer_id,r.product_name,r.quantity,r.scheme,r.status,r.order_price,r.day,r.updated_at,r.origin,r.destination,COALESCE(p.image_url,'')
+        "SELECT r.event_id,r.posting_number,r.sku,r.offer_id,r.product_name,r.quantity,r.scheme,r.status,r.order_price,r.day,r.updated_at,r.origin,r.destination,COALESCE(p.image_url,''),s.storage_type
          FROM posting_routes r LEFT JOIN products p ON p.sku=r.sku
+         LEFT JOIN fbo_posting_storage s ON UPPER(r.scheme) IN ('FBO','FBP') AND s.posting_number=r.posting_number
          WHERE r.day BETWEEN ?1 AND ?2
            AND ((?4=1 AND UPPER(r.scheme) IN ('RFBS','FBP','WHD','FBS','FBO')) OR (?4=0 AND UPPER(r.scheme) IN ('FBO','FBS')))
            AND (?3='%%' OR r.posting_number LIKE ?3 OR r.sku LIKE ?3 OR r.offer_id LIKE ?3 OR r.product_name LIKE ?3 OR r.status LIKE ?3)
+           AND (?5=0 OR s.storage_type='pvz')
          ORDER BY r.day DESC,r.updated_at DESC LIMIT 500"
     ).map_err(|e| e.to_string())?;
     let raw = stmt
@@ -2719,7 +2724,8 @@ fn orders(
                 range.from,
                 range.to,
                 needle,
-                if cross_border { 1 } else { 0 }
+                if cross_border { 1 } else { 0 },
+                pickup_only.unwrap_or(false)
             ],
             |r| {
                 Ok((
@@ -2737,6 +2743,7 @@ fn orders(
                     r.get::<_, String>(11)?,
                     r.get::<_, String>(12)?,
                     r.get::<_, String>(13)?,
+                    r.get::<_, Option<String>>(14)?,
                 ))
             },
         )
@@ -2762,6 +2769,7 @@ fn orders(
                 origin,
                 destination,
                 image_url,
+                storage_type,
             )| {
                 let cache_key =
                     format!("{sku}\u{1f}{origin}\u{1f}{destination}\u{1f}{:.2}", amount);
@@ -2787,6 +2795,7 @@ fn orders(
                     product_name,
                     quantity,
                     scheme: display_scheme,
+                    storage_type,
                     status,
                     amount: display_amount(amount, cross_border, rate),
                     created_at,
@@ -4123,6 +4132,14 @@ fn sync_posting_cancellations(range:&DateRange,state:&AppState)->Result<(),Strin
 async fn sync_fbs_orders(range: DateRange, state: State<'_, AppState>) -> Result<i64, String> {
     let owned = background_state(&state)?;
     tauri::async_runtime::spawn_blocking(move || sync_fbs_orders_blocking(range, &owned))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn sync_fbo_orders(range: DateRange, state: State<'_, AppState>) -> Result<i64, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || sync_fbo_orders_blocking(range, &owned))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -14026,6 +14043,7 @@ pub fn run() {
             save_warehouse_mapping,
             save_fbs_threshold,
             sync_fbs_orders,
+            sync_fbo_orders,
             fbs_orders,
             competitors,
             competitor_alert_settings,

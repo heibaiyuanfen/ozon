@@ -37,6 +37,63 @@ export function WbWorkspace({section,onSection}:{section:WbSection;onSection:(s:
   </div>
 }
 
+const wbOrderAmount=(r:Row)=>value(r.raw.convertedCurrencyCode)==="643"?Number(r.raw.convertedFinalPrice??r.raw.convertedPrice)/100:value(r.raw.currencyCode)==="643"?Number(r.raw.finalPrice??r.raw.price)/100:0;
+
+type AdDay = {day:string; spend:number; attributedSales:number};
+
+function WbAdvertising({shopId,from,to,orders,busy}:{shopId:string;from:string;to:string;orders:Row[];busy:boolean}) {
+  const [ads,setAds]=useState<AdDay[]>([]);
+  const [pending,setPending]=useState(false);
+  const [error,setError]=useState("");
+  useEffect(()=>{
+    let active=true;
+    invoke<AdDay[]>("wb_operations",{action:"ads_list",payload:{shopId}})
+      .then(rows=>{if(active)setAds(rows)})
+      .catch(e=>{if(active)setError(String(e))});
+    return ()=>{active=false};
+  },[shopId]);
+  async function sync(start:string,end:string) {
+    setPending(true);
+    setError("");
+    try {
+      setAds(await invoke<AdDay[]>("wb_operations",{action:"ads_sync",payload:{shopId,from:start,to:end}}));
+    } catch(e) {
+      setError(String(e));
+    } finally {
+      setPending(false);
+    }
+  }
+  const now=today(), week=before(6);
+  const valid=(start:string,end:string)=>!!start&&!!end&&start<=end&&end<=now&&(Date.parse(end)-Date.parse(start))/86400000<=29;
+  const ratio=(spend:number|null,sales:number|null)=>spend!=null&&sales!=null&&sales>0
+    ? (100*spend/sales).toFixed(2)+"%" : "—";
+  return <section className="wbo-panel">
+    <div className="wbo-heading"><h2>广告表现</h2><div className="wbo-actions">
+      <button disabled={pending||busy} onClick={()=>void sync(week,now)}>同步近 7 天广告</button>
+      <button disabled={pending||busy||!valid(from,to)} onClick={()=>void sync(from,to)}>同步所选日期广告</button>
+    </div></div>
+    <p className="wbo-muted">莫斯科日期，近 7 天含今日。广告数据按店铺统计，需要 WB 推广权限。TACOS 使用同期间已同步的全仓 FBS + DBS 有效订单金额，供经营参考，不随仓库和配送筛选变化。</p>
+    {pending&&<p role="status">正在同步广告统计…</p>}
+    {error&&<p role="alert" className="wbo-error">{error}</p>}
+    <div className="wbo-table-wrap"><table><thead><tr><th>期间</th><th>广告费</th><th>ACOS</th><th>TACOS</th><th>广告同步覆盖</th></tr></thead><tbody>
+      {([["今日",now,now],["近 7 天",week,now],["所选日期",from,to]]).map(([label,start,end])=>{
+        const days=Math.round((Date.parse(end)-Date.parse(start))/86400000)+1;
+        const rows=ads.filter(r=>r.day>=start&&r.day<=end);
+        const complete=days>0&&rows.length===days;
+        const spend=complete?rows.reduce((sum,r)=>sum+r.spend,0):null;
+        const attributed=rows.reduce((sum,r)=>sum+r.attributedSales,0);
+        const eligible=orders.filter(r=>r.day>=start&&r.day<=end&&!["cancelled","returning"].includes(r.status));
+        const amounts=eligible.map(wbOrderAmount);
+        const sales=amounts.every(n=>Number.isFinite(n)&&n>0)?amounts.reduce((a,b)=>a+b,0):null;
+        return <tr key={label}><td><b>{label}</b><small>{start} 至 {end}</small></td>
+          <td>{spend==null?"—":money(spend)}</td><td>{ratio(spend,attributed)}</td><td>{ratio(spend,sales)}</td>
+          <td>{days>0?`${rows.length} / ${days} 天`:"日期待选择"}</td></tr>;
+      })}
+    </tbody></table></div>
+    <p className="wbo-muted">ACOS = 广告费 ÷ 广告归因销售额。TACOS = 广告费 ÷ 有效订单金额。广告覆盖不足、订单金额缺失或分母为零时显示“—”。</p>
+  </section>;
+}
+
 function Operations({shopId,section,onSection}:{shopId:string;section:WbSection;onSection:(s:WbSection)=>void}){
   const [data,setData]=useState<Snapshot>(empty),[error,setError]=useState(""),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
   const [from,setFrom]=useState(before(6)),[to,setTo]=useState(today()),[warehouse,setWarehouse]=useState(""),[model,setModel]=useState(""),[status,setStatus]=useState(""),[query,setQuery]=useState(""),[page,setPage]=useState(0);
@@ -56,7 +113,7 @@ function Operations({shopId,section,onSection}:{shopId:string;section:WbSection;
   const returns=useMemo(()=>data.returns.filter(r=>byWh(r,true)&&(allReturns||r.day>=from&&r.day<=to)),[data.returns,warehouse,allReturns,from,to]);
   const reminders=data.returns.filter(r=>byWh(r,true)&&["pickup","expired"].includes(r.status));
   const activeOrders=orders.filter(r=>!["cancelled","returning"].includes(r.status));
-  const amount=(r:Row)=>value(r.raw.convertedCurrencyCode)==="643"?Number(r.raw.convertedFinalPrice??r.raw.convertedPrice)/100:value(r.raw.currencyCode)==="643"?Number(r.raw.finalPrice??r.raw.price)/100:0;
+  const amount=wbOrderAmount;
   const amountMissing=activeOrders.filter(r=>!Number.isFinite(amount(r))||amount(r)===0).length;
   const orderAmount=activeOrders.reduce((s,r)=>s+(Number.isFinite(amount(r))?amount(r):0),0);
   const list=(section==="returns"?returns:orders).filter(r=>(!status||r.status===status)&&(section!=="returns"||!returnSource||r.raw._source===returnSource)&&`${r.id} ${r.raw.id||r.raw.saleID||""} ${r.raw.orderId||""} ${r.raw.srid||""} ${r.raw.article||r.raw.supplierArticle||""} ${r.raw.nmId||r.raw.nm_id||""} ${r.raw.imt_name||r.raw.subjectName||r.raw.subject||""}`.toLowerCase().includes(query.trim().toLowerCase()));
@@ -70,7 +127,7 @@ function Operations({shopId,section,onSection}:{shopId:string;section:WbSection;
     <section className="wbo-toolbar wbo-panel"><label>开始日期<input type="date" value={from} max={to} onChange={e=>setFrom(e.target.value)}/></label><label>结束日期<input type="date" value={to} min={from} max={today()} onChange={e=>setTo(e.target.value)}/></label><label>海外仓<select value={warehouse} onChange={e=>setWarehouse(e.target.value)}><option value="">全部仓库</option>{data.warehouses.map(w=><option key={w.id} value={value(w.raw.id)}>{w.raw.name} · {w.raw.id}</option>)}<option value="unknown">待关联仓库</option></select></label><label>配送模式<select value={model} disabled={section==="returns"} onChange={e=>setModel(e.target.value)}><option value="">FBS + DBS</option><option value="fbs">FBS</option><option value="dbs">DBS</option></select></label><button className="primary" disabled={running||!from||!to||to<from||(Date.parse(to)-Date.parse(from))/86400000>29} onClick={()=>void sync()}><RefreshCw size={16} className={running?"spin":""}/>{running?"正在同步…":"同步订单与退货"}</button><label className="wbo-check"><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/>每小时自动同步</label><small>莫斯科日期 · 订单单次最多 30 天 · 退货独立回补近 90 天 · 自动同步在 WB 工作台打开时运行</small></section>
     {error&&<div className="wbo-error" role="alert">{error}</div>}
     {reminders.length>0&&<div className="wbo-reminder" role="status"><BellRing size={22}/><div><b>{reminders.length} 件退货需要安排取件或核实</b><p>{reminders.slice(0,3).map(r=>`${r.raw.orderId||r.raw.srid||r.raw.id||r.raw.shkId} · ${whName(r.warehouseId)}${(r.local.due||r.raw.expiredDt)?` · 截止 ${r.local.due||value(r.raw.expiredDt).slice(0,10)}`:""}`).join("；")}</p></div><button onClick={()=>{onSection("returns");setStatus("pickup");setAllReturns(true)}}>查看取件清单</button></div>}
-    {section==="daily"?<>
+    {section==="daily"?<> <WbAdvertising shopId={shopId} from={from} to={to} orders={data.orders} busy={running}/>
       <div className="wbo-kpis">{[["周期订单量",orders.length,"平台订单明细",ShoppingBag],["扣除取消 / 拒收后订单额",money(orderAmount),amountMissing?`${amountMissing} 单金额或 RUB 币种缺失`:"订单额，非结算收入",Boxes],["待备货订单",orders.filter(r=>r.status==="awaiting_preparation").length,"按所选仓库安排备货",Truck],["取件 / 超期待核实",reminders.length,"跨日期待办，避免漏取",ArrowDownLeft]].map(([label,v,note,Icon])=>{const I=Icon as typeof Boxes;return <section className="wbo-panel wbo-kpi" key={String(label)}><span><I size={18}/>{String(label)}</span><strong>{String(v)}</strong><small>{String(note)}</small></section>})}</div>
       <div className="wbo-dashboard-grid"><section className="wbo-panel"><div className="wbo-heading"><h2>每日订单趋势</h2><span>{from} 至 {to}</span></div><div className="wbo-trend">{daily.map(([day,d])=><button key={day} title={`${day}：${d.total} 单，取消 / 拒收 ${d.cancelled} 单`} onClick={()=>{setFrom(day);setTo(day);onSection("orders")}}><b>{d.total}</b><span style={{height:`${Math.max(3,d.total/Math.max(1,...daily.map(([,v])=>v.total))*115)}px`}}/><small>{day.slice(5)}</small></button>)}</div><p className="wbo-muted">点击日期查看订单号。汇总基于已同步订单，取消与拒收会随平台状态更新。</p></section><section className="wbo-panel"><div className="wbo-heading"><h2>履约进度</h2><button onClick={()=>onSection("orders")}>进入订单中心 →</button></div><div className="wbo-stages">{Object.entries(stages).map(([s,label])=><button key={s} onClick={()=>{onSection("orders");setTimeout(()=>setStatus(s),0)}}><span className={`wbo-dot ${s}`}/><span>{label}</span><b>{orders.filter(r=>r.status===s).length}</b></button>)}</div></section></div>
       <section className="wbo-panel"><div className="wbo-heading"><h2>每日经营明细</h2><span>按订单创建日归属</span></div><div className="wbo-table-wrap"><table><thead><tr><th>日期</th><th>订单量</th><th>取消 / 拒收</th><th>扣除取消 / 拒收后订单量</th><th>扣除取消 / 拒收后订单额</th><th>查看</th></tr></thead><tbody>{[...daily].reverse().map(([day,d])=><tr key={day}><td>{day}</td><td>{d.total}</td><td>{d.cancelled}</td><td>{d.total-d.cancelled}</td><td>{money(d.amount)}</td><td><button onClick={()=>{setFrom(day);setTo(day);onSection("orders")}}>订单明细</button></td></tr>)}</tbody></table></div></section>

@@ -12,7 +12,7 @@ use tauri::State;
 static SYNCING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 fn schema(c: &Connection) -> Result<(), String> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS wb_ops_rows(shop_id TEXT NOT NULL,kind TEXT NOT NULL,id TEXT NOT NULL,raw TEXT NOT NULL,local TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL,PRIMARY KEY(shop_id,kind,id));
-    CREATE TABLE IF NOT EXISTS wb_ops_sync(shop_id TEXT PRIMARY KEY,running INTEGER NOT NULL DEFAULT 0,message TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL);").map_err(|e|e.to_string())
+    CREATE TABLE IF NOT EXISTS wb_ops_ads(shop_id TEXT NOT NULL,day TEXT NOT NULL,spend REAL NOT NULL,attributed_sales REAL NOT NULL,PRIMARY KEY(shop_id,day)); CREATE TABLE IF NOT EXISTS wb_ops_sync(shop_id TEXT PRIMARY KEY,running INTEGER NOT NULL DEFAULT 0,message TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL);").map_err(|e|e.to_string())
 }
 fn rows(c: &Connection, shop: &str, kind: &str) -> Result<Vec<Value>, String> {
     let mut q=c.prepare("SELECT id,raw,local,updated_at FROM wb_ops_rows WHERE shop_id=?1 AND kind=?2 ORDER BY id").map_err(|e|e.to_string())?;
@@ -475,6 +475,70 @@ fn sync(c: &Connection, shop: &str, token: &str, from: &str, to: &str) -> Result
     .map_err(|e| e.to_string())?;
     Ok(())
 }
+fn ads_snapshot(c: &Connection, shop: &str) -> Result<Value, String> {
+    let mut stmt = c.prepare("SELECT day, spend, attributed_sales FROM wb_ops_ads WHERE shop_id=?1 ORDER BY day")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([shop], |r| Ok(json!({
+        "day": r.get::<_, String>(0)?,
+        "spend": r.get::<_, f64>(1)?,
+        "attributedSales": r.get::<_, f64>(2)?
+    }))).map_err(|e| e.to_string())?;
+    Ok(json!(rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?))
+}
+
+fn sync_ads(c: &mut Connection, shop: &str, token: &str, payload: &Value) -> Result<Value, String> {
+    let parse = |key: &str| NaiveDate::parse_from_str(payload[key].as_str().unwrap_or(""), "%Y-%m-%d")
+        .map_err(|_| "请选择有效日期".to_string());
+    let from = parse("from")?;
+    let to = parse("to")?;
+    let duration = (to - from).num_days();
+    if !(0..=29).contains(&duration) {
+        return Err("广告单次同步最多 30 天".into());
+    }
+    let campaigns = request(token, "advert-api", "/adv/v1/promotion/count", None)?;
+    let groups = array(&campaigns, "adverts")?;
+    let mut ids = std::collections::BTreeSet::new();
+    for group in groups.iter().filter(|g| matches!(g["status"].as_i64(), Some(7 | 9 | 11))) {
+        for entry in array(group, "advert_list")? {
+            if let Some(id) = entry["advertId"].as_i64() {
+                ids.insert(id);
+            }
+        }
+    }
+    let mut daily = vec![(0.0, 0.0); duration as usize + 1];
+    let ids: Vec<_> = ids.iter().map(ToString::to_string).collect();
+    for (index, chunk) in ids.chunks(50).enumerate() {
+        if index > 0 {
+            std::thread::sleep(Duration::from_secs(21));
+        }
+        let path = format!("/adv/v3/fullstats?ids={}&beginDate={from}&endDate={to}", chunk.join(","));
+        let result = request(token, "advert-api", &path, None)?;
+        for campaign in result.as_array().ok_or("广告统计响应不是活动列表")? {
+            for day in array(campaign, "days")? {
+                let date = day["date"].as_str().and_then(|text| text.get(..10))
+                    .and_then(|text| NaiveDate::parse_from_str(text, "%Y-%m-%d").ok())
+                    .ok_or("广告统计缺少有效日期")?;
+                let offset = (date - from).num_days();
+                if (0..=duration).contains(&offset) {
+                    let spend = day["sum"].as_f64().ok_or("广告统计缺少花费")?;
+                    let sales = day["sum_price"].as_f64().ok_or("广告统计缺少归因销售额")?;
+                    daily[offset as usize].0 += spend;
+                    daily[offset as usize].1 += sales;
+                }
+            }
+        }
+    }
+    let tx = c.transaction().map_err(|e| e.to_string())?;
+    for (offset, (spend, sales)) in daily.into_iter().enumerate() {
+        let day = from + chrono::Duration::days(offset as i64);
+        tx.execute("INSERT INTO wb_ops_ads(shop_id,day,spend,attributed_sales) VALUES(?1,?2,?3,?4)
+            ON CONFLICT(shop_id,day) DO UPDATE SET spend=excluded.spend, attributed_sales=excluded.attributed_sales",
+            params![shop, day.to_string(), spend, sales]).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    ads_snapshot(c, shop)
+}
+
 #[tauri::command]
 pub async fn wb_operations(
     action: String,
@@ -483,7 +547,7 @@ pub async fn wb_operations(
 ) -> Result<Value, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let c = wb_shop_center::db(&state)?;
+        let mut c = wb_shop_center::db(&state)?;
         schema(&c)?;
         let shop = payload["shopId"]
             .as_str()
@@ -501,6 +565,17 @@ pub async fn wb_operations(
         }
         match action.as_str() {
             "list" => snapshot(&c, shop),
+            "ads_list" => ads_snapshot(&c, shop),
+            "ads_sync" => {
+                let (_, token) = wb_shop_center::active_token(&c, shop)?;
+                let lock = SYNCING.get_or_init(Default::default);
+                if !lock.lock().map_err(|e| e.to_string())?.insert(shop.to_string()) {
+                    return Err("该店铺正在同步，请稍候".into());
+                }
+                let result = sync_ads(&mut c, shop, &token, &payload);
+                lock.lock().map_err(|e| e.to_string())?.remove(shop);
+                result
+            }
             "sync" => {
                 let (_, token) = wb_shop_center::active_token(&c, shop)?;
                 let inserted = SYNCING

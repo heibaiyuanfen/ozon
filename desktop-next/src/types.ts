@@ -152,6 +152,7 @@ export interface NetDashboardDay {
 }
 
 export interface OrderRow {
+  storageType?: string | null;
   eventId: string;
   postingNumber: string;
   sku: string;
