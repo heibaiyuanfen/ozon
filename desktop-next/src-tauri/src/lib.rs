@@ -6661,6 +6661,96 @@ fn value_number(value: Option<&serde_json::Value>) -> f64 {
         .unwrap_or(0.0)
 }
 
+const FINANCE_RECLASSIFIED: &[(&str, &str)] = &[
+    ("月度仓储费", "MarketplaceServiceStorageItem"),
+    ("越库", "MarketplaceServiceItemCrossdocking"),
+    ("FBO 入库短缺", "MarketplaceServiceItemSupplyInboundCargoShortage"),
+    ("FBO 库内转运", "MarketplaceServiceItemReplenishment"),
+    ("FBO 额外包装", "MarketplaceServiceItemAdditionalPackagingAtWarehouse"),
+    ("FBO 入库超量", "MarketplaceServiceItemSupplyInboundCargoSurplus"),
+    ("客户投诉", "FinesCustomerComplaints"),
+    ("FBS 违规候选：错误率超标", "FinesErrorIndexExceeded"),
+    ("FBS 违规候选：非推荐时段发货", "FinesShipmentNonRecommendedSlot"),
+    ("破损处理（批量损坏口径待确认）", "MarketplaceServiceProcessingSpoilage"),
+    ("Stars 会员服务（会员计划口径待确认）", "ItemAgentServiceStarsMembership"),
+    ("快速收集反馈", "MarketplaceElectronicServiceAcceleratedProductReviews"),
+    ("弹性付款＋提前（服务代码待确认）", ""),
+    ("赔偿及返还", "MarketplaceSellerDecompensationItemByTypeDocOperation"),
+    ("包装材料供应", "MarketplaceServiceItemPackageMaterialsProvision"),
+    ("商品处置", "MarketplaceProductDisposal"),
+    ("首次商品评价收集", "MarketplaceServiceItemCollectingFirstProductReviews"),
+    ("评价管理订阅", "MarketplaceServiceItemProductReviewsManagementSubscription"),
+];
+
+fn classify_finance_fees(c: &Connection, range: &DateRange) -> Result<Vec<FinanceBreakdownRow>, String> {
+    let date = |value: &str| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| "财务明细日期无效".to_string());
+    let (mut next, end) = (date(&range.from)?, date(&range.to)?);
+    let incomplete = "所选日期缺少连续、完整的 Cash Flow 明细，请先同步所选月份。";
+    if next > end {
+        return Err("开始日期晚于结束日期".into());
+    }
+    let mut stmt = c.prepare(
+        "SELECT period_from,period_to,raw_json FROM finance_cash_flow_details
+         WHERE period_to>=?1 AND period_from<=?2 ORDER BY period_from,period_to",
+    ).map_err(|e| e.to_string())?;
+    let periods = stmt.query_map(params![range.from, range.to], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+    }).map_err(|e| e.to_string())?;
+    let mut totals = std::collections::HashMap::<String, (i64, i64)>::new();
+    for period in periods {
+        let (from, to, raw) = period.map_err(|e| e.to_string())?;
+        let (from, to) = (date(&from)?, date(&to)?);
+        if from != next || to < from || to > end {
+            return Err(incomplete.into());
+        }
+        next = to.succ_opt().ok_or(incomplete)?;
+        let row: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        for section in ["services", "others"] {
+            for item in row[section]["items"].as_array().into_iter().flatten() {
+                if let Some(name) = item["name"].as_str().filter(|s| !s.is_empty()) {
+                    let entry = totals.entry(name.to_string()).or_default();
+                    entry.0 += 1;
+                    entry.1 += (value_number(item.get("price")) * 100.0).round() as i64;
+                }
+            }
+        }
+    }
+    if next <= end {
+        return Err(incomplete.into());
+    }
+    Ok(FINANCE_RECLASSIFIED.iter().map(|&(name, code)| {
+        let (rows_count, cents) = totals.get(code).copied().unwrap_or_default();
+        FinanceBreakdownRow {
+            category: "reclassified".into(),
+            category_label: "费用精细分类".into(),
+            name: name.into(),
+            api_name: code.into(),
+            rows_count,
+            amount: cents as f64 / 100.0,
+        }
+    }).collect())
+}
+
+#[tauri::command]
+fn finance_reclassified(range: DateRange, state: State<AppState>) -> Result<Vec<FinanceBreakdownRow>, String> {
+    classify_finance_fees(&db(&state)?, &range)
+}
+
+#[cfg(test)]
+#[test]
+fn reclassified_fees_read_october_cache() {
+    let Ok(path) = std::env::var("OZON_FINANCE_RECLASSIFICATION_TEST_DB") else { return; };
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let range = DateRange { from: "2026-10-01".into(), to: "2026-10-31".into() };
+    let rows = classify_finance_fees(&c, &range).unwrap();
+    for (name, amount) in [("越库", -116292.90), ("FBO 额外包装", -2910.00), ("包装材料供应", -1995.00), ("赔偿及返还", -11561.45)] {
+        assert_eq!(rows.iter().find(|row| row.name == name).unwrap().amount, amount);
+    }
+    let partial = DateRange { from: "2026-10-02".into(), to: range.to };
+    assert!(classify_finance_fees(&c, &partial).is_err());
+}
+
 #[tauri::command]
 fn finance_breakdown(
     range: DateRange,
@@ -14076,6 +14166,7 @@ pub fn run() {
             analytics_detail,
             cross_border_report,
             finance_breakdown,
+            finance_reclassified,
             data_coverage,
             prune_cache,
             missing_cost_rows,

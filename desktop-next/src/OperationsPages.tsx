@@ -2581,9 +2581,14 @@ export function ReportsPage({
   const openBreakdown = async (filter = "") => {
     setMetricDetail(null);
     setDetailFilter(filter);
+    setBreakdown([]);
     setBusy("detail");
     try {
-      setBreakdown(await financeBreakdown(effectiveRange));
+      setBreakdown(filter === "reclassified"
+        ? await invokeMonthlyCost<FinanceBreakdownRow[]>("finance_reclassified", { range: effectiveRange })
+        : await financeBreakdown(effectiveRange));
+    } catch (e) {
+      setMessage(String(e));
     } finally {
       setBusy("");
     }
@@ -3163,6 +3168,9 @@ export function ReportsPage({
               <button onClick={() => openBreakdown("acquiring")}>
                 收单支付<b>{m(data.acquiring)}</b>
               </button>
+              <button disabled={busy === "detail"} onClick={() => openBreakdown("reclassified")}>
+                费用精细分类<b>查看 Ozon Cash Flow</b>
+              </button>
               <button onClick={() => openBreakdown("storage")}>
                 仓储包装<b>{m(data.storagePackaging)}</b>
               </button>
@@ -3352,8 +3360,9 @@ export function ReportsPage({
                   关闭
                 </button>
               </div>
+              {detailFilter === "reclassified" && <p className="metric-detail-source">按 Cash Flow 服务代码分类。此表与盈亏汇总为不同视图，请勿重复加总。</p>}
               {busy === "detail" ? (
-                <div className="empty">正在读取逐笔分类缓存…</div>
+                <div className="empty">正在读取分类缓存…</div>
               ) : (
                 <table>
                   <thead>
@@ -3361,7 +3370,7 @@ export function ReportsPage({
                       <th>费用大类</th>
                       <th>费用项目</th>
                       <th>API 字段/服务名</th>
-                      <th>记录数</th>
+                      <th>{detailFilter === "reclassified" ? "期间明细条数" : "记录数"}</th>
                       <th>金额</th>
                     </tr>
                   </thead>
@@ -3372,7 +3381,7 @@ export function ReportsPage({
                         <td>{x.name}</td>
                         <td>{x.apiName}</td>
                         <td>{x.rowsCount}</td>
-                        <td>{m(x.amount)}</td>
+                        <td>{detailFilter === "reclassified" && !x.rowsCount ? "未查到" : m(x.amount)}</td>
                       </tr>
                     ))}
                   </tbody>

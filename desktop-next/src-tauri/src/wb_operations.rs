@@ -1,6 +1,6 @@
 use crate::{wb_shop_center, AppState};
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
@@ -182,19 +182,15 @@ fn array(v: &Value, key: &str) -> Result<Vec<Value>, String> {
         .cloned()
         .ok_or_else(|| format!("平台响应缺少 {key} 数组，未作为空数据处理"))
 }
-fn sync_orders(
-    c: &Connection,
-    shop: &str,
-    token: &str,
-    model: &str,
-    from: i64,
-    to: i64,
-) -> Result<(), String> {
-    let prefix = if model == "dbs" {
+fn order_path(model: &str) -> &'static str {
+    if model == "dbs" {
         "/api/v3/dbs/orders"
     } else {
         "/api/v3/orders"
-    };
+    }
+}
+fn fetch_orders(token: &str, model: &str, from: i64, to: i64) -> Result<Vec<Value>, String> {
+    let prefix = order_path(model);
     let mut fetched = Vec::new();
     let mut next = 0;
     loop {
@@ -217,6 +213,18 @@ fn sync_orders(
         next = cursor;
         std::thread::sleep(Duration::from_millis(250));
     }
+    Ok(fetched)
+}
+fn sync_orders(
+    c: &Connection,
+    shop: &str,
+    token: &str,
+    model: &str,
+    from: i64,
+    to: i64,
+) -> Result<(), String> {
+    let prefix = order_path(model);
+    let mut fetched = fetch_orders(token, model, from, to)?;
     std::thread::sleep(Duration::from_millis(250));
     fetched.extend(array(
         &request(token, "marketplace-api", &format!("{prefix}/new"), None)?,
@@ -475,20 +483,115 @@ fn sync(c: &Connection, shop: &str, token: &str, from: &str, to: &str) -> Result
     .map_err(|e| e.to_string())?;
     Ok(())
 }
+fn reconcile(c: &Connection, shop: &str, action: &str, input: &Value) -> Result<Value, String> {
+    let date = |key: &str| {
+        NaiveDate::parse_from_str(input[key].as_str().unwrap_or(""), "%Y-%m-%d")
+            .map_err(|_| "请选择有效的核对日期")
+    };
+    let (start, end) = (date("from")?, date("to")?);
+    if end < start || (end - start).num_days() > 29 {
+        return Err("每次请选择 1–30 天".into());
+    }
+    let key = format!("{start}/{end}");
+    if action == "reconciliation_list" {
+        return Ok(c
+            .query_row(
+                "SELECT raw FROM wb_ops_rows WHERE shop_id=?1 AND kind='reconciliation' AND id=?2",
+                params![shop, key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(Value::Null));
+    }
+    let (_, token) = wb_shop_center::active_token(c, shop)?;
+    let zone = FixedOffset::east_opt(10800).unwrap();
+    let from = start
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_local_timezone(zone)
+        .unwrap()
+        .timestamp();
+    let to = end
+        .and_hms_opt(23, 59, 59)
+        .unwrap()
+        .and_local_timezone(zone)
+        .unwrap()
+        .timestamp();
+    let orders = fetch_orders(&token, "fbs", from, to)?;
+    let report = request(
+        &token,
+        "finance-api",
+        "/api/finance/v1/sales-reports/detailed",
+        Some(
+            json!({"dateFrom":start.to_string(),"dateTo":end.to_string(),"limit":100000,"rrdId":0,"period":"weekly"}),
+        ),
+    )?;
+    let empty = Vec::new();
+    let no_matches = Vec::new();
+    let details = if report == json!({}) {
+        &empty
+    } else {
+        report
+            .as_array()
+            .or_else(|| report["data"].as_array())
+            .or_else(|| report.pointer("/data/items").and_then(Value::as_array))
+            .ok_or("周销售报告响应缺少明细数组")?
+    };
+    if details.len() >= 100000 {
+        return Err("财务明细达到读取上限，请缩短日期范围".into());
+    }
+    let mut by_id = std::collections::HashMap::new();
+    for row in details {
+        if let Some(id) = row["srid"].as_str().filter(|id| !id.is_empty()) {
+            by_id.entry(id).or_insert_with(Vec::new).push(row);
+        }
+    }
+    let mut matched = 0;
+    let results: Vec<_> = orders
+        .iter()
+        .map(|order| {
+            let matches = order["rid"]
+                .as_str()
+                .and_then(|id| by_id.get(id))
+                .unwrap_or(&no_matches);
+            matched += usize::from(!matches.is_empty());
+            json!({"order":order,"details":matches})
+        })
+        .collect();
+    let result = json!({"updatedAt":Utc::now().to_rfc3339(),"reportRows":details.len(),"matched":matched,"rows":results});
+    put(c, shop, "reconciliation", &key, &result)?;
+    Ok(result)
+}
+
 fn ads_snapshot(c: &Connection, shop: &str) -> Result<Value, String> {
-    let mut stmt = c.prepare("SELECT day, spend, attributed_sales FROM wb_ops_ads WHERE shop_id=?1 ORDER BY day")
+    let mut stmt = c
+        .prepare(
+            "SELECT day, spend, attributed_sales FROM wb_ops_ads WHERE shop_id=?1 ORDER BY day",
+        )
         .map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([shop], |r| Ok(json!({
-        "day": r.get::<_, String>(0)?,
-        "spend": r.get::<_, f64>(1)?,
-        "attributedSales": r.get::<_, f64>(2)?
-    }))).map_err(|e| e.to_string())?;
-    Ok(json!(rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?))
+    let rows = stmt
+        .query_map([shop], |r| {
+            Ok(json!({
+                "day": r.get::<_, String>(0)?,
+                "spend": r.get::<_, f64>(1)?,
+                "attributedSales": r.get::<_, f64>(2)?
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(json!(rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?))
 }
 
 fn sync_ads(c: &mut Connection, shop: &str, token: &str, payload: &Value) -> Result<Value, String> {
-    let parse = |key: &str| NaiveDate::parse_from_str(payload[key].as_str().unwrap_or(""), "%Y-%m-%d")
-        .map_err(|_| "请选择有效日期".to_string());
+    let parse = |key: &str| {
+        NaiveDate::parse_from_str(payload[key].as_str().unwrap_or(""), "%Y-%m-%d")
+            .map_err(|_| "请选择有效日期".to_string())
+    };
     let from = parse("from")?;
     let to = parse("to")?;
     let duration = (to - from).num_days();
@@ -498,7 +601,10 @@ fn sync_ads(c: &mut Connection, shop: &str, token: &str, payload: &Value) -> Res
     let campaigns = request(token, "advert-api", "/adv/v1/promotion/count", None)?;
     let groups = array(&campaigns, "adverts")?;
     let mut ids = std::collections::BTreeSet::new();
-    for group in groups.iter().filter(|g| matches!(g["status"].as_i64(), Some(7 | 9 | 11))) {
+    for group in groups
+        .iter()
+        .filter(|g| matches!(g["status"].as_i64(), Some(7 | 9 | 11)))
+    {
         for entry in array(group, "advert_list")? {
             if let Some(id) = entry["advertId"].as_i64() {
                 ids.insert(id);
@@ -511,11 +617,16 @@ fn sync_ads(c: &mut Connection, shop: &str, token: &str, payload: &Value) -> Res
         if index > 0 {
             std::thread::sleep(Duration::from_secs(21));
         }
-        let path = format!("/adv/v3/fullstats?ids={}&beginDate={from}&endDate={to}", chunk.join(","));
+        let path = format!(
+            "/adv/v3/fullstats?ids={}&beginDate={from}&endDate={to}",
+            chunk.join(",")
+        );
         let result = request(token, "advert-api", &path, None)?;
         for campaign in result.as_array().ok_or("广告统计响应不是活动列表")? {
             for day in array(campaign, "days")? {
-                let date = day["date"].as_str().and_then(|text| text.get(..10))
+                let date = day["date"]
+                    .as_str()
+                    .and_then(|text| text.get(..10))
                     .and_then(|text| NaiveDate::parse_from_str(text, "%Y-%m-%d").ok())
                     .ok_or("广告统计缺少有效日期")?;
                 let offset = (date - from).num_days();
@@ -565,11 +676,29 @@ pub async fn wb_operations(
         }
         match action.as_str() {
             "list" => snapshot(&c, shop),
+            "reconciliation_list" => reconcile(&c, shop, &action, &payload),
+            "reconciliation_sync" => {
+                let lock = SYNCING.get_or_init(Default::default);
+                if !lock
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .insert(shop.to_string())
+                {
+                    return Err("该店铺正在同步，请稍候".into());
+                }
+                let result = reconcile(&c, shop, &action, &payload);
+                lock.lock().map_err(|e| e.to_string())?.remove(shop);
+                result
+            }
             "ads_list" => ads_snapshot(&c, shop),
             "ads_sync" => {
                 let (_, token) = wb_shop_center::active_token(&c, shop)?;
                 let lock = SYNCING.get_or_init(Default::default);
-                if !lock.lock().map_err(|e| e.to_string())?.insert(shop.to_string()) {
+                if !lock
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .insert(shop.to_string())
+                {
                     return Err("该店铺正在同步，请稍候".into());
                 }
                 let result = sync_ads(&mut c, shop, &token, &payload);
@@ -824,5 +953,47 @@ mod tests {
     #[test]
     fn business_day_is_moscow() {
         assert_eq!(moscow_day("2026-10-23T22:30:00Z"), "2026-10-24");
+    }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "Requires a configured WB workspace and live API access"]
+fn live_reconciliation() {
+    let path = std::env::var("WB_RECONCILIATION_DB").expect("Set WB_RECONCILIATION_DB");
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    schema(&c).unwrap();
+    let shop: String = c.query_row(
+        "SELECT s.id FROM wb_shops s JOIN wb_api_credentials a ON a.shop_id=s.id WHERE s.seller_type='cross_border' AND a.status='active' ORDER BY a.created_at DESC LIMIT 1",
+        [], |r| r.get(0),
+    ).unwrap();
+    let input = json!({"from":std::env::var("WB_RECONCILIATION_FROM").unwrap(),"to":std::env::var("WB_RECONCILIATION_TO").unwrap()});
+    let result = reconcile(&c, &shop, "reconciliation_sync", &input).unwrap();
+    assert_eq!(
+        result,
+        reconcile(&c, &shop, "reconciliation_list", &input).unwrap()
+    );
+    let orders = result["rows"].as_array().unwrap();
+    assert!(!orders.is_empty());
+    for item in orders {
+        for row in item["details"].as_array().unwrap() {
+            assert_eq!(item["order"]["rid"], row["srid"]);
+        }
+    }
+    println!(
+        "orders={} matched={} finance={}",
+        orders.len(),
+        result["matched"],
+        result["reportRows"]
+    );
+    if let Some(item) = orders
+        .iter()
+        .find(|item| item["order"]["id"] == 6257835101_i64)
+    {
+        println!(
+            "target converted={} linked={}",
+            item["order"]["convertedPrice"],
+            item["details"].as_array().unwrap().len()
+        );
     }
 }
