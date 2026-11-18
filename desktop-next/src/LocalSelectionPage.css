@@ -1,0 +1,51 @@
+.local-selection-settings {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.local-selection-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-basis: 100%;
+}
+.local-selection-settings label {
+  display: grid;
+  gap: 5px;
+}
+.local-selection-settings .local-selection-checkbox {
+  display: flex;
+  align-items: center;
+}
+.local-selection-settings p {
+  flex-basis: 100%;
+  margin: 0;
+}
+.local-selection-table {
+  overflow-x: auto;
+}
+.local-selection-table table {
+  width: 100%;
+  min-width: 1060px;
+}
+.local-selection-table th, .local-selection-table td {
+  padding: 8px;
+  white-space: nowrap;
+}
+.local-selection input:not([type="checkbox"]) {
+  width: 100%;
+  min-width: 68px;
+  padding: 6px;
+  border: 1px solid var(--border, #cbd5e1);
+  border-radius: 6px;
+  color: inherit;
+  background: transparent;
+}
+.local-selection-settings input:not([type="checkbox"]) {
+  width: 110px;
+}
+.local-selection-table td:nth-child(1) { min-width: 195px; }
+.local-selection-table td:nth-child(2) { min-width: 240px; }

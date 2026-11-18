@@ -6,6 +6,7 @@ import "./purchase-orders.css";
 type Item={productName:string;sku:string;imageUrl:string;unitPrice:string;packageLengthCm:string;packageWidthCm:string;packageHeightCm:string;unitWeightKg:string;unitsPerCarton:string;cartonWeightKg:string;cartonLengthCm:string;cartonWidthCm:string;cartonHeightCm:string;cartonCount:string;quantity:string;unit:string;note:string};
 type Form={orderNo:string;title:string;operator:string;orderDate:string;expectedShipAt:string;factoryAddress:string;approver:string;note:string;items:Item[]};
 type Row={id:number;orderNo:string;title:string;operator:string;orderDate:string;status:string;itemCount:number;updatedAt:string};
+export type { Item as PurchaseOrderItem, Form as PurchaseOrderForm, Row as PurchaseOrderSummary };
 const day=()=>new Date().toISOString().slice(0,10),emptyItem=():Item=>({productName:"",sku:"",imageUrl:"",unitPrice:"",packageLengthCm:"",packageWidthCm:"",packageHeightCm:"",unitWeightKg:"",unitsPerCarton:"",cartonWeightKg:"",cartonLengthCm:"",cartonWidthCm:"",cartonHeightCm:"",cartonCount:"",quantity:"",unit:"个",note:""});
 const blank=():Form=>({orderNo:`CG-${day().replaceAll("-","")}-001`,title:"采购清单",operator:"",orderDate:day(),expectedShipAt:"",factoryAddress:"",approver:"",note:"",items:[emptyItem()]});
 const n=(s:string)=>{const x=Number(s);return Number.isFinite(x)?x:0},money=(v:number)=>`¥${v.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2})}`;

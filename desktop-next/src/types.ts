@@ -32,6 +32,8 @@ export type PageKey =
   | "differentiation"
   | "product_analysis"
   | "selection_library"
+  | "local_selection"
+  | "new_product_profit"
   | "delivery_fee_query"
   | "product_transfer"
   | "competitor_shop"

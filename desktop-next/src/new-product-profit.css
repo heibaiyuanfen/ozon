@@ -1,0 +1,64 @@
+.new-product-profit .profit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 9px;
+}
+.new-product-profit .profit-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 39px;
+  padding: 0 13px;
+  border: 1px solid #d8dfeb;
+  border-radius: 9px;
+  background: #fff;
+  color: #34445e;
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.new-product-profit .profit-button svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.new-product-profit .profit-button:hover:not(:disabled) {
+  background: #edf3ff;
+  border-color: #b9cdf8;
+}
+.new-product-profit .profit-button-primary {
+  background: #2260d5;
+  border-color: #2260d5;
+  color: #fff;
+}
+.new-product-profit .profit-button-primary:hover:not(:disabled) {
+  background: #194eaf;
+  border-color: #194eaf;
+}
+.new-product-profit .profit-button-danger {
+  color: #b42318;
+}
+.new-product-profit .profit-button-danger:hover:not(:disabled) {
+  background: #fff1f0;
+  border-color: #f1b5b1;
+}
+.new-product-profit .profit-button-danger-solid {
+  background: #b42318;
+  border-color: #b42318;
+  color: #fff;
+}
+.new-product-profit .profit-button-danger-solid:hover:not(:disabled) {
+  background: #912018;
+  border-color: #912018;
+}
+.new-product-profit .profit-button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+.new-product-profit .profit-button:focus-visible {
+  outline: 2px solid #2260d5;
+  outline-offset: 2px;
+}
