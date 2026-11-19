@@ -12,17 +12,25 @@ import {
   seriesInsights,
   updateProductPrice,
 } from "./bridge";
-import type { InsightRow, ProductDetail, ProductPrice } from "./types";
+import type { DateRange, InsightRow, ProductDetail, ProductPrice } from "./types";
 import "./product-insights.css";
 import { openExperiment } from "./AdExperimentCenter";
 
 const cash = (value: number, currency: string) =>
   `${currency === "CNY" ? "¥" : "₽"}${value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`;
 
+type ProductMetrics = { units: number; revenue: number; spend: number; returns: number | null; cancellations: number | null };
+
 export function ProductInsights({
   to,
   currency,
+  onOpenOverview,
+  range,
+  refreshing,
 }: {
+  range: DateRange;
+  refreshing: boolean;
+  onOpenOverview?: (kind: "products" | "series", row: InsightRow) => void;
   to: string;
   currency: string;
 }) {
@@ -36,6 +44,19 @@ export function ProductInsights({
     [message, setMessage] = useState(""),
     [page, setPage] = useState(0),
     [detail, setDetail] = useState<ProductDetail | null>(null);
+  const [metrics, setMetrics] = useState<Record<string, ProductMetrics>>({});
+  const [metricsError, setMetricsError] = useState("");
+  useEffect(() => {
+    setMetrics({});
+    setMetricsError("");
+    if (refreshing) return;
+    let active = true;
+    void invoke<Record<string, ProductMetrics>>("overview_product_metrics", { range })
+      .then((result) => { if (active) setMetrics(result); })
+      .catch((error) => { if (active) setMetricsError(String(error)); });
+    return () => { active = false; };
+  }, [range.from, range.to, refreshing]);
+
   const [dailySeries, setDailySeries] = useState<{id:string;name:string;rows:{day:string;revenue:number|null;spend:number|null;tacos:number|null}[]}|null>(null);
   const [dailyError,setDailyError] = useState("");
   const [dailyLoading,setDailyLoading] = useState(false);
@@ -43,11 +64,12 @@ export function ProductInsights({
   useEffect(()=>{setDailySeries(null);setDailyError("")},[to]);
   const deferred = useDeferredValue(query);
   const requestId = useRef(0);
+  const includeInactive = Boolean(onOpenOverview);
   const load = async () => {
     const id = ++requestId.current;
     try {
     const [p, s] = await Promise.all([
-      productInsights(to, ""),
+      productInsights(to, "", includeInactive),
       seriesInsights(to),
     ]);
     if (id !== requestId.current) return;
@@ -58,7 +80,7 @@ export function ProductInsights({
   useEffect(() => {
     void load();
     return () => { requestId.current++; };
-  }, [to]);
+  }, [to, includeInactive]);
   const create = async () => {
     setBusy(true);
     setMessage("");
@@ -83,7 +105,7 @@ export function ProductInsights({
       <div className="section-heading">
         <div>
           <h2>单品与产品系列经营</h2>
-          <p>同时掌握日、周、月销量、销售额、广告以及订单集群分布</p>
+          <p>{range.from} 至 {range.to} · 与经营总览使用同一日期范围</p>
         </div>
         <div className="tabs">
           <button
@@ -106,7 +128,7 @@ export function ProductInsights({
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索货号或 SKU"
+            placeholder="搜索名称、货号或 SKU"
           />
         </label>
         <div className="series-builder">
@@ -126,20 +148,27 @@ export function ProductInsights({
         </div>
       </div>
       {message && <div className="sync-message">{message}</div>}
-      <div className="insight-list">
-        {visible.map((row) => (
-          <article
+      {metricsError && <div role="alert" className="sync-message">读取商品指标失败：{metricsError}</div>}
+      <div className="insight-table-scroll">
+        <table className="insight-table">
+          <thead><tr>{["选择", "商品 / 系列", "平均售价", "销量", "销售额", "广告花费", "TACOS", "取消件数", "退货件数", "集群分布（近30天）", "操作"].map((label) => <th scope="col" key={label}>{label}</th>)}</tr></thead>
+          <tbody>
+        {visible.map((row) => {
+          const members = row.skus.flatMap((sku) => Object.hasOwn(metrics, sku) ? [metrics[sku]] : []);
+          const sum = (key: keyof ProductMetrics) => members.some((item) => item[key] != null) ? members.reduce((total, item) => total + (item[key] ?? 0), 0) : null;
+          const units = sum("units"), revenue = sum("revenue"), spend = sum("spend");
+          return <tr
             key={row.id}
-            className="insight-row"
             onDoubleClick={() =>
               tab === "products" && productDetail(row.id, to).then(setDetail)
             }
             title={tab === "products" ? "双击打开单品经营看板" : undefined}
           >
-            {tab === "products" ? (
+            <td>{tab === "products" ? (
               <label className="series-select">
                 <input
                   type="checkbox"
+                  aria-label={`选择 ${row.name || row.id}`}
                   checked={selected.includes(row.id)}
                   onChange={(e) =>
                     setSelected(
@@ -161,11 +190,11 @@ export function ProductInsights({
               >
                 <Trash2 size={14} />
               </button>
-            )}
-            <div className="insight-name">
+            )}</td>
+            <td><div className="insight-name">
               <Layers3 size={17} />
               <span>
-                <b>{row.offerIds.filter(Boolean).join("、") || "无货号"}</b>
+                <b>{row.name || row.offerIds.filter(Boolean).join("、") || row.id}</b>
                 <small>
                   {row.offerIds.filter(Boolean).join("、") ||
                     row.skus.join("、")}{" "}
@@ -173,30 +202,15 @@ export function ProductInsights({
                 </small>
               </span>
             </div>
-            <div className="period-metrics">
-              <span>
-                今日<b>{row.dayUnits} 件</b>
-                <small>
-                  {cash(row.dayRevenue, currency)} · 广告{" "}
-                  {cash(row.dayAdSpend, currency)}
-                </small>
-              </span>
-              <span>
-                近 7 天<b>{row.weekUnits} 件</b>
-                <small>
-                  {cash(row.weekRevenue, currency)} · 广告{" "}
-                  {cash(row.weekAdSpend, currency)}
-                </small>
-              </span>
-              <span>
-                近 30 天<b>{row.monthUnits} 件</b>
-                <small>
-                  {cash(row.monthRevenue, currency)} · 广告{" "}
-                  {cash(row.monthAdSpend, currency)}
-                </small>
-              </span>
-            </div>
-            <div className="cluster-share">
+            </td>
+            <td>{units && revenue != null ? cash(revenue / units, currency) : "—"}</td>
+            <td>{units ?? "—"}</td>
+            <td>{revenue == null ? "—" : cash(revenue, currency)}</td>
+            <td>{spend == null ? "—" : cash(spend, currency)}</td>
+            <td>{revenue && revenue > 0 && spend != null ? `${(spend / revenue * 100).toFixed(2)}%` : "—"}</td>
+            <td>{sum("cancellations") ?? "—"}</td>
+            <td>{sum("returns") ?? "—"}</td>
+            <td>            <div className="cluster-share">
               <b>集群分布</b>
               {row.clusters.slice(0, 4).map((cluster) => (
                 <span key={cluster.cluster}>
@@ -209,6 +223,9 @@ export function ProductInsights({
               ))}
               {!row.clusters.length && <small>近 30 天无可识别订单集群</small>}
             </div>
+            </td>
+            <td><div className="insight-row-actions">
+            {onOpenOverview && <button type="button" className="insight-experiment-button" onClick={() => onOpenOverview(tab, row)}>查看总览</button>}
             {tab === "series" && <button type="button" className="insight-experiment-button" onClick={()=>void loadSeriesDaily(row)}>每日 TACOS</button>}
             <button
               type="button"
@@ -224,8 +241,11 @@ export function ProductInsights({
               <Target size={15} />
               创建实验
             </button>
-          </article>
-        ))}
+            </div></td>
+          </tr>;
+        })}
+          </tbody>
+        </table>
       </div>
       {rows.length > 20 && (
         <div className="table-pagination">
@@ -249,8 +269,7 @@ export function ProductInsights({
         </div>
       )}
       <p className="insight-source">
-        单品广告仅使用可精确归属 SKU
-        的真实广告缓存；全店广告不会按比例猜测分摊。
+        广告按 SKU 归因。取消和退货优先使用 SKU 事件件数，缺少对应事件时使用销售统计；无可用记录显示「—」。
       </p>
       {dailyLoading && <p className="insight-source">正在读取系列每日数据…</p>}
       {dailyError && <p role="alert">{dailyError}</p>}

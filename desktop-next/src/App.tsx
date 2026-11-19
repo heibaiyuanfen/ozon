@@ -7,6 +7,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import type { InsightRow } from "./types";
 import "./performance.css";
 import "./layout-fixes.css";
 import NetDashboard from "./NetDashboard";
@@ -543,6 +545,34 @@ function TrendChart({
   return <div id="trend-chart" className="chart" />;
 }
 
+type OverviewScope = { kind: "products" | "series"; id: string; name: string };
+type OverviewScopeDay = DashboardData["trend"][number] & {
+  adRevenue: number; adOrders: number; clicks: number; impressions: number;
+  returns: number | null; cancellations: number | null; hasSales: boolean; hasAds: boolean;
+};
+
+function ScopedOverviewMetrics({ rows, currency }: { rows: OverviewScopeDay[]; currency: string }) {
+  const total = (metric: "units" | "revenue" | "adSpend" | "adRevenue" | "adOrders" | "clicks" | "impressions" | "returns" | "cancellations") =>
+    rows.reduce((sum, row) => sum + (row[metric] ?? 0), 0);
+  const hasSales = rows.some((row) => row.hasSales);
+  const hasAds = rows.some((row) => row.hasAds);
+  const revenue = total("revenue"), units = total("units"), spend = total("adSpend"), adRevenue = total("adRevenue");
+  const ratio = (ready: boolean, numerator: number, denominator: number) => pct(ready && denominator > 0 ? numerator / denominator * 100 : null);
+  return <div className="metric-strip">
+    <Stat tone="blue" label="销售额" value={hasSales ? money(revenue, currency) : "—"} note="所选范围" />
+    <Stat tone="green" label="销量" value={hasSales ? String(units) : "—"} note="下单件数" />
+    <Stat tone="blue" label="平均售价" value={hasSales && units > 0 ? money(revenue / units, currency) : "—"} note="销售额 ÷ 销量" />
+    <Stat tone="orange" label="广告花费" value={hasAds ? money(spend, currency) : "—"} note="商品级归因" />
+    <Stat tone="purple" label="广告销售额" value={hasAds ? money(adRevenue, currency) : "—"} note="商品级归因" />
+    <Stat tone="purple" label="广告订单量" value={hasAds ? String(total("adOrders")) : "—"} note="商品级归因" />
+    <Stat tone="purple" label="ACOS" value={ratio(hasAds, spend, adRevenue)} note="广告花费 ÷ 广告销售额" />
+    <Stat tone="purple" label="TACOS" value={ratio(hasAds && hasSales, spend, revenue)} note="广告花费 ÷ 销售额" />
+    <Stat tone="purple" label="CTR" value={ratio(hasAds, total("clicks"), total("impressions"))} note="点击 ÷ 曝光" />
+    <Stat tone="green" label="退货件数" value={rows.some((row) => row.returns != null) ? String(total("returns")) : "—"} note="SKU 事件 / 销售统计" />
+    <Stat tone="green" label="取消件数" value={rows.some((row) => row.cancellations != null) ? String(total("cancellations")) : "—"} note="SKU 事件 / 销售统计" />
+  </div>;
+}
+
 function Dashboard({
   data,
   currency,
@@ -574,6 +604,31 @@ function Dashboard({
     [forceSync, setForceSync] = useState(false),
     [syncingAll, setSyncingAll] = useState(false),
     [syncMessage, setSyncMessage] = useState("");
+  const [scope, setScope] = useState<OverviewScope | null>(null);
+  const [scopeReport, setScopeReport] = useState<{ key: string; rows?: OverviewScopeDay[]; error?: string } | null>(null);
+  const trendSection = useRef<HTMLElement>(null);
+  const scopePicker = useRef<HTMLDivElement>(null);
+  const scopeKey = JSON.stringify([scope?.kind, scope?.id, range.from, range.to]);
+  useEffect(() => {
+    if (!scope || refreshing || syncingAll) return;
+    let current = true;
+    setScopeReport(null);
+    void invoke<OverviewScopeDay[]>("overview_scope_daily", {
+      range: { from: range.from, to: range.to },
+      sku: scope.kind === "products" ? scope.id : null,
+      seriesId: scope.kind === "series" ? Number(scope.id) : null,
+    }).then((rows) => {
+      if (current) setScopeReport({ key: scopeKey, rows });
+    }).catch((error) => {
+      if (current) setScopeReport({ key: scopeKey, error: String(error) });
+    });
+    return () => { current = false; };
+  }, [scope, scopeKey, range.from, range.to, refreshing, syncingAll]);
+  const report = !refreshing && !syncingAll && scopeReport?.key === scopeKey ? scopeReport : null;
+  const openOverview = (kind: OverviewScope["kind"], row: InsightRow) => {
+    setScope({ kind, id: row.id, name: row.name || row.offerIds[0] || row.id });
+    trendSection.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+  };
   useEffect(() => setSyncRange(range), [range.from, range.to]);
   const today = new Date().toISOString().slice(0, 10),
     syncRangeValid = !!syncRange.from && !!syncRange.to && syncRange.from <= syncRange.to && syncRange.to <= today;
@@ -625,6 +680,7 @@ function Dashboard({
         }
       />
       {syncMessage && <div className={`dashboard-sync-message ${syncMessage.includes("失败") ? "error" : ""}`}>{syncMessage}</div>}
+      {!scope && <>
       <div className="hero-grid">
         <section className="card summary">
           <div className="card-title">
@@ -696,18 +752,32 @@ function Dashboard({
           expense 等真实花费字段。
         </div>
       )}
-      <section className="card trend-card">
+      </>}
+      <section className="card trend-card" ref={trendSection} aria-label="业绩趋势">
         <div className="section-heading">
           <div>
-            <h2>业绩趋势</h2>
+            <h2>{scope ? `${scope.kind === "series" ? "系列" : "单品"} · ${scope.name}` : "业绩趋势 · 整店"}</h2>
             <p>
-              销售额、销量与广告花费的日度变化
+              {scope ? `${range.from} 至 ${range.to}${scope.kind === "products" ? ` · SKU ${scope.id}` : ""} · 商品级广告归因` : "销售额、销量与广告花费的日度变化"}
             </p>
           </div>
           <div className="trend-actions">
+            <div className="tabs">
+              {scope && <button type="button" onClick={() => setScope(null)}>返回整店</button>}
+              <button type="button" onClick={() => scopePicker.current?.scrollIntoView({ block: "start", behavior: "smooth" })}>选择单品或系列</button>
+            </div>
             <RangeTabs days={days} setDays={setDays} monthOffset={monthOffset} setMonthOffset={setMonthOffset} customRange={customRange} setCustomRange={setCustomRange} />
           </div>
         </div>
+        {scope ? (
+          report?.error ? <div className="error-banner" role="alert">读取看板失败：{report.error}</div> :
+          report?.rows ? <>
+            <ScopedOverviewMetrics rows={report.rows} currency={currency} />
+            {report.rows.some((row) => row.hasSales || row.hasAds || row.returns != null || row.cancellations != null)
+              ? <TrendChart data={report.rows} />
+              : <p role="status">所选日期内暂无该单品或系列的销售和广告数据。</p>}
+          </> : <p role="status">正在读取看板数据…</p>
+        ) : <>
         <div className="metric-strip">
           <Stat
             tone="blue selected-stat"
@@ -735,7 +805,9 @@ function Dashboard({
           />
         </div>
         <TrendChart data={data.trend} />
+        </>}
       </section>
+      {!scope && <>
       <div className="health-grid">
         <section className="card health-card">
           <div className="card-title">
@@ -787,7 +859,10 @@ function Dashboard({
         </section>
       </div>
       <NetDashboard days={data.netDaily ?? []} to={range.to} currency={currency} />
-      <ProductInsights to={to} currency={currency} />
+      </>}
+      <div ref={scopePicker}>
+        <ProductInsights to={to} currency={currency} onOpenOverview={openOverview} range={range} refreshing={refreshing || syncingAll} />
+      </div>
     </>
   );
 }
@@ -1552,6 +1627,7 @@ export function App() {
           <>
             {page === "dashboard" && (
               <Dashboard
+                key={activeShop?.id}
                 data={dash}
                 currency={currency}
                 days={days}

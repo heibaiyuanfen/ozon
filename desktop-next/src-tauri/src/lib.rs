@@ -14267,6 +14267,8 @@ pub fn run() {
             insights::product_analysis,
             insights::series_insights,
             insights::series_daily_tacos,
+            insights::overview_scope_daily,
+            insights::overview_product_metrics,
             insights::save_product_series,
             insights::delete_product_series,
             insights::product_detail,

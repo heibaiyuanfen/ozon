@@ -881,8 +881,9 @@ export async function launchListingTool(): Promise<string> {
 export async function productInsights(
   to: string,
   query: string,
+  includeInactive = false,
 ): Promise<InsightRow[]> {
-  return invoke("product_insights", { to, query });
+  return invoke("product_insights", { to, query, includeInactive });
 }
 export async function seriesInsights(to: string): Promise<InsightRow[]> {
   return invoke("series_insights", { to });

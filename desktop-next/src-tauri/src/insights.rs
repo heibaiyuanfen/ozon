@@ -880,6 +880,7 @@ fn clusters(c: &Connection, to: &str) -> Result<HashMap<String, Vec<ClusterShare
 pub fn product_insights(
     to: String,
     query: String,
+    include_inactive: Option<bool>,
     state: State<AppState>,
 ) -> Result<Vec<InsightRow>, String> {
     let c = db(&state)?;
@@ -914,6 +915,9 @@ pub fn product_insights(
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    if include_inactive.unwrap_or(false) {
+        return Ok(rows);
+    }
     let mut active_stmt=c.prepare("SELECT DISTINCT sku FROM sales_daily WHERE day BETWEEN date(?1,'-59 day') AND ?1 AND ordered_units>0").map_err(|e|e.to_string())?;
     let active = active_stmt
         .query_map([&to], |r| r.get::<_, String>(0))
@@ -928,7 +932,7 @@ pub fn product_insights(
 
 #[tauri::command]
 pub fn series_insights(to: String, state: State<AppState>) -> Result<Vec<InsightRow>, String> {
-    let product_rows = product_insights(to.clone(), String::new(), state.clone())?;
+    let product_rows = product_insights(to.clone(), String::new(), None, state.clone())?;
     let product_map = product_rows
         .into_iter()
         .map(|row| (row.id.clone(), row))
@@ -1094,4 +1098,136 @@ pub fn series_daily_tacos(series_id:i64,to:String,state:State<AppState>)->Result
  let c=db(&state)?;ensure(&c)?;
  let mut q=c.prepare("WITH RECURSIVE days(day) AS (SELECT date(?2,'-29 day') UNION ALL SELECT date(day,'+1 day') FROM days WHERE day<?2), sales AS (SELECT s.day,SUM(s.revenue) revenue FROM sales_daily s JOIN product_series_members m ON m.sku=s.sku WHERE m.series_id=?1 AND s.day BETWEEN date(?2,'-29 day') AND ?2 GROUP BY s.day), ads AS (SELECT a.day,SUM(ABS(a.spend)) spend FROM ad_daily a JOIN product_series_members m ON m.sku=a.sku WHERE m.series_id=?1 AND a.sku<>'' AND a.day BETWEEN date(?2,'-29 day') AND ?2 GROUP BY a.day) SELECT d.day,s.revenue,a.spend FROM days d LEFT JOIN sales s ON s.day=d.day LEFT JOIN ads a ON a.day=d.day ORDER BY d.day DESC").map_err(|e|e.to_string())?;
  let rows=q.query_map(params![series_id,to],|r|{let revenue:Option<f64>=r.get(1)?;let spend:Option<f64>=r.get(2)?;Ok(serde_json::json!({"day":r.get::<_,String>(0)?,"revenue":revenue,"spend":spend,"tacos":revenue.zip(spend).filter(|(r,_)|*r>0.0).map(|(r,s)|s/r*100.0)}))}).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;Ok(rows)
+}
+
+const OVERVIEW_SKU_EVENTS: &str = "returned AS (
+            SELECT sku,day,SUM(quantity) units FROM return_events
+            WHERE day BETWEEN ?1 AND ?2 GROUP BY sku,day
+        ), cancelled AS (
+            SELECT sku,day,SUM(quantity) units FROM cancellation_events
+            WHERE day BETWEEN ?1 AND ?2 GROUP BY sku,day
+        ), event_keys AS (
+            SELECT sku,day FROM sales_daily WHERE day BETWEEN ?1 AND ?2
+            UNION SELECT sku,day FROM returned UNION SELECT sku,day FROM cancelled
+        ), sku_events AS (
+            SELECT k.sku,k.day,COALESCE(r.units,s.returns) returned,
+                   COALESCE(x.units,s.cancellations) cancelled
+            FROM event_keys k LEFT JOIN sales_daily s USING(sku,day)
+            LEFT JOIN returned r USING(sku,day) LEFT JOIN cancelled x USING(sku,day)
+        )";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewScopeDay {
+    #[serde(flatten)]
+    trend: ProductTrend,
+    ad_revenue: f64,
+    ad_orders: i64,
+    clicks: i64,
+    impressions: i64,
+    returns: Option<i64>,
+    cancellations: Option<i64>,
+    has_sales: bool,
+    has_ads: bool,
+}
+
+#[tauri::command]
+pub fn overview_scope_daily(
+    range: crate::DateRange,
+    sku: Option<String>,
+    series_id: Option<i64>,
+    state: State<AppState>,
+) -> Result<Vec<OverviewScopeDay>, String> {
+    use chrono::NaiveDate;
+    let from = NaiveDate::parse_from_str(&range.from, "%Y-%m-%d").map_err(|e| e.to_string())?;
+    let to = NaiveDate::parse_from_str(&range.to, "%Y-%m-%d").map_err(|e| e.to_string())?;
+    if from > to || sku.is_some() == series_id.is_some() || sku.as_deref() == Some("") {
+        return Err("请选择有效的日期和单品或系列".into());
+    }
+    let c = db(&state)?;
+    ensure(&c)?;
+    let cross_border = crate::active_shop_kind(&state)? == "cross_border";
+    let rate = rub_per_cny_for(&state, &c)?;
+    let amount = |value| crate::display_amount(value, cross_border, rate);
+    let mut query = c.prepare(&format!("
+        WITH RECURSIVE days(day) AS (
+            SELECT ?1 UNION ALL SELECT date(day,'+1 day') FROM days WHERE day < ?2
+        ), scope(sku) AS (
+            SELECT ?3 WHERE ?3 IS NOT NULL
+            UNION ALL SELECT sku FROM product_series_members WHERE series_id = ?4
+        ), sales AS (
+            SELECT s.day, SUM(s.revenue) revenue, SUM(s.ordered_units) units
+            FROM sales_daily s JOIN scope m ON m.sku = s.sku
+            WHERE s.day BETWEEN ?1 AND ?2 GROUP BY s.day
+        ), {OVERVIEW_SKU_EVENTS}, events AS (
+            SELECT e.day,SUM(e.returned) returned,SUM(e.cancelled) cancelled
+            FROM sku_events e JOIN scope m ON m.sku=e.sku GROUP BY e.day
+        ), ads AS (
+            SELECT a.day, SUM(ABS(a.spend)) spend, SUM(a.revenue) revenue, SUM(a.orders) orders,
+                   SUM(a.clicks) clicks, SUM(a.impressions) impressions
+            FROM ad_daily a JOIN scope m ON m.sku = a.sku
+            WHERE a.day BETWEEN ?1 AND ?2 AND a.sku <> '' GROUP BY a.day
+        )
+        SELECT d.day, COALESCE(s.units,0), COALESCE(s.revenue,0), COALESCE(a.spend,0),
+               COALESCE(a.revenue,0), COALESCE(a.orders,0), COALESCE(a.clicks,0),
+               COALESCE(a.impressions,0), e.returned, e.cancelled,
+               s.day IS NOT NULL, a.day IS NOT NULL
+        FROM days d LEFT JOIN sales s ON s.day = d.day LEFT JOIN ads a ON a.day = d.day
+        LEFT JOIN events e ON e.day = d.day
+        ORDER BY d.day
+    ")).map_err(|e| e.to_string())?;
+    let rows = query.query_map(params![from.to_string(), to.to_string(), sku, series_id], |r| {
+        Ok(OverviewScopeDay {
+            trend: ProductTrend { day: r.get(0)?, units: r.get(1)?, revenue: amount(r.get(2)?), ad_spend: amount(r.get(3)?) },
+            ad_revenue: amount(r.get(4)?), ad_orders: r.get(5)?, clicks: r.get(6)?, impressions: r.get(7)?,
+            returns: r.get(8)?, cancellations: r.get(9)?, has_sales: r.get(10)?, has_ads: r.get(11)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewProductMetrics {
+    units: i64,
+    revenue: f64,
+    spend: f64,
+    returns: Option<i64>,
+    cancellations: Option<i64>,
+}
+
+#[tauri::command]
+pub fn overview_product_metrics(
+    range: crate::DateRange,
+    state: State<AppState>,
+) -> Result<HashMap<String, OverviewProductMetrics>, String> {
+    let c = db(&state)?;
+    let cross_border = crate::active_shop_kind(&state)? == "cross_border";
+    let rate = rub_per_cny_for(&state, &c)?;
+    let amount = |value| crate::display_amount(value, cross_border, rate);
+    let mut query = c.prepare(&format!("
+        WITH sales AS (
+            SELECT sku,SUM(ordered_units) units,SUM(revenue) revenue
+            FROM sales_daily WHERE day BETWEEN ?1 AND ?2 GROUP BY sku
+        ), ads AS (
+            SELECT sku,SUM(ABS(spend)) spend FROM ad_daily
+            WHERE sku<>'' AND day BETWEEN ?1 AND ?2 GROUP BY sku
+        ), {OVERVIEW_SKU_EVENTS}, events AS (
+            SELECT sku,SUM(returned) returned,SUM(cancelled) cancelled FROM sku_events GROUP BY sku
+        ), known AS (
+            SELECT sku FROM sales UNION SELECT sku FROM ads
+            UNION SELECT sku FROM events
+        )
+        SELECT k.sku,COALESCE(s.units,0),COALESCE(s.revenue,0),COALESCE(a.spend,0),
+               e.returned,e.cancelled
+        FROM known k LEFT JOIN sales s USING(sku) LEFT JOIN ads a USING(sku)
+        LEFT JOIN events e USING(sku)
+    ")).map_err(|e| e.to_string())?;
+    let rows = query.query_map(params![range.from, range.to], |r| {
+        Ok((r.get(0)?, OverviewProductMetrics {
+            units: r.get(1)?, revenue: amount(r.get(2)?), spend: amount(r.get(3)?),
+            returns: r.get(4)?, cancellations: r.get(5)?,
+        }))
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
