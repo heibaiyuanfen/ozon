@@ -1014,3 +1014,10 @@ export async function testCompetitorFeishuTarget(url:string):Promise<string>{ret
 export async function startCompetitorShopCapture(url:string):Promise<string>{return invoke("start_competitor_shop_capture",{url})}
 
 export async function exportCompetitorShopXlsx(shopName:string):Promise<string>{return invoke("export_competitor_shop_xlsx",{shopName})}
+
+export async function stampSupplyBoxLabels(file: File): Promise<string> {
+  if (!isTauri()) throw new Error("请在 ERP 桌面版生成箱唛标签");
+  if (file.size > 10 * 1024 * 1024) throw new Error("箱唛 Excel 须小于 10 MB");
+  const workbook = Array.from(new Uint8Array(await file.arrayBuffer()));
+  return invoke("stamp_supply_box_labels", { workbook });
+}

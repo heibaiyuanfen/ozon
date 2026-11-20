@@ -12843,117 +12843,140 @@ fn supply_cargo_ids(c: &Connection, order_id: i64) -> Result<Vec<(i64, Vec<i64>)
     }
 }
 
-#[tauri::command]
-async fn download_supply_cargo_labels(
-    order_id: i64,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let owned = background_state(&state)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let c = db(&owned)?;
-        let grouped = supply_cargo_ids(&c, order_id)?;
-        let cargo_count: usize = grouped.iter().map(|(_, ids)| ids.len()).sum();
-        let mut operations = Vec::new();
-        for (supply_id, ids) in &grouped {
-            let cargoes = ids
-                .iter()
-                .map(|cargo_id| serde_json::json!({"cargo_id":cargo_id}))
-                .collect::<Vec<_>>();
-            let payload = seller_post(
-                &c,
-                "/v1/cargoes-label/create",
-                &serde_json::json!({"supply_id":supply_id,"cargoes":cargoes}),
-            )?;
-            let operation_id = supply_identifier(
-                payload
-                    .get("operation_id")
-                    .or_else(|| payload.pointer("/result/operation_id")),
-            );
-            if operation_id.is_empty() {
-                return Err(format!(
-                    "供应 {supply_id} 创建箱唛文件失败：Ozon 未返回 operation_id"
-                ));
-            }
-            operations.push((*supply_id, operation_id));
-        }
-        let mut ready: std::collections::BTreeMap<i64, String> = std::collections::BTreeMap::new();
-        for _ in 0..60 {
-            for (supply_id, operation_id) in &operations {
-                if ready.contains_key(supply_id) {
-                    continue;
-                }
-                let payload = seller_post(
-                    &c,
-                    "/v1/cargoes-label/get",
-                    &serde_json::json!({"operation_id":operation_id}),
-                )?;
-                let status = json_text(
-                    payload
-                        .get("status")
-                        .or_else(|| payload.pointer("/result/status")),
-                )
-                .to_ascii_uppercase();
-                if status == "FAILED" {
-                    return Err(format!("供应 {supply_id} 的箱唛文件生成失败"));
-                }
-                let url = json_text(
-                    payload
-                        .get("file_url")
-                        .or_else(|| payload.pointer("/result/file_url")),
-                );
-                if status == "SUCCESS" && !url.is_empty() {
-                    ready.insert(*supply_id, url);
-                }
-            }
-            if ready.len() == operations.len() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-        if ready.len() != operations.len() {
+mod cargo_box_labels;
+
+fn download_supply_label_files(order_id: i64, owned: &AppState) -> Result<(std::path::PathBuf, usize, usize), String> {
+    let c = db(owned)?;
+    let grouped = supply_cargo_ids(&c, order_id)?;
+    let cargo_count: usize = grouped.iter().map(|(_, ids)| ids.len()).sum();
+    let mut operations = Vec::new();
+    for (supply_id, ids) in &grouped {
+        let cargoes = ids
+            .iter()
+            .map(|cargo_id| serde_json::json!({"cargo_id":cargo_id}))
+            .collect::<Vec<_>>();
+        let payload = seller_post(
+            &c,
+            "/v1/cargoes-label/create",
+            &serde_json::json!({"supply_id":supply_id,"cargoes":cargoes}),
+        )?;
+        let operation_id = supply_identifier(
+            payload
+                .get("operation_id")
+                .or_else(|| payload.pointer("/result/operation_id")),
+        );
+        if operation_id.is_empty() {
             return Err(format!(
-                "Ozon 箱唛文件生成超时：已完成 {}/{} 个供应，请稍后重试",
-                ready.len(),
-                operations.len()
+                "供应 {supply_id} 创建箱唛文件失败：Ozon 未返回 operation_id"
             ));
         }
-        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let dir = owned
-            .data_dir
-            .parent()
-            .unwrap_or(&owned.data_dir)
-            .join("exports")
-            .join(format!("箱唛文件-供应单-{order_id}-{stamp}"));
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        for (supply_id, url) in ready {
-            if !url.starts_with("https://") {
-                return Err(format!("供应 {supply_id} 返回了不安全的下载地址"));
+        operations.push((*supply_id, operation_id));
+    }
+    let mut ready: std::collections::BTreeMap<i64, String> = std::collections::BTreeMap::new();
+    for _ in 0..60 {
+        for (supply_id, operation_id) in &operations {
+            if ready.contains_key(supply_id) {
+                continue;
             }
-            let response = ureq::get(&url)
-                .timeout(std::time::Duration::from_secs(30))
-                .call()
-                .map_err(|e| format!("供应 {supply_id} 下载失败：{e}"))?;
-            let mut bytes = Vec::new();
-            response
-                .into_reader()
-                .take(50 * 1024 * 1024)
-                .read_to_end(&mut bytes)
-                .map_err(|e| format!("供应 {supply_id} 读取文件失败：{e}"))?;
-            if !bytes.starts_with(b"%PDF-") {
-                return Err(format!("供应 {supply_id} 返回的文件不是有效 PDF"));
+            let payload = seller_post(
+                &c,
+                "/v1/cargoes-label/get",
+                &serde_json::json!({"operation_id":operation_id}),
+            )?;
+            let status = json_text(
+                payload
+                    .get("status")
+                    .or_else(|| payload.pointer("/result/status")),
+            )
+            .to_ascii_uppercase();
+            if status == "FAILED" {
+                return Err(format!("供应 {supply_id} 的箱唛文件生成失败"));
             }
-            fs::write(dir.join(format!("Ozon箱唛-供应-{supply_id}.pdf")), bytes)
-                .map_err(|e| e.to_string())?;
+            let url = json_text(
+                payload
+                    .get("file_url")
+                    .or_else(|| payload.pointer("/result/file_url")),
+            );
+            if status == "SUCCESS" && !url.is_empty() {
+                ready.insert(*supply_id, url);
+            }
         }
+        if ready.len() == operations.len() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if ready.len() != operations.len() {
+        return Err(format!(
+            "Ozon 箱唛文件生成超时：已完成 {}/{} 个供应，请稍后重试",
+            ready.len(),
+            operations.len()
+        ));
+    }
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let dir = owned
+        .data_dir
+        .parent()
+        .unwrap_or(&owned.data_dir)
+        .join("exports")
+        .join(format!("箱唛文件-供应单-{order_id}-{stamp}-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    for (supply_id, url) in ready {
+        if !url.starts_with("https://") {
+            return Err(format!("供应 {supply_id} 返回了不安全的下载地址"));
+        }
+        let response = ureq::get(&url)
+            .timeout(std::time::Duration::from_secs(30))
+            .call()
+            .map_err(|e| format!("供应 {supply_id} 下载失败：{e}"))?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(50 * 1024 * 1024)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("供应 {supply_id} 读取文件失败：{e}"))?;
+        if !bytes.starts_with(b"%PDF-") {
+            return Err(format!("供应 {supply_id} 返回的文件不是有效 PDF"));
+        }
+        fs::write(dir.join(format!("Ozon箱唛-供应-{supply_id}.pdf")), bytes)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok((dir, operations.len(), cargo_count))
+}
+
+#[tauri::command]
+async fn download_supply_cargo_labels(order_id: i64, state: State<'_, AppState>) -> Result<String, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (dir, files, count) = download_supply_label_files(order_id, &owned)?;
         open::that(&dir).map_err(|e| format!("箱唛已下载，但打开文件夹失败：{e}"))?;
-        Ok(format!(
-            "已下载 {} 个 PDF，共 {cargo_count} 个箱唛：{}",
-            operations.len(),
-            dir.display()
-        ))
-    })
-    .await
-    .map_err(|e| format!("下载箱唛后台任务失败：{e}"))?
+        Ok(format!("已下载 {files} 个 PDF，共 {count} 个箱唛：{}", dir.display()))
+    }).await.map_err(|e| format!("下载箱唛后台任务失败：{e}"))?
+}
+
+#[tauri::command]
+async fn stamp_supply_box_labels(workbook: Vec<u8>, state: State<'_, AppState>) -> Result<String, String> {
+    let owned = background_state(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (order_id, numbers) = cargo_box_labels::read_workbook(workbook)?;
+        let exports = owned.data_dir.parent().unwrap_or(&owned.data_dir).join("exports");
+        let prefix = format!("箱唛文件-供应单-{order_id}-");
+        let mut cached = fs::read_dir(&exports).into_iter().flatten().filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix) && entry.path().is_dir())
+            .map(|entry| entry.path()).collect::<Vec<_>>();
+        cached.sort_unstable_by(|a, b| b.cmp(a));
+        let output = exports.join(format!("已加箱号-供应单-{order_id}-{}", chrono::Local::now().format("%Y%m%d-%H%M%S-%3f")));
+        for source in cached {
+            if let Ok(count) = cargo_box_labels::stamp_directory(&source, &output, &numbers) {
+                let _ = open::that(&output);
+                return Ok(format!("已为 {count} 张标签添加箱号：{}", output.display()));
+            }
+        }
+        let (source, _, _) = download_supply_label_files(order_id, &owned)?;
+        let count = cargo_box_labels::stamp_directory(&source, &output, &numbers)?;
+        let _ = open::that(&output);
+        Ok(format!("已为 {count} 张标签添加箱号：{}", output.display()))
+    }).await.map_err(|e| format!("添加箱号后台任务失败：{e}"))?
 }
 
 fn supply_timeslots_blocking(
@@ -14178,6 +14201,7 @@ pub fn run() {
             supply_order_items_progress,
             export_supply_cargo_marks,
             download_supply_cargo_labels,
+            stamp_supply_box_labels,
             supply_cluster_plans,
             save_supply_cluster_plan,
             search_supply_dropoffs,

@@ -632,6 +632,9 @@ export interface LocalWeeklyReport {
   profitNote: string; salesDays: number; adDays: number;
   daily: Array<{ day: string; revenue: number; adRevenue: number; units: number; adUnits: number; adSpend: number; acos: number | null; tacos: number | null }>;
   products: Array<{ sku: string; offerId: string; name: string; revenue: number; units: number; adRevenue: number | null; adUnits: number | null; adSpend: number | null; acos: number | null; tacos: number | null }>;
+  orderPostings: Array<[string, string]> | null;
+  previousProducts: LocalWeeklyReport["products"];
+  previousSalesDays: number;
   profitBreakdown: Array<{ label: string; amount: number; note: string }>;
   profitLog: Array<{ id: number; recordedAt: string; snapshot: { profit: number | null; items: Record<string, number> } }>;
 }

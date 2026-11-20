@@ -21,6 +21,9 @@ pub struct LocalWeeklyReport {
     ad_days: i64,
     daily: Vec<WeeklyDailyRow>,
     products: Vec<WeeklyProductRow>,
+    order_postings: Option<Vec<(String, String)>>,
+    previous_products: Vec<WeeklyProductRow>,
+    previous_sales_days: i64,
     profit_breakdown: Vec<ProfitBreakdownRow>,
     profit_log: Vec<ProfitLogEntry>,
 }
@@ -120,6 +123,24 @@ fn weekly_totals(c: &Connection, range: &DateRange) -> Result<(f64, i64, f64, f6
     Ok((revenue,units,spend,ad_revenue,ad_units,sales_days,ad_days))
 }
 
+// Use posting IDs because the local cache stores postings, not parent order IDs.
+fn weekly_order_postings(c: &Connection, range: &DateRange) -> Result<Option<Vec<(String, String)>>, String> {
+    crate::posting_sync::ensure_schema(c)?;
+    let covered: i64 = c.query_row(
+        "SELECT COUNT(*) FROM posting_sync_coverage WHERE day BETWEEN ?1 AND ?2
+         AND status='success' AND scheme IN ('FBS','FBO')",
+        params![range.from, range.to], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if covered != 14 { return Ok(None); }
+    let mut query = c.prepare(
+        "SELECT DISTINCT sku, posting_number FROM posting_routes WHERE day BETWEEN ?1 AND ?2
+         AND sku<>'' AND posting_number<>'' AND scheme IN ('FBS','FBO')",
+    ).map_err(|e| e.to_string())?;
+    let rows = query.query_map(params![range.from, range.to], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map(Some).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn local_weekly_report(week_end: String, state: State<'_, AppState>) -> Result<LocalWeeklyReport,String> {
     let snapshot=state.inner().clone();
@@ -129,6 +150,12 @@ pub async fn local_weekly_report(week_end: String, state: State<'_, AppState>) -
         let c=db(&snapshot)?;
         let (revenue,units,spend,ad_revenue,ad_units,sales_days,ad_days)=weekly_totals(&c,&range)?;
         let (daily,products)=weekly_details(&c,&range)?;
+        let previous_end = chrono::NaiveDate::parse_from_str(&range.from, "%Y-%m-%d")
+            .map_err(|e| e.to_string())?.pred_opt().ok_or("无法计算上周日期")?;
+        let previous_range = week_range(&previous_end.format("%Y-%m-%d").to_string())?;
+        let (_, previous_products) = weekly_details(&c, &previous_range)?;
+        let (_, _, _, _, _, previous_sales_days, _) = weekly_totals(&c, &previous_range)?;
+        let order_postings = weekly_order_postings(&c, &range)?;
         drop(c);
         static PROFIT_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = PROFIT_LOG_LOCK.lock().map_err(|e| e.to_string())?;
@@ -161,7 +188,7 @@ pub async fn local_weekly_report(week_end: String, state: State<'_, AppState>) -
         Ok(LocalWeeklyReport { from:range.from,to:range.to,revenue,ad_revenue,finance_sales:profit_report.sales_returns,units,ad_units,
             acos:(ad_revenue>0.0).then(||spend/ad_revenue*100.0),
             tacos:(revenue>0.0).then(||spend/revenue*100.0),
-            profit:profit_report.after_tax_profit,profit_note,sales_days,ad_days,daily,products,profit_log,
+            profit:profit_report.after_tax_profit,profit_note,sales_days,ad_days,daily,products,order_postings,previous_products,previous_sales_days,profit_log,
             profit_breakdown:vec![
                 ProfitBreakdownRow{label:"Finance 结算净额".into(),amount:profit_report.finance_net,note:"含平台销售结算、广告及各项费用".into()},
                 ProfitBreakdownRow{label:"采购成本".into(),amount:-profit_report.purchase_cost,note:"本周已结算商品的采购成本".into()},

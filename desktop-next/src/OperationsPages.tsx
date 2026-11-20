@@ -118,6 +118,7 @@ import {
   supplyOrderItemsProgress,
   exportSupplyCargoMarks,
   downloadSupplyCargoLabels,
+  stampSupplyBoxLabels,
   supplyTimeslots,
   syncFbsOrders,
   syncFeishuProducts,
@@ -4403,6 +4404,19 @@ export function SupplyPage() {
       if (mounted.current) setBusy(false);
     }
   };
+  const [stampingBoxLabels, setStampingBoxLabels] = useState(false);
+  const stampBoxLabels = async (file: File) => {
+    setStampingBoxLabels(true);
+    setError("");
+    try {
+      const message = await stampSupplyBoxLabels(file);
+      if (mounted.current) window.alert(message);
+    } catch (e) {
+      if (mounted.current) setError(String(e));
+    } finally {
+      if (mounted.current) setStampingBoxLabels(false);
+    }
+  };
   const runCargoAction = async (kind: "excel" | "labels") => {
     if (!itemOrder) return;
     setCargoAction(kind);
@@ -4426,10 +4440,23 @@ export function SupplyPage() {
           <h1>约仓计划</h1>
           <p>真实读取活动供应单、越库集群并查询或修改预约时段</p>
         </div>
-        <button className="dark-button" onClick={load} disabled={busy}>
-          <RefreshCw size={16} />
-          {busy ? "请求中" : "读取供应单"}
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <label className="outline-button" aria-busy={stampingBoxLabels}>
+            <FileDown size={16} />{stampingBoxLabels ? "正在生成标签…" : "从 Excel 生成带箱号标签"}
+            <input type="file" accept=".xlsx" disabled={stampingBoxLabels}
+              style={{ position: "absolute", width: 1, height: 1, opacity: 0 }}
+              aria-label="从 Excel 生成带箱号标签"
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0];
+                event.currentTarget.value = "";
+                if (file) void stampBoxLabels(file);
+              }} />
+          </label>
+          <button className="dark-button" onClick={load} disabled={busy}>
+            <RefreshCw size={16} />
+            {busy ? "请求中" : "读取供应单"}
+          </button>
+        </div>
       </header>
       {error && (
         <div className="error-banner">
