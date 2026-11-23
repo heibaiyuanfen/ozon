@@ -790,6 +790,9 @@ struct CrossBorderReport {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SupplyOrderRow {
+    crossdock_charge: Option<f64>,
+    crossdock_unmatched_supplies: Option<usize>,
+    crossdock_last_charge_date: Option<String>,
     order_id: i64,
     order_number: String,
     state: String,
@@ -11896,6 +11899,48 @@ async fn create_supply_from_workflow_draft(
     }).await.map_err(|e| format!("草稿创建供应单后台任务失败：{e}"))?
 }
 
+fn crossdock_charges(c: &Connection) -> Result<std::collections::HashMap<String, (f64, String)>, String> {
+    let mut stmt = c.prepare(
+        "SELECT posting_number, -SUM(amount), MAX(operation_date) FROM finance_transactions
+         WHERE operation_type IN ('CrossDock', 'MarketplaceServiceItemCrossdocking')
+           AND posting_number <> '' GROUP BY posting_number",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get(0)?, (row.get(1)?, row.get(2)?)))
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
+fn match_crossdock_charges(
+    charges: &std::collections::HashMap<String, (f64, String)>,
+    order_keys: &[String],
+    supply_keys: &std::collections::BTreeSet<String>,
+) -> (Option<f64>, Option<usize>, Option<String>) {
+    let mut keys = supply_keys.clone();
+    keys.extend(order_keys.iter().filter(|key| !key.is_empty()).cloned());
+    let matched: Vec<_> = keys.iter().filter_map(|key| charges.get(key)).collect();
+    let total = (!matched.is_empty()).then(|| matched.iter().map(|(amount, _)| amount).sum());
+    let latest = matched.iter().map(|(_, date)| date).max().cloned();
+    // A parent-level charge cannot establish which child supplies it covers.
+    let parent_match = order_keys.iter().any(|key| !supply_keys.contains(key) && charges.contains_key(key));
+    let unmatched = (!parent_match && !supply_keys.is_empty())
+        .then(|| supply_keys.iter().filter(|key| !charges.contains_key(*key)).count());
+    (total, unmatched, latest)
+}
+
+#[cfg(test)]
+#[test]
+fn matches_crossdock_finance_by_exact_supply_key() {
+    let charges = std::collections::HashMap::from([
+        ("2000062863999".into(), (1380.0, "2026-08-19".into())),
+        ("20000628639990".into(), (100.0, "2026-08-20".into())),
+    ]);
+    let keys = ["2000062863999".into(), "2000062864000".into()].into_iter().collect();
+    assert_eq!(match_crossdock_charges(&charges, &["2000062863999".into()], &keys),
+        (Some(1380.0), Some(1), Some("2026-08-19".into())));
+    assert_eq!(match_crossdock_charges(&charges, &["20000628639990".into()], &keys).1, None);
+}
+
 fn supply_orders_blocking(state: &AppState) -> Result<Vec<SupplyOrderRow>, String> {
     let c = db(state)?;
     let mut order_ids = Vec::new();
@@ -11937,6 +11982,7 @@ fn supply_orders_blocking(state: &AppState) -> Result<Vec<SupplyOrderRow>, Strin
                 .unwrap_or_default(),
         );
     }
+    let charges = crossdock_charges(&c)?;
     let mut rows = Vec::new();
     for order in raw_orders {
         let supplies = order
@@ -11966,7 +12012,20 @@ fn supply_orders_blocking(state: &AppState) -> Result<Vec<SupplyOrderRow>, Strin
                 .unwrap_or(false);
         }
         let slot = order.pointer("/timeslot/timeslot");
+        let (crossdock_charge, crossdock_unmatched_supplies, crossdock_last_charge_date) = if crossdock {
+            let supply_keys = supplies.iter().map(|supply| finance_identifier(supply.get("supply_id")))
+                .filter(|id| !id.is_empty() && id != "0").collect();
+            match_crossdock_charges(&charges, &[
+                finance_identifier(order.get("order_number")),
+                finance_identifier(order.get("order_id")),
+            ], &supply_keys)
+        } else {
+            (None, None, None)
+        };
         rows.push(SupplyOrderRow {
+            crossdock_charge,
+            crossdock_unmatched_supplies,
+            crossdock_last_charge_date,
             order_id: order.get("order_id").and_then(|v| v.as_i64()).unwrap_or(0),
             order_number: json_text(order.get("order_number")),
             state: json_text(order.get("state")),

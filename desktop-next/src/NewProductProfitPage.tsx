@@ -2,6 +2,8 @@ import { useState } from "react";
 import { FileInput, Plus, RotateCcw, Save, Trash2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import type { PurchaseOrderForm, PurchaseOrderItem, PurchaseOrderSummary } from "./PurchaseOrderPage";
+import { products, refreshProductPrice } from "./bridge";
+import type { DateRange, ProductRow } from "./types";
 import { officialLogisticsTariff } from "./ozon-tariffs";
 import "./LocalSelectionPage.css";
 import "./new-product-profit.css";
@@ -133,7 +135,7 @@ function format(value: number | null, unit: string) {
   return value.toFixed(2) + " " + unit;
 }
 
-export function NewProductProfitPage({ shopId }: { shopId: string }) {
+export function NewProductProfitPage({ shopId, range }: { shopId: string; range: DateRange }) {
   const storageKey = "ozon:new-product-profit:" + shopId;
   const [stored] = useState(() => {
     try {
@@ -161,6 +163,11 @@ export function NewProductProfitPage({ shopId }: { shopId: string }) {
   const [order, setOrder] = useState<PurchaseOrderForm | null>(null);
   const [itemIndex, setItemIndex] = useState("");
   const [loadingOrder, setLoadingOrder] = useState(false);
+  const [catalog, setCatalog] = useState<ProductRow[] | null>(null);
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogSku, setCatalogSku] = useState("");
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const catalogItem = catalog?.find(row => row.sku === catalogSku);
   const r = calculateNewProduct(input, autoDelivery);
 
   function persist(next: SavedCalculation[]) {
@@ -202,7 +209,52 @@ export function NewProductProfitPage({ shopId }: { shopId: string }) {
     setMessage("测算已删除。");
   }
 
+  async function searchCatalog(query: string) {
+    setOrders(null);
+    setCatalog([]);
+    setCatalogSku("");
+    setCatalogBusy(true);
+    setMessage("");
+    try {
+      setCatalog(await products(range, query.trim()));
+    } catch (error) {
+      setCatalog(null);
+      setMessage("读取商品中心失败：" + String(error));
+    } finally {
+      setCatalogBusy(false);
+    }
+  }
+
+  async function importCatalogItem(item: ProductRow) {
+    setCatalogBusy(true);
+    let price = "";
+    try {
+      const quote = await refreshProductPrice(item.sku);
+      if (quote.currencyCode.toUpperCase() === "RUB" && Number.isFinite(quote.price) && quote.price > 0) {
+        price = String(quote.price);
+      }
+    } catch {
+      // Local product data is available even when the seller price cannot be fetched.
+    } finally {
+      setCatalogBusy(false);
+    }
+    openRecord();
+    setProduct({ ...emptyProduct, name: item.name.trim() || item.offerId || item.sku });
+    setInput({
+      ...defaults,
+      price,
+      cost: String(item.unitCost ?? ""),
+      length: String(item.lengthCm ?? ""),
+      width: String(item.widthCm ?? ""),
+      height: String(item.heightCm ?? ""),
+      weight: String(item.weightKg ?? ""),
+    });
+    setCatalog(null);
+    setMessage(`已导入 SKU ${item.sku}。${price ? "" : "未取得卢布卖家售价，请手动填写。"}请补充缺失成本、佣金和装箱数据。`);
+  }
+
   async function openPurchaseOrders() {
+    setCatalog(null);
     setLoadingOrder(true);
     setMessage("");
     setOrders([]);
@@ -266,12 +318,30 @@ export function NewProductProfitPage({ shopId }: { shopId: string }) {
       <p>宜智测算口径 · 单件利润、回款与投入回报</p></div>
       <div className="profit-actions">
         <button type="button" className="profit-button" onClick={() => openRecord()}><Plus aria-hidden="true" />新增</button>
-        <button type="button" className="profit-button" disabled={loadingOrder}
+        <button type="button" className="profit-button" disabled={loadingOrder || catalogBusy}
           onClick={() => void openPurchaseOrders()}><FileInput aria-hidden="true" />从采购单载入</button>
+        <button type="button" className="profit-button" disabled={loadingOrder || catalogBusy}
+          onClick={() => { setCatalogQuery(""); void searchCatalog(""); }}><FileInput aria-hidden="true" />从商品中心导入</button>
         <button type="button" className="profit-button profit-button-primary" disabled={!stored.readable || !product.name.trim()} onClick={save}><Save aria-hidden="true" />保存</button>
         <button type="button" className="profit-button profit-button-danger" disabled={!activeId} onClick={() => setConfirmDelete(true)}><Trash2 aria-hidden="true" />删除</button>
       </div>
     </header>
+    {catalog !== null && <section className="card local-selection-settings" aria-label="从商品中心导入">
+      <form className="profit-actions" onSubmit={event => { event.preventDefault(); void searchCatalog(catalogQuery); }}>
+        <label>搜索商品<input value={catalogQuery} placeholder="名称、货号、SKU 或条码"
+          disabled={catalogBusy} onChange={event => setCatalogQuery(event.target.value)} /></label>
+        <button type="submit" className="profit-button" disabled={catalogBusy}>搜索</button>
+      </form>
+      <label>商品<select value={catalogSku} disabled={catalogBusy || !catalog.length}
+        onChange={event => setCatalogSku(event.target.value)}>
+        <option value="">{catalogBusy ? "处理中…" : catalog.length ? "请选择一款商品" : "没有匹配的商品"}</option>
+        {catalog.map(row => <option key={row.sku} value={row.sku}>{row.name || row.offerId || row.sku} · {row.offerId} · SKU {row.sku}</option>)}
+      </select></label>
+      <button type="button" className="profit-button profit-button-primary" disabled={catalogBusy || !catalogItem}
+        onClick={() => { if (catalogItem) void importCatalogItem(catalogItem); }}>带入新测算</button>
+      <button type="button" className="profit-button" disabled={catalogBusy} onClick={() => setCatalog(null)}>取消</button>
+      <p>导入会建立一条新测算，请先保存当前编辑。</p>
+    </section>}
     {orders !== null && <section className="card local-selection-settings" aria-label="从采购单载入">
       <label>采购单<select value={orderId} disabled={loadingOrder}
         onChange={event => void choosePurchaseOrder(event.target.value)}>

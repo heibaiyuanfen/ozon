@@ -1029,6 +1029,9 @@ export interface ProductPriceUpdate {
   currencyCode: string;
 }
 export interface SupplyOrder {
+  crossdockCharge?: number | null;
+  crossdockUnmatchedSupplies?: number | null;
+  crossdockLastChargeDate?: string | null;
   orderId: number;
   orderNumber: string;
   state: string;

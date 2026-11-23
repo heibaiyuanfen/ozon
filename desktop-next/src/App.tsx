@@ -1734,7 +1734,7 @@ export function App() {
             {page === "growth_center" && <GrowthCenterPage key={activeShop?.id} range={range} currency={currency} shopName={activeShop?.name || "当前店铺"} crossBorder={activeShop?.kind === "cross_border"} shopId={activeShop?.id || ""} />}{" "}
             {page === "product_analysis" && <ProductAnalysisPage currency={currency} shopId={activeShop?.id || ""} />}{" "}
             {page === "local_selection" && <LocalSelectionPage />}
-            {page === "new_product_profit" && <NewProductProfitPage key={activeShop?.id} shopId={activeShop?.id || ""} />}
+            {page === "new_product_profit" && <NewProductProfitPage key={activeShop?.id} shopId={activeShop?.id || ""} range={range} />}
             {page === "selection_library" && <SelectionLibraryPage key={activeShop?.id} shopId={activeShop?.id || ""} />}{" "}
             {page === "competitor_shop" && <CompetitorShopPage key={activeShop?.id} />}{" "}
             {page === "ad_experiments" && <AdExperimentCenter key={activeShop?.id} shopId={activeShop?.id || ""} seed={experimentSeed} />}

@@ -570,7 +570,9 @@ fn reconcile(c: &Connection, shop: &str, action: &str, input: &Value) -> Result<
 fn ads_snapshot(c: &Connection, shop: &str) -> Result<Value, String> {
     let mut stmt = c
         .prepare(
-            "SELECT day, spend, attributed_sales FROM wb_ops_ads WHERE shop_id=?1 ORDER BY day",
+            "SELECT a.day, a.spend, a.attributed_sales, detail.raw FROM wb_ops_ads a
+             LEFT JOIN wb_ops_rows detail ON detail.shop_id=a.shop_id AND detail.kind='ad_detail' AND detail.id=a.day
+             WHERE a.shop_id=?1 ORDER BY a.day",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -578,13 +580,33 @@ fn ads_snapshot(c: &Connection, shop: &str) -> Result<Value, String> {
             Ok(json!({
                 "day": r.get::<_, String>(0)?,
                 "spend": r.get::<_, f64>(1)?,
-                "attributedSales": r.get::<_, f64>(2)?
+                "attributedSales": r.get::<_, f64>(2)?,
+                "detail": r.get::<_, Option<String>>(3)?.and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
             }))
         })
         .map_err(|e| e.to_string())?;
     Ok(json!(rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?))
+}
+
+fn collect_ad_products(
+    day: &Value,
+    products: &mut std::collections::BTreeMap<i64, (f64, f64, u64)>,
+) -> Option<()> {
+    for app in day["apps"].as_array()? {
+        for item in app["nms"].as_array()? {
+            let id = item["nmId"].as_i64().filter(|id| *id > 0)?;
+            let spend = item["sum"].as_f64()?;
+            let sales = item["sum_price"].as_f64()?;
+            let orders = item["orders"].as_u64()?;
+            let total = products.entry(id).or_default();
+            total.0 += spend;
+            total.1 += sales;
+            total.2 = total.2.checked_add(orders)?;
+        }
+    }
+    Some(())
 }
 
 fn sync_ads(c: &mut Connection, shop: &str, token: &str, payload: &Value) -> Result<Value, String> {
@@ -612,6 +634,7 @@ fn sync_ads(c: &mut Connection, shop: &str, token: &str, payload: &Value) -> Res
         }
     }
     let mut daily = vec![(0.0, 0.0); duration as usize + 1];
+    let mut details = vec![(Some(0_u64), Some(std::collections::BTreeMap::<i64, (f64, f64, u64)>::new())); daily.len()];
     let ids: Vec<_> = ids.iter().map(ToString::to_string).collect();
     for (index, chunk) in ids.chunks(50).enumerate() {
         if index > 0 {
@@ -635,6 +658,13 @@ fn sync_ads(c: &mut Connection, shop: &str, token: &str, payload: &Value) -> Res
                     let sales = day["sum_price"].as_f64().ok_or("广告统计缺少归因销售额")?;
                     daily[offset as usize].0 += spend;
                     daily[offset as usize].1 += sales;
+                    let (orders, products) = &mut details[offset as usize];
+                    *orders = orders.zip(day["orders"].as_u64()).and_then(|(total, count)| total.checked_add(count));
+                    if let Some(products) = products {
+                        if collect_ad_products(&day, products).is_none() {
+                            details[offset as usize].1 = None;
+                        }
+                    }
                 }
             }
         }
@@ -642,6 +672,8 @@ fn sync_ads(c: &mut Connection, shop: &str, token: &str, payload: &Value) -> Res
     let tx = c.transaction().map_err(|e| e.to_string())?;
     for (offset, (spend, sales)) in daily.into_iter().enumerate() {
         let day = from + chrono::Duration::days(offset as i64);
+        let (orders, products) = &details[offset];
+        put(&tx, shop, "ad_detail", &day.to_string(), &json!({"orders": orders, "products": products}))?;
         tx.execute("INSERT INTO wb_ops_ads(shop_id,day,spend,attributed_sales) VALUES(?1,?2,?3,?4)
             ON CONFLICT(shop_id,day) DO UPDATE SET spend=excluded.spend, attributed_sales=excluded.attributed_sales",
             params![shop, day.to_string(), spend, sales]).map_err(|e| e.to_string())?;

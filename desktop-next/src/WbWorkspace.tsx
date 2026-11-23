@@ -38,11 +38,24 @@ export function WbWorkspace({section,onSection}:{section:WbSection;onSection:(s:
   </div>
 }
 
-const wbOrderAmount=(r:Row)=>value(r.raw.convertedCurrencyCode)==="643"?Number(r.raw.convertedFinalPrice??r.raw.convertedPrice)/100:value(r.raw.currencyCode)==="643"?Number(r.raw.finalPrice??r.raw.price)/100:0;
+const wbRubPerCny = 12.5;
+function wbOrderAmount({ raw }: Row) {
+  const amounts = [
+    { currency: value(raw.convertedCurrencyCode), amount: raw.convertedFinalPrice ?? raw.convertedPrice },
+    { currency: value(raw.currencyCode), amount: raw.finalPrice ?? raw.price },
+  ];
+  for (const [currency, rate] of [["643", 1], ["156", wbRubPerCny]] as const) {
+    const quote = amounts.find(item => item.currency === currency &&
+      Number.isFinite(Number(item.amount)) && Number(item.amount) > 0);
+    if (quote) return Number(quote.amount) / 100 * rate;
+  }
+  return 0;
+}
 
-type AdDay = {day:string; spend:number; attributedSales:number};
 
-function WbAdvertising({shopId,from,to,orders,busy}:{shopId:string;from:string;to:string;orders:Row[];busy:boolean}) {
+type AdDay = {day:string; spend:number; attributedSales:number; detail?: {orders:number|null; products:Record<string,[number,number,number]>|null}|null};
+
+function WbAdvertising({shopId,from,to,orders,busy,salesKeys}:{shopId:string;from:string;to:string;orders:Row[];busy:boolean;salesKeys:string[]}) {
   const [ads,setAds]=useState<AdDay[]>([]);
   const [pending,setPending]=useState(false);
   const [error,setError]=useState("");
@@ -65,6 +78,8 @@ function WbAdvertising({shopId,from,to,orders,busy}:{shopId:string;from:string;t
     }
   }
   const now=today(), week=before(6);
+  const selected = new Set(salesKeys);
+  const productIds = salesKeys.filter(key => key.startsWith("id:")).map(key => key.slice(3));
   const valid=(start:string,end:string)=>!!start&&!!end&&start<=end&&end<=now&&(Date.parse(end)-Date.parse(start))/86400000<=29;
   const ratio=(spend:number|null,sales:number|null)=>spend!=null&&sales!=null&&sales>0
     ? (100*spend/sales).toFixed(2)+"%" : "—";
@@ -73,32 +88,101 @@ function WbAdvertising({shopId,from,to,orders,busy}:{shopId:string;from:string;t
       <button disabled={pending||busy} onClick={()=>void sync(week,now)}>同步近 7 天广告</button>
       <button disabled={pending||busy||!valid(from,to)} onClick={()=>void sync(from,to)}>同步所选日期广告</button>
     </div></div>
-    <p className="wbo-muted">莫斯科日期，近 7 天含今日。广告数据按店铺统计，需要 WB 推广权限。TACOS 使用同期间已同步的全仓 FBS + DBS 有效订单金额，供经营参考，不随仓库和配送筛选变化。</p>
+    <p className="wbo-muted">莫斯科日期，近 7 天含今日。销售和广告随商品或系列筛选，按全仓 FBS + DBS 汇总。商品广告按 WB 商品 ID 归因，旧缓存需重新同步广告。</p>
     {pending&&<p role="status">正在同步广告统计…</p>}
     {error&&<p role="alert" className="wbo-error">{error}</p>}
-    <div className="wbo-table-wrap"><table><thead><tr><th>期间</th><th>广告费</th><th>ACOS</th><th>TACOS</th><th>广告同步覆盖</th></tr></thead><tbody>
+    <div className="wbo-table-wrap"><table><thead><tr><th>期间</th><th>总销售额（₽）</th><th>总销量（件）</th><th>广告订单</th><th>广告订单占比</th><th>广告费（¥）</th><th>ACOS</th><th>TACOS</th><th>广告同步覆盖</th></tr></thead><tbody>
       {([["今日",now,now],["近 7 天",week,now],["所选日期",from,to]]).map(([label,start,end])=>{
         const days=Math.round((Date.parse(end)-Date.parse(start))/86400000)+1;
         const rows=ads.filter(r=>r.day>=start&&r.day<=end);
         const complete=days>0&&rows.length===days;
-        const spend=complete?rows.reduce((sum,r)=>sum+r.spend,0):null;
-        const attributed=rows.reduce((sum,r)=>sum+r.attributedSales,0);
-        const eligible=orders.filter(r=>r.day>=start&&r.day<=end&&!["cancelled","returning"].includes(r.status));
+        const productComplete = complete && productIds.length === salesKeys.length &&
+          rows.every(row => row.detail?.products != null);
+        const productStats = productComplete ? rows.flatMap(row => productIds.map(id =>
+          row.detail?.products?.[id] ?? [0, 0, 0])) : [];
+        const spend = selected.size
+          ? productComplete ? productStats.reduce((sum, item) => sum + item[0], 0) : null
+          : complete ? rows.reduce((sum, row) => sum + row.spend, 0) : null;
+        const attributed = selected.size
+          ? productStats.reduce((sum, item) => sum + item[1], 0)
+          : rows.reduce((sum, row) => sum + row.attributedSales, 0);
+        const adOrders = selected.size
+          ? productComplete ? productStats.reduce((sum, item) => sum + item[2], 0) : null
+          : complete && rows.every(row => row.detail?.orders != null)
+            ? rows.reduce((sum, row) => sum + (row.detail?.orders ?? 0), 0) : null;
+        const eligible = orders.filter(row => row.day >= start && row.day <= end &&
+          !["cancelled", "returning"].includes(row.status) && (!selected.size || selected.has(salesProductKey(row))));
         const amounts=eligible.map(wbOrderAmount);
         const sales=amounts.every(n=>Number.isFinite(n)&&n>0)?amounts.reduce((a,b)=>a+b,0):null;
         return <tr key={label}><td><b>{label}</b><small>{start} 至 {end}</small></td>
-          <td>{spend==null?"—":money(spend)}</td><td>{ratio(spend,attributed)}</td><td>{ratio(spend,sales)}</td>
+          <td>{sales === null ? "—" : money(sales)}</td><td>{eligible.length}</td>
+          <td>{adOrders ?? "—"}</td><td>{ratio(adOrders, eligible.length)}</td>
+          <td>{spend==null?"—":`¥ ${spend.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2})}`}</td><td>{ratio(spend,attributed)}</td><td>{ratio(spend === null ? null : spend * wbRubPerCny,sales)}</td>
           <td>{days>0?`${rows.length} / ${days} 天`:"日期待选择"}</td></tr>;
       })}
     </tbody></table></div>
-    <p className="wbo-muted">ACOS = 广告费 ÷ 广告归因销售额。TACOS = 广告费 ÷ 有效订单金额。广告覆盖不足、订单金额缺失或分母为零时显示“—”。</p>
+    <p className="wbo-muted">销量按有效订单件数，销售额扣除取消与拒收。广告订单占比 = WB 广告归因订单 ÷ 有效订单数，两者统计口径可能不同。ACOS = 广告费 ÷ 广告归因销售额。TACOS = 人民币广告费换算为卢布 ÷ 有效订单卢布金额。缺少卢布金额时，人民币订单额按 ¥1 = ₽12.5 估算。广告覆盖不足、金额仍缺失或分母为零时显示“—”。</p>
   </section>;
+}
+
+type SalesSeries = { name: string; keys: string[] };
+
+function salesProductKey(row: Row) {
+  const id = value(row.raw.nmId ?? row.raw.nm_id).trim();
+  if (id && id !== "0") return "id:" + id;
+  const article = value(row.raw.article || row.raw.supplierArticle).trim();
+  return article ? "article:" + article : "";
 }
 
 function Operations({shopId,section,onSection}:{shopId:string;section:WbSection;onSection:(s:WbSection)=>void}){
   const [data,setData]=useState<Snapshot>(empty),[error,setError]=useState(""),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
   const [from,setFrom]=useState(before(6)),[to,setTo]=useState(today()),[warehouse,setWarehouse]=useState(""),[model,setModel]=useState(""),[status,setStatus]=useState(""),[query,setQuery]=useState(""),[page,setPage]=useState(0);
   const [auto,setAuto]=useState(()=>localStorage.getItem(`wb-auto-${shopId}`)==="true"),[edit,setEdit]=useState<Row|null>(null),[draft,setDraft]=useState<Json>({}),[saving,setSaving]=useState(false),[allReturns,setAllReturns]=useState(true),[returnSource,setReturnSource]=useState("");
+  const seriesStorage = "wb-sales-series:" + shopId;
+  const [series, setSeries] = useState<SalesSeries[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(seriesStorage) ?? "[]");
+      return Array.isArray(saved) ? saved.filter(item => typeof item?.name === "string" &&
+        Array.isArray(item.keys) && item.keys.every((key: unknown) => typeof key === "string")) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [salesKeys, setSalesKeys] = useState<string[]>([]);
+  const [salesQuery, setSalesQuery] = useState("");
+  const [seriesName, setSeriesName] = useState("");
+  const [activeSeries, setActiveSeries] = useState("");
+  const [seriesMessage, setSeriesMessage] = useState("");
+  const products = useMemo(() => {
+    const options = new Map<string, string>();
+    for (const row of data.orders) {
+      const key = salesProductKey(row);
+      if (!key || options.has(key)) continue;
+      const article = value(row.raw.article || row.raw.supplierArticle);
+      options.set(key, [article, key.startsWith("id:") ? "WB " + key.slice(3) : ""].filter(Boolean).join(" · "));
+    }
+    return [...options].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [data.orders]);
+
+  function saveSalesSeries() {
+    const name = seriesName.trim();
+    if (!name || !salesKeys.length) return;
+    if (series.some(item => item.name === name)) {
+      setSeriesMessage("已有同名系列，请使用其他名称。");
+      return;
+    }
+    const next = [...series, { name, keys: salesKeys }];
+    try {
+      localStorage.setItem(seriesStorage, JSON.stringify(next));
+      setSeries(next);
+      setActiveSeries(name);
+      setSeriesName("");
+      setSeriesMessage("系列已保存。");
+    } catch {
+      setSeriesMessage("无法保存系列，本机存储不可用。");
+    }
+  }
+
   const alive=useRef(true),syncing=useRef(false),version=useRef(0);
   const running=busy||data.running;
   async function refresh(){const v=++version.current;try{const d=await api("list",{shopId});if(alive.current&&v===version.current)setData(d)}catch(e){if(alive.current)setError(String(e))}finally{if(alive.current)setLoading(false)}}
@@ -106,11 +190,16 @@ function Operations({shopId,section,onSection}:{shopId:string;section:WbSection;
   useEffect(()=>{if(!running)return;const timer=setInterval(()=>void refresh(),2500);return()=>clearInterval(timer)},[running,shopId]);
   async function sync(automatic=false){if(syncing.current||data.running)return;syncing.current=true;setBusy(true);setError("");try{await api("sync",{shopId,from:automatic?before(6):from,to:automatic?today():to});await refresh()}catch(e){if(alive.current)setError(String(e))}finally{syncing.current=false;if(alive.current)setBusy(false)}}
   useEffect(()=>{localStorage.setItem(`wb-auto-${shopId}`,String(auto));if(!auto)return;const timer=setInterval(()=>void sync(true),60*60*1000);return()=>clearInterval(timer)},[auto,from,to,shopId,data.running]);
-  useEffect(()=>{setPage(0)},[warehouse,model,status,query,from,to,section,allReturns,returnSource]);
+  useEffect(()=>{setPage(0)},[warehouse,model,status,query,from,to,section,allReturns,returnSource,salesKeys]);
   useEffect(()=>{setStatus(s=>!s||(section==="returns"?returnStages:stages)[s]?s:"");setQuery("")},[section]);
   const whName=(id:unknown)=>{const s=value(id);return data.warehouses.find(w=>value(w.raw.id)===s)?.raw.name||(s?`仓库 ${s}`:"待关联仓库")};
   const byWh=(r:Row,returns=false)=>!warehouse||(warehouse==="unknown"?!value(returns?r.warehouseId:r.raw.warehouseId):value(returns?r.warehouseId:r.raw.warehouseId)===warehouse);
-  const orders=useMemo(()=>data.orders.filter(r=>byWh(r)&&(!model||r.raw._model===model)&&r.day>=from&&r.day<=to),[data.orders,warehouse,model,from,to]);
+  const scopedOrders=useMemo(()=>data.orders.filter(r=>byWh(r)&&(!model||r.raw._model===model)&&r.day>=from&&r.day<=to),[data.orders,warehouse,model,from,to]);
+  const orders = useMemo(() => {
+    if (!salesKeys.length) return scopedOrders;
+    const selected = new Set(salesKeys);
+    return scopedOrders.filter(row => selected.has(salesProductKey(row)));
+  }, [scopedOrders, salesKeys]);
   const returns=useMemo(()=>data.returns.filter(r=>byWh(r,true)&&(allReturns||r.day>=from&&r.day<=to)),[data.returns,warehouse,allReturns,from,to]);
   const reminders=data.returns.filter(r=>byWh(r,true)&&["pickup","expired"].includes(r.status));
   const activeOrders=orders.filter(r=>!["cancelled","returning"].includes(r.status));
@@ -126,10 +215,45 @@ function Operations({shopId,section,onSection}:{shopId:string;section:WbSection;
     const escape=(v:unknown)=>`"${value(v).replace(/^[=+@-]/,"'$&").replaceAll('"','""')}"`;const blob=new Blob(["\ufeff"+[heading,...rows].map(r=>r.map(escape).join(",")).join("\r\n")],{type:"text/csv;charset=utf-8"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`WB-${section}-${from}-${to}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
   return <>
     <section className="wbo-toolbar wbo-panel"><label>开始日期<input type="date" value={from} max={to} onChange={e=>setFrom(e.target.value)}/></label><label>结束日期<input type="date" value={to} min={from} max={today()} onChange={e=>setTo(e.target.value)}/></label><label>海外仓<select value={warehouse} onChange={e=>setWarehouse(e.target.value)}><option value="">全部仓库</option>{data.warehouses.map(w=><option key={w.id} value={value(w.raw.id)}>{w.raw.name} · {w.raw.id}</option>)}<option value="unknown">待关联仓库</option></select></label><label>配送模式<select value={model} disabled={section==="returns"} onChange={e=>setModel(e.target.value)}><option value="">FBS + DBS</option><option value="fbs">FBS</option><option value="dbs">DBS</option></select></label><button className="primary" disabled={running||!from||!to||to<from||(Date.parse(to)-Date.parse(from))/86400000>29} onClick={()=>void sync()}><RefreshCw size={16} className={running?"spin":""}/>{running?"正在同步…":"同步订单与退货"}</button><label className="wbo-check"><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/>每小时自动同步</label><small>莫斯科日期 · 订单单次最多 30 天 · 退货独立回补近 90 天 · 自动同步在 WB 工作台打开时运行</small></section>
+    {(section === "daily" || (section === "orders" && salesKeys.length > 0)) &&
+      <section className="wbo-panel">
+        <div className="wbo-heading"><h2>商品销售筛选</h2><button disabled={!salesKeys.length}
+          onClick={() => { setSalesKeys([]); setActiveSeries(""); setSeriesMessage(""); }}>恢复整店</button></div>
+        {section === "daily" && <>
+          <div className="wbo-toolbar">
+            <label>系列<select value={activeSeries} onChange={event => {
+              const name = event.target.value;
+              setActiveSeries(name);
+              setSalesKeys(series.find(item => item.name === name)?.keys ?? []);
+              setSeriesMessage("");
+            }}><option value="">选择已保存系列</option>
+              {series.map(item => <option key={item.name} value={item.name}>{item.name} · {item.keys.length} 款</option>)}
+            </select></label>
+            <label>搜索商品<input placeholder="货号或 WB 商品 ID" value={salesQuery}
+              onChange={event => setSalesQuery(event.target.value)} /></label>
+            <label>新系列名称<input value={seriesName} maxLength={80} onChange={event => setSeriesName(event.target.value)} /></label>
+            <button disabled={!salesKeys.length || !seriesName.trim()} onClick={saveSalesSeries}>保存为系列</button>
+          </div>
+          <details><summary>选择商品（可多选）</summary>
+            <div style={{ maxHeight: 200, overflowY: "auto" }}>
+              {products.filter(([, label]) => label.toLowerCase().includes(salesQuery.trim().toLowerCase())).map(([key, label]) =>
+                <label className="wbo-check" key={key}><input type="checkbox" checked={salesKeys.includes(key)}
+                  onChange={event => {
+                    const checked = event.target.checked;
+                    setSalesKeys(previous => checked ? [...previous, key] : previous.filter(item => item !== key));
+                    setActiveSeries("");
+                    setSeriesMessage("");
+                  }} />{label}</label>)}
+            </div>
+            {!products.length && <p>同步订单后可选择商品。</p>}
+          </details>
+        </>}
+        <p role="status">{activeSeries ? `系列「${activeSeries}」 · ` : ""}{salesKeys.length ? `已选 ${salesKeys.length} 款商品` : "全部商品"}{seriesMessage && ` · ${seriesMessage}`}</p>
+      </section>}
     {error&&<div className="wbo-error" role="alert">{error}</div>}
     {section==="orders" && <WbReconciliation key={from+"/"+to} shopId={shopId} from={from} to={to} disabled={running}/>}
     {reminders.length>0&&<div className="wbo-reminder" role="status"><BellRing size={22}/><div><b>{reminders.length} 件退货需要安排取件或核实</b><p>{reminders.slice(0,3).map(r=>`${r.raw.orderId||r.raw.srid||r.raw.id||r.raw.shkId} · ${whName(r.warehouseId)}${(r.local.due||r.raw.expiredDt)?` · 截止 ${r.local.due||value(r.raw.expiredDt).slice(0,10)}`:""}`).join("；")}</p></div><button onClick={()=>{onSection("returns");setStatus("pickup");setAllReturns(true)}}>查看取件清单</button></div>}
-    {section==="daily"?<> <WbAdvertising shopId={shopId} from={from} to={to} orders={data.orders} busy={running}/>
+    {section==="daily"?<> <WbAdvertising shopId={shopId} from={from} to={to} orders={data.orders} busy={running} salesKeys={salesKeys}/>
       <div className="wbo-kpis">{[["周期订单量",orders.length,"平台订单明细",ShoppingBag],["扣除取消 / 拒收后订单额",money(orderAmount),amountMissing?`${amountMissing} 单金额或 RUB 币种缺失`:"订单额，非结算收入",Boxes],["待备货订单",orders.filter(r=>r.status==="awaiting_preparation").length,"按所选仓库安排备货",Truck],["取件 / 超期待核实",reminders.length,"跨日期待办，避免漏取",ArrowDownLeft]].map(([label,v,note,Icon])=>{const I=Icon as typeof Boxes;return <section className="wbo-panel wbo-kpi" key={String(label)}><span><I size={18}/>{String(label)}</span><strong>{String(v)}</strong><small>{String(note)}</small></section>})}</div>
       <div className="wbo-dashboard-grid"><section className="wbo-panel"><div className="wbo-heading"><h2>每日订单趋势</h2><span>{from} 至 {to}</span></div><div className="wbo-trend">{daily.map(([day,d])=><button key={day} title={`${day}：${d.total} 单，取消 / 拒收 ${d.cancelled} 单`} onClick={()=>{setFrom(day);setTo(day);onSection("orders")}}><b>{d.total}</b><span style={{height:`${Math.max(3,d.total/Math.max(1,...daily.map(([,v])=>v.total))*115)}px`}}/><small>{day.slice(5)}</small></button>)}</div><p className="wbo-muted">点击日期查看订单号。汇总基于已同步订单，取消与拒收会随平台状态更新。</p></section><section className="wbo-panel"><div className="wbo-heading"><h2>履约进度</h2><button onClick={()=>onSection("orders")}>进入订单中心 →</button></div><div className="wbo-stages">{Object.entries(stages).map(([s,label])=><button key={s} onClick={()=>{onSection("orders");setTimeout(()=>setStatus(s),0)}}><span className={`wbo-dot ${s}`}/><span>{label}</span><b>{orders.filter(r=>r.status===s).length}</b></button>)}</div></section></div>
       <section className="wbo-panel"><div className="wbo-heading"><h2>每日经营明细</h2><span>按订单创建日归属</span></div><div className="wbo-table-wrap"><table><thead><tr><th>日期</th><th>订单量</th><th>取消 / 拒收</th><th>扣除取消 / 拒收后订单量</th><th>扣除取消 / 拒收后订单额</th><th>查看</th></tr></thead><tbody>{[...daily].reverse().map(([day,d])=><tr key={day}><td>{day}</td><td>{d.total}</td><td>{d.cancelled}</td><td>{d.total-d.cancelled}</td><td>{money(d.amount)}</td><td><button onClick={()=>{setFrom(day);setTo(day);onSection("orders")}}>订单明细</button></td></tr>)}</tbody></table></div></section>

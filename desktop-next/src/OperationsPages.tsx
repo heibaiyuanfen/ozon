@@ -4621,6 +4621,7 @@ export function SupplyPage() {
                 <th>发货点</th>
                 <th>集群 / 目的仓</th>
                 <th>当前时段</th>
+                <th style={{ minWidth: 150 }}>越库费用</th>
                 <th></th>
               </tr>
             </thead>
@@ -4655,6 +4656,14 @@ export function SupplyPage() {
                   <td>
                     <b>{row.timeslotFrom ? zonedRange(row.timeslotFrom, row.timeslotTo, row.timezoneName || "UTC") : "未预约"}</b>
                     {row.timeslotFrom && <small>仓库时间 · {row.timezoneName || "UTC"}<br />中国 {zonedRange(row.timeslotFrom, row.timeslotTo, "Asia/Shanghai")}</small>}
+                  </td>
+                  <td title="依据本店已同步的 Ozon 财务流水。待确认金额由平台后续入账确定。">
+                    {row.supplyType === "越库" ? <>
+                      <b>{row.crossdockCharge == null ? "未查到入账" : `已入账 ₽ ${row.crossdockCharge.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</b>
+                      {row.crossdockLastChargeDate && <small>最近入账 {row.crossdockLastChargeDate.slice(0, 10)}</small>}
+                      {row.crossdockUnmatchedSupplies ? <small>{row.crossdockUnmatchedSupplies} 个子供应待核对 · 金额待确认</small>
+                        : row.crossdockUnmatchedSupplies == null && <small>子供应费用待核对</small>}
+                    </> : "—"}
                   </td>
                   <td>
                     <div className="table-actions">
