@@ -15,6 +15,8 @@ pub struct PackingItemInput {
     battery: String,
     cartons: i64,
     quantity_per_carton: i64,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    carton_quantities: std::collections::BTreeMap<usize, i64>,
     weight_kg: f64,
     length_cm: f64,
     width_cm: f64,
@@ -138,6 +140,7 @@ pub fn delete_packing_draft(id: i64, state: State<'_, AppState>) -> Result<(), S
 struct CartonRow<'a> {
     number: usize,
     item_index: usize,
+    quantity: i64,
     item: &'a PackingItemInput,
 }
 
@@ -250,7 +253,7 @@ fn build_xlsx(
             cell_text(&format!("H{r}"), &item.barcode_label, 3),
             cell_text(&format!("I{r}"), &item.battery, 3),
             cell_num(&format!("J{r}"), carton.item_index, 3),
-            cell_num(&format!("K{r}"), item.quantity_per_carton, 3),
+            cell_num(&format!("K{r}"), carton.quantity, 3),
             cell_text(
                 &format!("L{r}"),
                 &format!(
@@ -359,6 +362,42 @@ fn build_pdf(path: &std::path::Path, batch_code: &str, carton_count: usize) -> R
     fs::write(path, out).map_err(|e| e.to_string())
 }
 
+fn carton_rows(items: &[PackingItemInput]) -> Result<(Vec<CartonRow<'_>>, i64), String> {
+    let mut cartons = Vec::new();
+    let mut total_quantity = 0i64;
+    for (index, item) in items.iter().enumerate() {
+        if item.cartons <= 0 || item.quantity_per_carton <= 0 {
+            return Err(format!("第 {} 个产品的箱数和单箱数量必须大于 0", index + 1));
+        }
+        if item.weight_kg <= 0.0
+            || item.length_cm <= 0.0
+            || item.width_cm <= 0.0
+            || item.height_cm <= 0.0
+        {
+            return Err(format!("第 {} 个产品的重量和尺寸必须大于 0", index + 1));
+        }
+        if item.cartons > (999 - cartons.len()) as i64 {
+            return Err("单次最多生成 999 个箱唛".into());
+        }
+        if item.carton_quantities.iter().any(|(&number, &quantity)| {
+            number == 0 || number > item.cartons as usize || quantity <= 0
+        }) {
+            return Err(format!("第 {} 个产品的特殊箱号必须在箱数范围内，件数必须大于 0", index + 1));
+        }
+        for local_number in 1..=item.cartons as usize {
+            let quantity = item.carton_quantities.get(&local_number).copied().unwrap_or(item.quantity_per_carton);
+            total_quantity = total_quantity.checked_add(quantity).ok_or("装箱总件数过大")?;
+            cartons.push(CartonRow {
+                number: cartons.len() + 1,
+                item_index: index + 1,
+                quantity,
+                item,
+            });
+        }
+    }
+    Ok((cartons, total_quantity))
+}
+
 #[tauri::command]
 pub fn export_packing_documents(
     input: PackingExportInput,
@@ -371,31 +410,7 @@ pub fn export_packing_documents(
     if input.items.is_empty() {
         return Err("请至少添加一个补货产品".into());
     }
-    let mut cartons = Vec::new();
-    let mut total_quantity = 0i64;
-    for (index, item) in input.items.iter().enumerate() {
-        if item.cartons <= 0 || item.quantity_per_carton <= 0 {
-            return Err(format!("第 {} 个产品的箱数和单箱数量必须大于 0", index + 1));
-        }
-        if item.weight_kg <= 0.0
-            || item.length_cm <= 0.0
-            || item.width_cm <= 0.0
-            || item.height_cm <= 0.0
-        {
-            return Err(format!("第 {} 个产品的重量和尺寸必须大于 0", index + 1));
-        }
-        total_quantity += item.cartons * item.quantity_per_carton;
-        for _ in 0..item.cartons {
-            cartons.push(CartonRow {
-                number: cartons.len() + 1,
-                item_index: index + 1,
-                item,
-            });
-        }
-    }
-    if cartons.len() > 999 {
-        return Err("单次最多生成 999 个箱唛".into());
-    }
+    let (cartons, total_quantity) = carton_rows(&input.items)?;
     let folder = state
         .data_dir
         .parent()
@@ -690,6 +705,7 @@ mod tests {
             battery: "否".into(),
             cartons: 2,
             quantity_per_carton: 10,
+            carton_quantities: [(2, 6)].into(),
             weight_kg: 5.0,
             length_cm: 40.0,
             width_cm: 30.0,
@@ -705,24 +721,19 @@ mod tests {
             notice: String::new(),
             items: vec![item],
         };
-        let cartons = vec![
-            CartonRow {
-                number: 1,
-                item_index: 1,
-                item: &input.items[0],
-            },
-            CartonRow {
-                number: 2,
-                item_index: 1,
-                item: &input.items[0],
-            },
-        ];
+        let (cartons, total) = carton_rows(&input.items).unwrap();
+        assert_eq!(total, 16);
+        assert_eq!(cartons[0].quantity, 10);
+        assert_eq!(cartons[1].quantity, 6);
         let xlsx = root.join("test.xlsx");
         let pdf = root.join("test.pdf");
         build_xlsx(&xlsx, &input, &cartons).unwrap();
         build_pdf(&pdf, &input.batch_code, cartons.len()).unwrap();
         let mut archive = zip::ZipArchive::new(fs::File::open(&xlsx).unwrap()).unwrap();
-        assert!(archive.by_name("xl/worksheets/sheet1.xml").is_ok());
+        let mut worksheet = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut worksheet).unwrap();
+        assert!(worksheet.contains(r#"<c r="K5" s="3"><v>10</v></c>"#));
+        assert!(worksheet.contains(r#"<c r="K6" s="3"><v>6</v></c>"#));
         let bytes = fs::read(&pdf).unwrap();
         assert!(bytes.starts_with(b"%PDF-1.4"));
         assert!(String::from_utf8_lossy(&bytes).contains("/Count 2"));

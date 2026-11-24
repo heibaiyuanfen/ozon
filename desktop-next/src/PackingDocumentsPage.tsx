@@ -21,7 +21,13 @@ export function PackingDocumentsPage({ inventory, shopName }: { inventory: Inven
   const autosaveReady = useRef(false);
   const products = useMemo(() => Array.from(new Map(inventory.map((x) => [x.sku, x])).values()), [inventory]);
   const cartons = items.reduce((sum, x) => sum + Math.max(0, Number(x.cartons) || 0), 0);
-  const quantity = items.reduce((sum, x) => sum + Math.max(0, Number(x.cartons) || 0) * Math.max(0, Number(x.quantityPerCarton) || 0), 0);
+  const quantity = items.reduce((sum, item) => {
+    const standard = Math.max(0, item.quantityPerCarton);
+    const adjustment = Object.entries(item.cartonQuantities ?? {}).reduce(
+      (total, [number, count]) => Number(number) <= item.cartons ? total + count - standard : total, 0,
+    );
+    return sum + Math.max(0, item.cartons) * standard + adjustment;
+  }, 0);
   const update = (index: number, patch: Partial<PackingItemInput>) => setItems((old) => old.map((x, i) => i === index ? { ...x, ...patch } : x));
   const payload = useMemo<PackingExportInput>(() => ({ batchCode, title, platform, shopName, shippingDate: shipDate, notice, items }), [batchCode, title, platform, shopName, shipDate, notice, items]);
   const refreshDrafts = () => void packingDrafts().then(setDrafts).catch((e) => setError(String(e)));
@@ -46,14 +52,19 @@ export function PackingDocumentsPage({ inventory, shopName }: { inventory: Inven
     </section>
     <section className="card packing-products">
       <div className="card-title">补货产品<span>同一产品的箱数会自动展开为逐箱明细</span><button className="outline-button" onClick={() => setItems((old) => [...old, blankItem()])}><Plus size={15}/>添加产品</button></div>
-      <div className="packing-product-list">{items.map((item, index) => <article className="packing-product" key={index}>
+      <div className="packing-product-list">{items.map((item, index) => {
+        const offset = items.slice(0, index).reduce((sum, product) => sum + Math.max(0, product.cartons), 0);
+        const overrides = item.cartonQuantities ?? {};
+        const availableBoxes = Array.from({ length: Math.min(999, Math.max(0, item.cartons)) }, (_, i) => i + 1)
+          .filter((number) => overrides[number] === undefined);
+        return <article className="packing-product" key={index}>
         <div className="packing-product-head"><b>产品 {index + 1}</b>{items.length > 1 && <button title="删除" onClick={() => setItems((old) => old.filter((_, i) => i !== index))}><Trash2 size={16}/></button>}</div>
         <div className="packing-form-grid product-fields">
           <label className="wide">库存商品<select value={item.sku} onChange={(e) => { const p = products.find((x) => x.sku === e.target.value); update(index, { sku: e.target.value, productName: p?.productName || "", barcodeLabel: p?.offerId || e.target.value }); }}><option value="">手动填写 / 请选择</option>{products.map((p) => <option key={p.sku} value={p.sku}>{p.offerId || p.sku} · {p.productName}</option>)}</select></label>
           <label>商品名称<input value={item.productName} onChange={(e) => update(index, { productName: e.target.value })}/></label>
           <label>条码标签<input value={item.barcodeLabel} onChange={(e) => update(index, { barcodeLabel: e.target.value })}/></label>
           <label>箱数<input type="number" min="1" value={item.cartons} onChange={(e) => update(index, { cartons: Number(e.target.value) })}/></label>
-          <label>单箱数量<input type="number" min="1" value={item.quantityPerCarton} onChange={(e) => update(index, { quantityPerCarton: Number(e.target.value) })}/></label>
+          <label>默认单箱数量<input type="number" min="1" value={item.quantityPerCarton} onChange={(e) => update(index, { quantityPerCarton: Number(e.target.value) })}/></label>
           <label>单箱重量 KG<input type="number" min="0.01" step="0.01" value={item.weightKg} onChange={(e) => update(index, { weightKg: Number(e.target.value) })}/></label>
           <label>长 CM<input type="number" min="0.1" step="0.1" value={item.lengthCm} onChange={(e) => update(index, { lengthCm: Number(e.target.value) })}/></label>
           <label>宽 CM<input type="number" min="0.1" step="0.1" value={item.widthCm} onChange={(e) => update(index, { widthCm: Number(e.target.value) })}/></label>
@@ -61,7 +72,35 @@ export function PackingDocumentsPage({ inventory, shopName }: { inventory: Inven
           <label>是否带电<select value={item.battery} onChange={(e) => update(index, { battery: e.target.value })}><option>否</option><option>是</option></select></label>
           <label className="wide">备注<input value={item.remark} onChange={(e) => update(index, { remark: e.target.value })} placeholder="颜色、款式等"/></label>
         </div>
-      </article>)}</div>
+        <div className="packing-carton-overrides">
+          <button type="button" className="outline-button" disabled={!availableBoxes.length} onClick={() => {
+            const number = availableBoxes[availableBoxes.length - 1];
+            update(index, { cartonQuantities: { ...overrides, [number]: item.quantityPerCarton } });
+          }}><Plus size={15}/>调整个别箱件数</button>
+          {Object.entries(overrides).map(([number, count]) => (
+            <div key={number} className="packing-carton-override">
+              <label>箱号<select value={number} onChange={(event) => {
+                const next = { ...overrides };
+                delete next[number];
+                next[event.target.value] = count;
+                update(index, { cartonQuantities: next });
+              }}>
+                <option value={number}>第 {offset + Number(number)} 箱{Number(number) > item.cartons ? "（超出当前箱数）" : ""}</option>
+                {availableBoxes.map((box) => <option key={box} value={box}>第 {offset + box} 箱</option>)}
+              </select></label>
+              <label>实际件数<input type="number" min="1" step="1" value={count} onChange={(event) => update(index, {
+                cartonQuantities: { ...overrides, [number]: Number(event.target.value) },
+              })} /></label>
+              <button type="button" className="outline-button" onClick={() => {
+                const next = { ...overrides };
+                delete next[number];
+                update(index, { cartonQuantities: next });
+              }}>恢复默认</button>
+            </div>
+          ))}
+        </div>
+      </article>;
+      })}</div>
     </section>
     <section className="card packing-export"><div><PackagePlus size={22}/><p><b>{items.length} 个产品 · {cartons} 箱 · {quantity} 件</b><span>{lastExport ? "已记住最近生成的文件，可直接上传飞书" : "装箱单为 Excel，箱唛为 7×5 英寸横向 PDF，每箱一页"}</span></p></div><div className="packing-export-actions"><button className="dark-button" disabled={busy || !cartons} onClick={async () => { setBusy(true); setError(""); setMessage(""); try { const savedId = await savePackingDraft(draftId, draftName, payload); setDraftId(savedId); const result = await exportPackingDocuments(payload); setLastExport(result); localStorage.setItem("packing-last-export", JSON.stringify({ batchCode, result })); refreshDrafts(); setMessage(`已生成 ${result.cartonCount} 页箱唛和装箱单，共 ${result.totalQuantity} 件。文件夹已打开。`); } catch (e) { setError(String(e)); } finally { setBusy(false); } }}><FileSpreadsheet size={16}/><FileText size={16}/>{busy ? "正在生成…" : "生成装箱单和箱唛"}</button><button className="feishu-upload" disabled={uploading} onClick={async () => { if (!lastExport) { setError("尚未找到可上传的文件，请先点击“生成装箱单和箱唛”"); return; } setUploading(true); setError(""); setMessage("正在连接飞书并上传 Excel 与 PDF，请稍候…"); try { const uploaded = await uploadPackingDocumentsToFeishu(lastExport.xlsxPath, lastExport.pdfPath); setMessage(`Excel 装箱单和 PDF 箱唛已上传到飞书“发货装箱单 / ${uploaded.folderName}”文件夹`); } catch (e) { setMessage(""); setError(`飞书上传失败：${String(e)}`); } finally { setUploading(false); } }}><CloudUpload size={16}/>{uploading ? "上传中…" : "上传到飞书"}</button></div></section>
   </>;

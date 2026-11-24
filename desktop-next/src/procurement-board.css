@@ -242,3 +242,9 @@
 .pb-doc {
   min-width: 0;
 }
+
+.pb-inventory-items { margin: 12px 0; min-width: 0; }
+.pb-inventory-item { display: grid; grid-template-columns: 1fr 1fr minmax(80px, .4fr) auto; gap: 8px; align-items: end; margin-bottom: 8px; }
+.pb-inventory-item label { display: grid; gap: 4px; min-width: 0; }
+.pb-inventory-item input { width: 100%; box-sizing: border-box; }
+.pb-inventory-actions { display: flex; flex-wrap: wrap; gap: 8px; }

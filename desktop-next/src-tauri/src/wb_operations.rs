@@ -152,7 +152,7 @@ fn snapshot(c: &Connection, shop: &str) -> Result<Value, String> {
         json!({"warehouses":warehouses,"orders":orders,"returns":returns,"sync":sync,"running":running}),
     )
 }
-fn request(token: &str, host: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+pub(super) fn request(token: &str, host: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(40))
         .build();
@@ -708,6 +708,17 @@ pub async fn wb_operations(
         }
         match action.as_str() {
             "list" => snapshot(&c, shop),
+            "inventory_list" => super::wb_inventory::run(&c, shop, None),
+            "inventory_sync" => {
+                let resource = payload["resource"].as_str().ok_or("请选择同步来源")?;
+                let lock = SYNCING.get_or_init(Default::default);
+                if !lock.lock().map_err(|e| e.to_string())?.insert(shop.to_owned()) {
+                    return Err("该店铺正在同步，请稍候".into());
+                }
+                let result = super::wb_inventory::run(&c, shop, Some(resource));
+                lock.lock().map_err(|e| e.to_string())?.remove(shop);
+                result
+            }
             "reconciliation_list" => reconcile(&c, shop, &action, &payload),
             "reconciliation_sync" => {
                 let lock = SYNCING.get_or_init(Default::default);

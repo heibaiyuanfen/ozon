@@ -353,6 +353,7 @@ export interface InventoryRow {
   reservedStock: number | null;
   transitStock: number;
   requestedStock: number;
+  procurementLinked: boolean;
   domesticProductionStock: number;
   domesticWarehouseStock: number;
   overseasTransitStock: number;
@@ -1053,6 +1054,7 @@ export interface SupplyOrderItem {
   sku: string;
   offerId: string;
   cargoMarks: string[];
+  cargoDetails?: Record<string, { quantity: number | null; special: boolean }>;
   quantity: number;
 }
 export interface SupplyCargoSupply {

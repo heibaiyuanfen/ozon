@@ -329,6 +329,7 @@ function Sidebar({
                 ["orders", "订单中心", ShoppingBag],
                 ["returns", "退货中心", Truck],
                 ["pricing", "价格与利润监控", BarChart3],
+                ["inventory", "库存与销量预估", PackageSearch],
               ] as Array<
                 [WbPageKey, string, typeof LayoutDashboard]
               >
@@ -1537,8 +1538,10 @@ export function App() {
       if (page === "advertising") setAds(await advertising(range));
       if (page === "products")
         setProductRows(await products(range, deferredQuery));
-      if (page === "inventory")
-        setInventoryRows(await inventory(deferredQuery, targetDays, leadTimeDays, safetyDays));
+      if (page === "inventory") {
+        const result = await inventory(deferredQuery, targetDays, leadTimeDays, safetyDays);
+        if (version === loadVersion.current) setInventoryRows(result);
+      }
       if (page === "settings") setConnection(await connectionStatus());
     } finally {
       if (version === loadVersion.current) setRefreshing(false);
@@ -1741,7 +1744,7 @@ export function App() {
             {page === "ad_attribution" && <AdAttributionPage key={activeShop?.id} />}
             {page === "daily_tasks" && <DailyTaskCenter key={activeShop?.id} />}
             {page === "contracts" && <PurchaseContractPage />}
-            {page === "procurement_board" && <ProcurementBoard key={activeShop?.id} />}{page === "purchase_orders" && <PurchaseOrderPage />}
+            {page === "procurement_board" && <ProcurementBoard key={activeShop?.id} shopId={activeShop?.id || ""} />}{page === "purchase_orders" && <PurchaseOrderPage />}
             {page === "freight_quotes" && <FreightQuotePage />}
             {page === "mind_map" && <MindMapPage shopId={activeShop?.id || ""} />}{" "}
             {page === "inventory" && (

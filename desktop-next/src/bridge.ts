@@ -289,6 +289,14 @@ export async function syncProductBarcodes(): Promise<import("./types").ProductBa
   return invoke("sync_product_barcodes");
 }
 
+export type InventoryChainStage = keyof Pick<InventoryRow,
+  "domesticProductionStock" | "domesticWarehouseStock" | "overseasTransitStock" | "overseasArrivedStock"
+>;
+
+export function saveInventoryChainQuantity(sku: string, stage: InventoryChainStage, quantity: number) {
+  return invoke<void>("save_inventory_chain_quantity", { sku, stage, quantity });
+}
+
 export async function inventory(
   query: string,
   targetDays = 30,
@@ -305,6 +313,7 @@ export async function inventory(
     reservedStock: 8,
     transitStock: i * 2,
     requestedStock: i,
+    procurementLinked: false,
     domesticProductionStock: i % 3 === 0 ? 30 : 0,
     domesticWarehouseStock: i % 4 === 0 ? 20 : 0,
     overseasTransitStock: i % 2 === 0 ? 15 : 0,
@@ -772,7 +781,7 @@ export async function exportDataset(
 
 export interface PackingItemInput {
   sku: string; productName: string; barcodeLabel: string; battery: string;
-  cartons: number; quantityPerCarton: number; weightKg: number;
+  cartons: number; quantityPerCarton: number; cartonQuantities?: Record<string, number>; weightKg: number;
   lengthCm: number; widthCm: number; heightCm: number; remark: string;
 }
 export interface PackingExportInput {

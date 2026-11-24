@@ -44,6 +44,8 @@ import {
   runInventoryAlertNow,
   syncProductBarcodes,
   updateShop,
+  saveInventoryChainQuantity,
+  type InventoryChainStage,
 } from "./bridge";
 import type {
   ConnectionStatus,
@@ -776,7 +778,7 @@ export function InventoryPage({
         </div>
       </div>
       <section className="card inventory-supply-chain">
-        <div className="inventory-chain-title"><b>飞书 + Ozon 全链路库存</b><small>飞书阶段必须填写 SKU 才能并入对应商品；每批货只归入当前所在阶段，避免重复计算。</small></div>
+        <div className="inventory-chain-title"><b>采购履约 + Ozon 全链路库存</b><small>采购履约按采购单 SKU 和整件数量同步，每批货只计入当前阶段。</small></div>
         <div className="inventory-chain-flow">
           {[
             ["国内在生产", productionTotal, "feishu"],
@@ -786,7 +788,7 @@ export function InventoryPage({
             ["Ozon 已申请", requestedTotal, "ozon"],
             ["Ozon 在途", transit, "ozon"],
             ["Ozon 可售", available, "ozon"],
-          ].map(([label, value, source], index) => <div className="inventory-chain-step" key={String(label)}><span>{label}</span><strong>{value} 件</strong><small>{source === "feishu" ? "飞书" : "Ozon"}</small>{index < 6 && <i>→</i>}</div>)}
+          ].map(([label, value, source], index) => <div className="inventory-chain-step" key={String(label)}><span>{label}</span><strong>{value} 件</strong><small>{source === "feishu" ? "供应链" : "Ozon"}</small>{index < 6 && <i>→</i>}</div>)}
         </div>
       </section>
       <section className="inventory-health-dashboard">
@@ -814,6 +816,7 @@ export function InventoryPage({
       <div className="list-toolbar">
         <div>
           <b>库存明细</b>
+          <small>已联动的数量由采购履约更新。其他数量可双击编辑，Enter 保存，Esc 取消。</small>
           <small>
             补货采用 7 日与 30 日日均销量中的较高值，并扣除可售、在途、已申请和已有计划。
           </small>
@@ -875,7 +878,7 @@ export function InventoryPage({
               <th>预留</th>
               <th>在途</th>
               <th>已申请</th>
-              <th>飞书供应链</th>
+              <th>供应链库存</th>
               <th>仓库</th>
               <th>日均销量</th>
               <th>需求趋势</th>
@@ -900,7 +903,12 @@ export function InventoryPage({
                 <td>{row.reservedStock ?? "—"}</td>
                 <td>{row.transitStock}</td>
                 <td>{row.requestedStock}</td>
-                <td><div className="sku-chain"><span>生产 <b>{row.domesticProductionStock}</b></span><span>国内仓 <b>{row.domesticWarehouseStock}</b></span><span>海外在途 <b>{row.overseasTransitStock}</b></span><span>海外到仓 <b>{row.overseasArrivedStock}</b></span></div></td>
+                <td><div className="sku-chain" key={shopId}>
+                  <InventoryChainQuantity label="生产" stage="domesticProductionStock" row={row} reload={reload} />
+                  <InventoryChainQuantity label="国内仓" stage="domesticWarehouseStock" row={row} reload={reload} />
+                  <InventoryChainQuantity label="海外在途" stage="overseasTransitStock" row={row} reload={reload} />
+                  <InventoryChainQuantity label="海外到仓" stage="overseasArrivedStock" row={row} reload={reload} />
+                </div></td>
                 <td>{row.warehouseCount}</td>
                 <td><b>{row.dailySales7d.toFixed(1)}</b><small>30日 {row.dailySales.toFixed(1)}</small></td>
                 <td className={(row.demandTrendPercent ?? 0) > 0 ? "demand-up" : (row.demandTrendPercent ?? 0) < 0 ? "demand-down" : ""}>{row.demandTrendPercent == null ? "—" : `${row.demandTrendPercent > 0 ? "+" : ""}${row.demandTrendPercent.toFixed(0)}%`}</td>
@@ -1336,5 +1344,63 @@ export function SettingsPage({ status }: { status: ConnectionStatus | null }) {
         </section>
       )}
     </>
+  );
+}
+
+function InventoryChainQuantity({ label, stage, row, reload }: {
+  label: string;
+  stage: InventoryChainStage;
+  row: InventoryRow;
+  reload: () => Promise<void>;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const start = () => {
+    setError("");
+    setDraft(String(row[stage]));
+  };
+  const save = async () => {
+    if (saving || draft === null) return;
+    const quantity = Number(draft);
+    if (!/^\d+$/.test(draft) || quantity > 2147483647) {
+      setError("请输入有效的非负整数。");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await saveInventoryChainQuantity(row.sku, stage, quantity);
+      await reload();
+      setDraft(null);
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+  if (row.procurementLinked) {
+    return <span title="由采购履约看板更新">{label} <b>{row[stage]}</b></span>;
+  }
+  if (draft === null) {
+    return (
+      <button type="button" title="双击编辑" onDoubleClick={start} onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          start();
+        }
+      }}>{label} <b>{row[stage]}</b></button>
+    );
+  }
+  return (
+    <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
+      <input aria-label={label} autoFocus inputMode="numeric" value={draft}
+        readOnly={saving} onFocus={(event) => event.currentTarget.select()}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !saving) setDraft(null);
+        }} />
+      {error && <small role="alert">{error}</small>}
+    </form>
   );
 }

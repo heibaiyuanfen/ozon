@@ -4746,6 +4746,9 @@ export function SupplyPage() {
             </div>
             <div className="supply-progress-track"><i style={{ width: `${itemProgress.total > 0 ? Math.min(100, itemProgress.completed / itemProgress.total * 100) : 0}%` }} /></div>
           </div>
+          {itemsBusy === null && orderItems.some((item) => item.cargoMarks.some((mark) => item.cargoDetails?.[mark]?.quantity == null)) && (
+            <p className="supply-cargo-note">有箱唛未读取到件数。旧缓存可点击「重新读取 Ozon」补充逐箱明细。</p>
+          )}
           <div className="supply-items-table">
             {itemsBusy !== null && <div className="empty"><RefreshCw className="spin" size={18} />正在读取供应单货品与箱唛…</div>}
             <table>
@@ -4754,7 +4757,14 @@ export function SupplyPage() {
                 <td><b>{item.productName || "未命名产品"}</b>{item.quantity > 0 && <small>{item.quantity} 件</small>}</td>
                 <td><code>{item.sku || "—"}</code></td>
                 <td>{item.offerId || "—"}</td>
-                <td>{item.cargoMarks.length ? item.cargoMarks.map((mark) => <span className="cargo-mark" key={mark}>{mark}</span>) : <span className="muted">未设置箱唛</span>}</td>
+                <td>{item.cargoMarks.length ? item.cargoMarks.map((mark) => {
+                  const detail = item.cargoDetails?.[mark];
+                  return <span className={`cargo-mark${detail?.special ? " cargo-mark-special" : ""}`} key={mark}>
+                    <span>{mark}</span>
+                    <strong>{detail?.quantity == null ? "数量未读取" : `${detail.quantity} 件`}</strong>
+                    {detail?.special && <em>特殊箱</em>}
+                  </span>;
+                }) : <span className="muted">未设置箱唛</span>}</td>
               </tr>)}</tbody>
             </table>
             {!orderItems.length && itemsBusy === null && <div className="empty">该供应单暂未返回货品明细。</div>}
@@ -4834,6 +4844,7 @@ function SupplyCargoPlanner({ order, onClose }: { order: SupplyOrder; onClose: (
     return supply.items.every((item) => counts[item.sku] === item.quantity)
       && Object.keys(counts).every((sku) => supply.items.some((item) => item.sku === sku));
   };
+  const activeAllocation = active ? allocated(boxesBySupply[active.supplyId] ?? []) : {};
   const allReady = chosen.length > 0 && chosen.every((row) => available(row) && balanced(row) && !["完成", "平台处理中", "提交中", "失败或待核对"].includes(progress[row.supplyId]?.phase || ""));
   const submitAll = async () => {
     if (!allReady) { setError("请先为所有勾选的集群生成货位，并核对每个 SKU 的分配总数"); return; }
@@ -4881,18 +4892,23 @@ function SupplyCargoPlanner({ order, onClose }: { order: SupplyOrder; onClose: (
           {row.readError && <small className="cost-missing">商品读取失败：{row.readError}</small>}
           {row.cargoStatusError && <small className="cost-missing">货位状态读取失败：{row.cargoStatusError}</small>}
         </label>)}</div>
-        <p className="supply-cargo-note">已有货位的集群默认跳过。勾选已有货位的集群会在提交时替换该供货的货位。每个商品只需填写一次装箱数量。</p>
-        <div className="supply-cargo-table"><table><thead><tr><th>商品</th><th>每货位件数</th><th>涉及集群</th></tr></thead><tbody>{uniqueProducts.map((item) => <tr key={item.sku}>
+        <p className="supply-cargo-note">已有货位的集群默认跳过。勾选已有货位的集群会在提交时替换该供货的货位。先填写默认每箱件数并生成货位，再选择集群逐箱调整实际件数。每个 SKU 的分配总数须等于供应数量。</p>
+        <div className="supply-cargo-table"><table><thead><tr><th>商品</th><th>默认每箱件数</th><th>涉及集群</th></tr></thead><tbody>{uniqueProducts.map((item) => <tr key={item.sku}>
           <td><b>{item.offerId || item.sku}</b><small>{item.name} · SKU {item.sku}</small></td>
           <td><input type="number" min="1" step="1" disabled={busy} value={packSizes[item.sku] ?? ""} onChange={(e) => setPackSizes((old) => ({ ...old, [item.sku]: e.target.value }))} placeholder="例如 20"/></td>
           <td>{supplies.filter((row) => row.items.some((product) => product.sku === item.sku)).length}</td>
         </tr>)}</tbody></table></div>
         <div className="supply-cargo-actions"><button className="outline-button" disabled={busy || !chosen.length} onClick={generateAll}>为勾选集群批量生成货位</button><strong>共 {chosen.reduce((sum, row) => sum + (boxesBySupply[row.supplyId]?.length || 0), 0)} 个待提交货位</strong></div>
         {active && <section className="supply-cargo-detail"><h3>集群 {active.clusterId} · 供货 {active.supplyId}</h3>
-          <div className="supply-cargo-table"><table><thead><tr><th>商品</th><th>供应数量</th><th>已分配</th></tr></thead><tbody>{active.items.map((item) => <tr key={item.sku}><td>{item.offerId || item.sku}</td><td>{item.quantity}</td><td className={boxesBySupply[active.supplyId]?.length && allocated(boxesBySupply[active.supplyId])[item.sku] !== item.quantity ? "cost-missing" : ""}>{allocated(boxesBySupply[active.supplyId] || [])[item.sku] || 0} / {item.quantity}</td></tr>)}</tbody></table></div>
+          <div className="supply-cargo-table"><table><thead><tr><th>商品</th><th>供应数量</th><th>已分配</th><th>分配差额</th></tr></thead><tbody>{active.items.map((item) => {
+            const assigned = activeAllocation[item.sku] ?? 0;
+            const remaining = item.quantity - assigned;
+            return <tr key={item.sku}><td>{item.offerId || item.sku}</td><td>{item.quantity}</td><td>{assigned}</td>
+              <td className={remaining ? "cost-missing" : ""}>{remaining > 0 ? `还差 ${remaining} 件` : remaining < 0 ? `多分 ${-remaining} 件` : "已平衡"}</td></tr>;
+          })}</tbody></table></div>
           {!!boxesBySupply[active.supplyId]?.length && <><div className="supply-cargo-actions"><strong>{boxesBySupply[active.supplyId].length} 个货位</strong><button className="outline-button" disabled={busy || boxesBySupply[active.supplyId].length >= 30} onClick={() => setBoxesBySupply((old) => ({ ...old, [active.supplyId]: [...old[active.supplyId], { items: [{ sku: active.items[0].sku, quantity: 1 }] }] }))}>添加货位</button></div><div className="supply-cargo-boxes">{boxesBySupply[active.supplyId].map((box, index) => <div key={index} className="supply-cargo-box"><b>货位 {index + 1}</b>
             <select disabled={busy} value={box.items[0]?.sku || ""} onChange={(e) => setBoxesBySupply((old) => ({ ...old, [active.supplyId]: old[active.supplyId].map((value, i) => i === index ? { items: [{ sku: e.target.value, quantity: value.items[0]?.quantity || 1 }] } : value) }))}>{active.items.map((item) => <option key={item.sku} value={item.sku}>{item.offerId || item.sku}</option>)}</select>
-            <input type="number" min="1" step="1" disabled={busy} value={box.items[0]?.quantity ?? 1} onChange={(e) => setBoxesBySupply((old) => ({ ...old, [active.supplyId]: old[active.supplyId].map((value, i) => i === index ? { items: [{ sku: value.items[0]?.sku || "", quantity: Number(e.target.value) || 0 }] } : value) }))}/><span>件</span>
+            <input type="number" min="1" step="1" disabled={busy} aria-label={`货位 ${index + 1} 实际件数`} value={box.items[0]?.quantity ?? 1} onChange={(e) => setBoxesBySupply((old) => ({ ...old, [active.supplyId]: old[active.supplyId].map((value, i) => i === index ? { items: [{ sku: value.items[0]?.sku || "", quantity: Number(e.target.value) || 0 }] } : value) }))}/><span>件</span>
             <button type="button" disabled={busy} onClick={() => setBoxesBySupply((old) => ({ ...old, [active.supplyId]: old[active.supplyId].filter((_, i) => i !== index) }))}>×</button>
           </div>)}</div></>}
         </section>}

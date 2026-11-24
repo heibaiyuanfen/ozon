@@ -21,10 +21,12 @@ type Doc = {
   data: string;
   cells?: string[][];
 };
+type InventoryItem = { sku: string; productName: string; quantity: string };
 type Chain = {
   id: string;
   revision: number;
   orderNo: string;
+  shopId?: string | null;
   title: string;
   supplier: string;
   owner: string;
@@ -32,6 +34,7 @@ type Chain = {
   invoiceDate: string;
   steps: Step[];
   docs: Doc[];
+  inventoryItems?: InventoryItem[];
 };
 const fresh = (orderNo = ""): Chain => ({
   id: crypto.randomUUID(),
@@ -57,11 +60,11 @@ const overdue = (c: Chain) =>
 const closed = (c: Chain) =>
   c.steps.every((s) => ["已完成", "不适用"].includes(s.status)) &&
   ["已开票", "无需开票"].includes(c.invoice);
-let pendingDraft: Chain | null = null;
-export function ProcurementBoard() {
+const pendingDrafts = new Map<string, Chain>();
+export function ProcurementBoard({ shopId }: { shopId: string }) {
   const [rows, setRows] = useState<Chain[]>([]),
-    [draft, setDraft] = useState<Chain | null>(() => pendingDraft),
-    [dirty, setDirty] = useState(!!pendingDraft),
+    [draft, setDraft] = useState<Chain | null>(() => pendingDrafts.get(shopId) ?? null),
+    [dirty, setDirty] = useState(() => pendingDrafts.has(shopId)),
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState(""),
     [query, setQuery] = useState(""),
@@ -100,7 +103,10 @@ export function ProcurementBoard() {
     window.addEventListener("beforeunload", f);
     return () => window.removeEventListener("beforeunload", f);
   }, [dirty]);
-  useEffect(() => { pendingDraft = dirty ? draft : null; }, [draft, dirty]);
+  useEffect(() => {
+    if (dirty && draft) pendingDrafts.set(shopId, draft);
+    else pendingDrafts.delete(shopId);
+  }, [draft, dirty, shopId]);
   const edit = (patch: Partial<Chain>) => {
     setDraft((c) => (c ? { ...c, ...patch } : c));
     setDirty(true);
@@ -115,16 +121,30 @@ export function ProcurementBoard() {
     if (!draft || busy) return;
     setBusy(true);
     try {
-      const r = await invoke<{ revision: number }>(
+      const r = await invoke<{ revision: number; shopId: string | null }>(
         "procurement_board_command",
         { command: "save", payload: draft },
       );
-      setDraft({ ...draft, revision: r.revision });
+      setDraft({ ...draft, ...r });
       setDirty(false);
       await load();
       setMessage("已保存到本机统筹看板");
     } catch (e) {
       setMessage(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const importInventoryItems = async (id: number) => {
+    setBusy(true);
+    try {
+      const order = await invoke<{ items: InventoryItem[] }>("purchase_order_command", {
+        command: "detail", id, payload: null,
+      });
+      edit({ inventoryItems: order.items.map(({ sku, productName, quantity }) => ({ sku, productName, quantity })) });
+      setMessage("已载入采购单产品，可调整后保存链路。");
+    } catch (error) {
+      setMessage(String(error));
     } finally {
       setBusy(false);
     }
@@ -176,6 +196,7 @@ export function ProcurementBoard() {
       setMessage("请填写资料名称及完整 http/https 链接");
     }
   };
+  const matchingOrders = sources.filter((order) => order.orderNo === draft?.orderNo.trim());
   const shown = rows.filter(
     (c) =>
       (c.orderNo + " " + c.title + " " + c.supplier + " " + c.owner)
@@ -248,6 +269,10 @@ export function ProcurementBoard() {
             const s = sources.find((s) => s.id === Number(e.target.value));
             if (s) {
               const existing = rows.find((c) => c.orderNo === s.orderNo);
+              if (existing?.shopId && existing.shopId !== shopId) {
+                setMessage("该采购单号已由其他店铺的链路使用。");
+                return;
+              }
               choose(
                 existing || {
                   ...fresh(s.orderNo),
@@ -436,6 +461,44 @@ export function ProcurementBoard() {
                 />
               </label>
             </div>
+            <fieldset className="pb-inventory-items" disabled={!!draft.shopId && draft.shopId !== shopId}>
+              <legend>库存同步产品</legend>
+              <p>{draft.shopId && draft.shopId !== shopId
+                ? "请切换到链路所属店铺编辑库存产品。"
+                : draft.inventoryItems === undefined && matchingOrders.length === 1
+                  ? "当前沿用采购单产品。载入后可按此链路调整，保存后同步库存。"
+                  : "填写 SKU 或货号及整件数量。保存后按链路当前阶段同步库存。"}
+              </p>
+              {(draft.inventoryItems ?? []).map((item, index) => (
+                <div className="pb-inventory-item" key={index}>
+                  {([["sku", "SKU / 货号"], ["productName", "产品名称"], ["quantity", "数量"]] as const).map(([field, label]) => (
+                    <label key={field}>{label}
+                      <input value={item[field]} inputMode={field === "quantity" ? "numeric" : undefined}
+                        onChange={(event) => edit({
+                          inventoryItems: draft.inventoryItems?.map((entry, i) =>
+                            i === index ? { ...entry, [field]: event.target.value } : entry),
+                        })} />
+                    </label>
+                  ))}
+                  <button type="button" onClick={() => edit({
+                    inventoryItems: draft.inventoryItems?.filter((_, i) => i !== index),
+                  })}>移除</button>
+                </div>
+              ))}
+              <div className="pb-inventory-actions">
+                {draft.inventoryItems === undefined && matchingOrders.length === 1 && (
+                  <button type="button" onClick={() => void importInventoryItems(matchingOrders[0].id)}>载入采购单产品</button>
+                )}
+                {(draft.inventoryItems !== undefined || matchingOrders.length !== 1) && (
+                  <button type="button" onClick={() => edit({
+                    inventoryItems: [...(draft.inventoryItems ?? []), { sku: "", productName: "", quantity: "" }],
+                  })}>添加产品</button>
+                )}
+                {draft.inventoryItems !== undefined && matchingOrders.length === 1 && (
+                  <button type="button" onClick={() => edit({ inventoryItems: undefined })}>沿用采购单产品</button>
+                )}
+              </div>
+            </fieldset>
             <div className="pb-stages">
               {draft.steps.map((s, i) => (
                 <article key={i}>

@@ -46,6 +46,7 @@ mod selection_library;
 mod wb;
 mod wb_shop_center;
 mod wb_operations;
+mod wb_inventory;
 mod wb_pricing;
 static INVENTORY_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static SELLER_SYNC_LOCK: Mutex<()> = Mutex::new(());
@@ -424,6 +425,7 @@ struct InventoryRow {
     reserved_stock: Option<i64>,
     transit_stock: i64,
     requested_stock: i64,
+    procurement_linked: bool,
     domestic_production_stock: i64,
     domestic_warehouse_stock: i64,
     overseas_transit_stock: i64,
@@ -816,7 +818,16 @@ struct SupplyOrderItemRow {
     sku: String,
     offer_id: String,
     cargo_marks: Vec<String>,
+    #[serde(default)]
+    cargo_details: std::collections::BTreeMap<String, SupplyCargoMarkDetail>,
     quantity: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct SupplyCargoMarkDetail {
+    quantity: Option<i64>,
+    special: bool,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1257,6 +1268,10 @@ fn locate_data_dir(
 fn initialize_extensions(c: &Connection) -> Result<(), String> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS warehouse_cluster_mappings(warehouse_name TEXT PRIMARY KEY,cluster_name TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS competitor_products(id INTEGER PRIMARY KEY AUTOINCREMENT,product_url TEXT NOT NULL UNIQUE,product_code TEXT NOT NULL DEFAULT '',name TEXT NOT NULL DEFAULT '',image_url TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE TABLE IF NOT EXISTS competitor_snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT,competitor_id INTEGER NOT NULL,captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,price REAL,sales_total INTEGER,source TEXT NOT NULL DEFAULT 'web',UNIQUE(competitor_id,captured_at),FOREIGN KEY(competitor_id) REFERENCES competitor_products(id));CREATE TABLE IF NOT EXISTS shipment_tracking(tracking_id TEXT PRIMARY KEY,product_name TEXT NOT NULL DEFAULT '',batch_no TEXT NOT NULL DEFAULT '',shop_name TEXT NOT NULL DEFAULT '',quantity INTEGER NOT NULL DEFAULT 0,cargo_status TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT '',domestic_arrival TEXT NOT NULL DEFAULT '',foreign_arrival TEXT NOT NULL DEFAULT '',notified_foreign_arrival TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT 'local',remote_record_id TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_posting_routes_day ON posting_routes(day);CREATE INDEX IF NOT EXISTS idx_posting_routes_sku_destination ON posting_routes(sku,destination);CREATE INDEX IF NOT EXISTS idx_sales_daily_day_sku ON sales_daily(day,sku);CREATE INDEX IF NOT EXISTS idx_ad_daily_day_sku ON ad_daily(day,sku);CREATE INDEX IF NOT EXISTS idx_finance_operation_date ON finance_transactions(operation_date);").map_err(|e|e.to_string())?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS product_cluster_weights(sku TEXT NOT NULL,cluster_name TEXT NOT NULL,weight REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(sku,cluster_name));").map_err(|e|e.to_string())?;
+    c.execute_batch("CREATE TABLE IF NOT EXISTS inventory_chain_overrides(
+        sku TEXT NOT NULL, stage TEXT NOT NULL, quantity INTEGER NOT NULL CHECK(quantity >= 0),
+        PRIMARY KEY(sku,stage)
+    );").map_err(|e| e.to_string())?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS inventory_totals(sku TEXT PRIMARY KEY,offer_id TEXT NOT NULL DEFAULT '',present_stock INTEGER NOT NULL DEFAULT 0,reserved_stock INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e|e.to_string())?;
     for column in [
         "sku TEXT NOT NULL DEFAULT ''",
@@ -7880,7 +7895,50 @@ fn inventory_blocking(
 ) -> Result<Vec<InventoryRow>, String> {
     let c = db(state)?;
     let needle = format!("%{}%", query.trim());
-    let mut stmt = c.prepare("WITH inv AS(SELECT sku,MAX(offer_id)offer_id,MAX(product_name)product_name,SUM(available_stock)available,SUM(transit_stock)transit,SUM(requested_stock)requested,COUNT(DISTINCT warehouse_id)warehouses,MAX(updated_at)updated FROM inventory_stock GROUP BY sku),feishu AS(SELECT a.sku,SUM(CASE WHEN s.cargo_status='未送仓' THEN a.quantity ELSE 0 END)production,0 domestic_stock,SUM(CASE WHEN s.cargo_status='在途' THEN a.quantity ELSE 0 END)overseas_transit,SUM(CASE WHEN s.cargo_status='到达海外仓' OR (s.cargo_status IN('已送仓','已申请') AND a.settled=0) THEN a.quantity ELSE 0 END)overseas_arrived FROM shipment_sku_allocations a JOIN shipment_tracking s ON s.tracking_id=a.tracking_id GROUP BY a.sku),sales AS(SELECT sku,SUM(CASE WHEN day>=date('now','-29 day') THEN ordered_units ELSE 0 END)/30.0 daily30,SUM(CASE WHEN day>=date('now','-6 day') THEN ordered_units ELSE 0 END)/7.0 daily7,SUM(CASE WHEN day>=date('now','-29 day') THEN ordered_units ELSE 0 END) ordered30 FROM sales_daily WHERE day>=date('now','-29 day') GROUP BY sku),return_count AS(SELECT sku,SUM(quantity) returns30 FROM return_events WHERE day>=date('now','-29 day') GROUP BY sku),return_cost AS(SELECT sku,SUM(ABS(amount)) cost FROM finance_transactions WHERE substr(operation_date,1,10)>=date('now','-29 day') AND sku<>'' AND (lower(operation_type)LIKE'%return%' OR lower(operation_type)LIKE'%возврат%') GROUP BY sku),plans AS(SELECT sku,SUM(planned_qty)planned FROM replenishment_plan GROUP BY sku) SELECT i.sku,i.offer_id,i.product_name,i.available,t.present_stock,t.reserved_stock,i.transit,i.requested,COALESCE(f.production,0),COALESCE(f.domestic_stock,0),COALESCE(f.overseas_transit,0),COALESCE(f.overseas_arrived,0),i.warehouses,COALESCE(s.daily30,0),COALESCE(s.daily7,0),COALESCE(s.ordered30,0),COALESCE(rr.returns30,0),COALESCE(rc.cost,0),COALESCE(p.planned,0),i.updated FROM inv i LEFT JOIN inventory_totals t ON t.sku=i.sku LEFT JOIN feishu f ON f.sku=i.sku LEFT JOIN sales s ON s.sku=i.sku LEFT JOIN return_count rr ON rr.sku=i.sku LEFT JOIN return_cost rc ON rc.sku=i.sku LEFT JOIN plans p ON p.sku=i.sku WHERE ?1='%%' OR i.sku LIKE ?1 OR i.offer_id LIKE ?1 OR i.product_name LIKE ?1 ORDER BY i.available,i.offer_id LIMIT 2000").map_err(|e|e.to_string())?;
+    procurement_board::load_inventory_stages(&c, state)?;
+    let mut stmt = c.prepare("WITH ozon AS(SELECT sku,MAX(offer_id)offer_id,MAX(product_name)product_name,SUM(available_stock)available,SUM(transit_stock)transit,SUM(requested_stock)requested,COUNT(DISTINCT warehouse_id)warehouses,MAX(updated_at)updated FROM inventory_stock GROUP BY sku),
+    identifiers AS (
+        SELECT sku, offer_id FROM ozon
+        UNION SELECT sku, offer_id FROM products WHERE sku<>''
+    ), offers AS (
+        SELECT offer_id, MIN(sku) sku, COUNT(DISTINCT sku) matches
+        FROM identifiers WHERE offer_id<>'' GROUP BY offer_id
+    ), chain_items AS (
+        SELECT i.sku, i.product_name, i.quantity, b.stage
+        FROM procurement_inventory_stages b
+        JOIN (
+            SELECT order_no, MIN(id) id FROM purchase_orders
+            GROUP BY order_no HAVING COUNT(*)=1
+        ) p ON p.order_no=b.order_no
+        JOIN purchase_order_items i ON i.order_id=p.id
+        WHERE b.items IS NULL
+        UNION ALL
+        SELECT json_extract(item.value,'$.sku'),
+            json_extract(item.value,'$.productName'), json_extract(item.value,'$.quantity'), b.stage
+        FROM procurement_inventory_stages b, json_each(b.items) item
+    ), purchase_lines AS (
+        SELECT COALESCE(exact.sku, o.sku, i.sku) sku, i.product_name,
+            CAST(i.quantity AS INTEGER) quantity, i.stage
+        FROM chain_items i
+        LEFT JOIN (SELECT DISTINCT sku FROM identifiers) exact ON exact.sku=i.sku
+        LEFT JOIN offers o ON o.offer_id=i.sku AND exact.sku IS NULL
+        WHERE i.sku<>'' AND COALESCE(o.matches,1)=1
+            AND i.quantity NOT GLOB '*[^0-9]*' AND CAST(i.quantity AS INTEGER)>0
+    ), procurement AS (
+        SELECT sku, MAX(product_name) product_name,
+            SUM(CASE WHEN stage=0 THEN quantity ELSE 0 END) production,
+            SUM(CASE WHEN stage=1 THEN quantity ELSE 0 END) domestic_stock,
+            SUM(CASE WHEN stage=2 THEN quantity ELSE 0 END) overseas_transit,
+            SUM(CASE WHEN stage=3 THEN quantity ELSE 0 END) overseas_arrived,
+            MAX(stage<4) active
+        FROM purchase_lines GROUP BY sku
+    ), inv AS (
+        SELECT * FROM ozon UNION ALL
+        SELECT b.sku, COALESCE(NULLIF(p.offer_id,''),b.sku),
+            COALESCE(NULLIF(p.name,''),b.product_name),0,0,0,0,''
+        FROM procurement b LEFT JOIN products p ON p.sku=b.sku
+        WHERE b.active AND NOT EXISTS(SELECT 1 FROM ozon WHERE ozon.sku=b.sku)
+    ),feishu AS(SELECT a.sku,SUM(CASE WHEN s.cargo_status='未送仓' THEN a.quantity ELSE 0 END)production,0 domestic_stock,SUM(CASE WHEN s.cargo_status='在途' THEN a.quantity ELSE 0 END)overseas_transit,SUM(CASE WHEN s.cargo_status='到达海外仓' OR (s.cargo_status IN('已送仓','已申请') AND a.settled=0) THEN a.quantity ELSE 0 END)overseas_arrived FROM shipment_sku_allocations a JOIN shipment_tracking s ON s.tracking_id=a.tracking_id GROUP BY a.sku),sales AS(SELECT sku,SUM(CASE WHEN day>=date('now','-29 day') THEN ordered_units ELSE 0 END)/30.0 daily30,SUM(CASE WHEN day>=date('now','-6 day') THEN ordered_units ELSE 0 END)/7.0 daily7,SUM(CASE WHEN day>=date('now','-29 day') THEN ordered_units ELSE 0 END) ordered30 FROM sales_daily WHERE day>=date('now','-29 day') GROUP BY sku),return_count AS(SELECT sku,SUM(quantity) returns30 FROM return_events WHERE day>=date('now','-29 day') GROUP BY sku),return_cost AS(SELECT sku,SUM(ABS(amount)) cost FROM finance_transactions WHERE substr(operation_date,1,10)>=date('now','-29 day') AND sku<>'' AND (lower(operation_type)LIKE'%return%' OR lower(operation_type)LIKE'%возврат%') GROUP BY sku),plans AS(SELECT sku,SUM(planned_qty)planned FROM replenishment_plan GROUP BY sku) SELECT i.sku,i.offer_id,i.product_name,i.available,t.present_stock,t.reserved_stock,i.transit,i.requested,COALESCE(b.production,(SELECT quantity FROM inventory_chain_overrides WHERE sku=i.sku AND stage='domesticProductionStock'),f.production,0),COALESCE(b.domestic_stock,(SELECT quantity FROM inventory_chain_overrides WHERE sku=i.sku AND stage='domesticWarehouseStock'),f.domestic_stock,0),COALESCE(b.overseas_transit,(SELECT quantity FROM inventory_chain_overrides WHERE sku=i.sku AND stage='overseasTransitStock'),f.overseas_transit,0),COALESCE(b.overseas_arrived,(SELECT quantity FROM inventory_chain_overrides WHERE sku=i.sku AND stage='overseasArrivedStock'),f.overseas_arrived,0),i.warehouses,COALESCE(s.daily30,0),COALESCE(s.daily7,0),COALESCE(s.ordered30,0),COALESCE(rr.returns30,0),COALESCE(rc.cost,0),COALESCE(p.planned,0),i.updated,b.sku IS NOT NULL FROM inv i LEFT JOIN procurement b ON b.sku=i.sku LEFT JOIN inventory_totals t ON t.sku=i.sku LEFT JOIN feishu f ON f.sku=i.sku LEFT JOIN sales s ON s.sku=i.sku LEFT JOIN return_count rr ON rr.sku=i.sku LEFT JOIN return_cost rc ON rc.sku=i.sku LEFT JOIN plans p ON p.sku=i.sku WHERE ?1='%%' OR i.sku LIKE ?1 OR i.offer_id LIKE ?1 OR i.product_name LIKE ?1 ORDER BY i.available,i.offer_id LIMIT 2000").map_err(|e|e.to_string())?;
     let raw = stmt
         .query_map([needle], |r| {
             Ok((
@@ -7904,6 +7962,7 @@ fn inventory_blocking(
                 r.get::<_, f64>(17)?,
                 r.get::<_, i64>(18)?,
                 r.get::<_, String>(19)?,
+                r.get::<_, bool>(20)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -7933,6 +7992,7 @@ fn inventory_blocking(
                 return_cost,
                 planned,
                 updated,
+                procurement_linked,
             )| {
                 let forecast_daily = daily.max(daily7);
                 let estimated = if forecast_daily > 0.0 {
@@ -7970,6 +8030,7 @@ fn inventory_blocking(
                     reserved_stock: reserved,
                     transit_stock: transit,
                     requested_stock: requested,
+                    procurement_linked,
                     domestic_production_stock: production,
                     domestic_warehouse_stock: domestic_stock,
                     overseas_transit_stock: overseas_transit,
@@ -7992,6 +8053,29 @@ fn inventory_blocking(
             },
         )
         .collect())
+}
+
+#[tauri::command]
+fn save_inventory_chain_quantity(
+    sku: String,
+    stage: String,
+    quantity: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if sku.trim().is_empty() || !(0..=i32::MAX as i64).contains(&quantity) {
+        return Err("请输入有效的 SKU 和非负整数库存数量".into());
+    }
+    if !matches!(stage.as_str(),
+        "domesticProductionStock" | "domesticWarehouseStock" | "overseasTransitStock" | "overseasArrivedStock"
+    ) {
+        return Err("未知的供应链阶段".into());
+    }
+    db(&state)?.execute(
+        "INSERT INTO inventory_chain_overrides(sku, stage, quantity) VALUES (?1, ?2, ?3)
+         ON CONFLICT(sku, stage) DO UPDATE SET quantity=excluded.quantity",
+        params![sku, stage, quantity],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -12096,10 +12180,48 @@ fn register_cargo_mark(
     }
 }
 
+// A cargo bundle describes the contents of one physical box.
+fn cargo_bundle_quantities(
+    items: Vec<serde_json::Value>,
+) -> std::collections::BTreeMap<String, Option<i64>> {
+    let mut quantities = std::collections::BTreeMap::new();
+    for item in items {
+        let sku = supply_identifier(item.get("sku"));
+        if sku.is_empty() {
+            continue;
+        }
+        let quantity = supply_json_i64(item.get("quantity")).max(supply_json_i64(item.get("quant")));
+        let quantity = (quantity > 0).then_some(quantity);
+        let current = quantities.entry(sku).or_insert(Some(0_i64));
+        *current = current.zip(quantity).and_then(|(total, count)| total.checked_add(count));
+    }
+    quantities
+}
+
+fn classify_cargo_marks(
+    quantities: &std::collections::BTreeMap<String, Option<i64>>,
+) -> std::collections::BTreeMap<String, SupplyCargoMarkDetail> {
+    let mut frequency = std::collections::BTreeMap::<i64, usize>::new();
+    for quantity in quantities.values().flatten() {
+        *frequency.entry(*quantity).or_default() += 1;
+    }
+    let known = frequency.values().sum::<usize>();
+    let standard = frequency.into_iter().find_map(|(quantity, boxes)| {
+        (known == quantities.len() && boxes > known / 2).then_some(quantity)
+    });
+    quantities.iter().map(|(mark, &quantity)| {
+        (mark.clone(), SupplyCargoMarkDetail {
+            quantity,
+            special: standard.zip(quantity).is_some_and(|(usual, actual)| actual != usual),
+        })
+    }).collect()
+}
+
 #[cfg(test)]
 mod supply_item_tests {
     use super::{
-        register_cargo_mark, supply_identifier, write_supply_cargo_xlsx, SupplyOrderItemRow,
+        cargo_bundle_quantities, classify_cargo_marks, register_cargo_mark, supply_identifier,
+        write_supply_cargo_xlsx, SupplyOrderItemRow,
     };
     use std::collections::BTreeMap;
     use std::io::Read;
@@ -12124,16 +12246,38 @@ mod supply_item_tests {
     }
 
     #[test]
+    fn cargo_counts_are_summed_per_sku_and_unknown_when_missing() {
+        let counts = cargo_bundle_quantities(vec![
+            serde_json::json!({"sku":42,"quantity":6}),
+            serde_json::json!({"sku":42,"quant":"4"}),
+            serde_json::json!({"sku":43}),
+        ]);
+        assert_eq!(counts["42"], Some(10));
+        assert_eq!(counts["43"], None);
+        let tied = classify_cargo_marks(&[("A".into(), Some(10)), ("B".into(), Some(14))].into());
+        assert!(tied.values().all(|detail| !detail.special));
+        let legacy: SupplyOrderItemRow = serde_json::from_value(serde_json::json!({
+            "productName":"旧缓存","sku":"42","offerId":"","cargoMarks":["A"],"quantity":10
+        })).unwrap();
+        assert!(legacy.cargo_details.is_empty());
+    }
+
+    #[test]
     fn cargo_export_flattens_each_mark_and_keeps_identifiers_as_text() {
         let path = std::env::temp_dir().join(format!("cargo-export-{}.xlsx", std::process::id()));
         let rows = vec![SupplyOrderItemRow {
             product_name: "测试商品".into(),
             sku: "02550136857".into(),
             offer_id: "GJYB001-YELLOW".into(),
-            cargo_marks: vec!["箱唛A".into(), "箱唛B".into()],
-            quantity: 20,
+            cargo_marks: vec!["箱唛A".into(), "箱唛B".into(), "箱唛C".into()],
+            cargo_details: classify_cargo_marks(&[
+                ("箱唛A".into(), Some(14)),
+                ("箱唛B".into(), Some(10)),
+                ("箱唛C".into(), Some(14)),
+            ].into()),
+            quantity: 38,
         }];
-        assert_eq!(write_supply_cargo_xlsx(&path, "TEST-1", &rows).unwrap(), 2);
+        assert_eq!(write_supply_cargo_xlsx(&path, "TEST-1", &rows).unwrap(), 3);
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
         let mut xml = String::new();
         archive
@@ -12145,6 +12289,8 @@ mod supply_item_tests {
         assert!(xml.contains("02550136857"));
         assert!(xml.contains("箱唛A") && xml.contains("箱唛B"));
         assert!(xml.contains(r#"r="C4" t="inlineStr"#));
+        assert!(xml.contains(r#"<c r="F5" s="4"><v>10</v></c>"#));
+        assert!(xml.contains("特殊箱"));
         drop(archive);
         let _ = std::fs::remove_file(path);
     }
@@ -12535,8 +12681,9 @@ fn supply_order_items_blocking(
         }
     }
 
-    let mut cargo_by_sku: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
+    let mut cargo_by_sku = std::collections::BTreeMap::<
+        String, std::collections::BTreeMap<String, Option<i64>>,
+    >::new();
     progress_total += cargo_by_bundle.len();
     progress_done += 1;
     set_progress(
@@ -12547,15 +12694,14 @@ fn supply_order_items_blocking(
         "正在关联箱唛与商品",
     );
     for (bundle, marks) in &cargo_by_bundle {
-        for item in supply_bundle_items(&c, bundle)? {
-            let sku = supply_identifier(item.get("sku"));
-            if !sku.is_empty() {
-                let target = cargo_by_sku.entry(sku).or_default();
-                for mark in marks {
-                    if !target.contains(mark) {
-                        target.push(mark.clone());
+        for (sku, quantity) in cargo_bundle_quantities(supply_bundle_items(&c, bundle)?) {
+            let target = cargo_by_sku.entry(sku).or_default();
+            for mark in marks {
+                target.entry(mark.clone()).and_modify(|previous| {
+                    if *previous != quantity {
+                        *previous = None;
                     }
-                }
+                }).or_insert(quantity);
             }
         }
         progress_done += 1;
@@ -12603,15 +12749,11 @@ fn supply_order_items_blocking(
                 product_name: json_text(item.get("name")),
                 sku: sku.clone(),
                 offer_id: offer_id.clone(),
-                cargo_marks: cargo_by_sku.get(&sku).cloned().unwrap_or_default(),
+                cargo_marks: cargo_by_sku.get(&sku).map(|marks| marks.keys().cloned().collect()).unwrap_or_default(),
+                cargo_details: cargo_by_sku.get(&sku).map(classify_cargo_marks).unwrap_or_default(),
                 quantity: 0,
             });
             row.quantity += quantity;
-            for mark in cargo_by_sku.get(&sku).into_iter().flatten() {
-                if !row.cargo_marks.contains(mark) {
-                    row.cargo_marks.push(mark.clone());
-                }
-            }
         }
         progress_done += 1;
         set_progress(
@@ -12722,8 +12864,8 @@ fn write_supply_cargo_xlsx(
     rows: &[SupplyOrderItemRow],
 ) -> Result<usize, String> {
     let mut body = String::new();
-    let headers = ["物流箱唛", "物流箱号", "Ozon 货号", "Ozon SKU", "箱唛"];
-    let columns = ["A", "B", "C", "D", "E"];
+    let headers = ["物流箱唛", "物流箱号", "Ozon 货号", "Ozon SKU", "箱唛", "每箱件数", "装箱标记"];
+    let columns = ["A", "B", "C", "D", "E", "F", "G"];
     let header_cells = headers
         .iter()
         .enumerate()
@@ -12750,12 +12892,25 @@ fn write_supply_cargo_xlsx(
         for mark in marks {
             output_rows += 1;
             let row = output_rows + 3;
+            let detail = item.cargo_details.get(mark);
+            let quantity = detail.and_then(|detail| detail.quantity);
+            let special = detail.is_some_and(|detail| detail.special);
+            let quantity_cell = match quantity {
+                Some(quantity) => {
+                    let style = if special { 4 } else { 5 };
+                    format!(r#"<c r="F{row}" s="{style}"><v>{quantity}</v></c>"#)
+                }
+                None => supply_export_cell(&format!("F{row}"), "", 5),
+            };
+            let status = if special { "特殊箱" } else if !mark.is_empty() && quantity.is_none() { "数量未读取" } else { "" };
             let cells = [
                 supply_export_cell(&format!("A{row}"), "", 4),
                 supply_export_cell(&format!("B{row}"), "", 4),
                 supply_export_cell(&format!("C{row}"), &item.offer_id, 5),
                 supply_export_cell(&format!("D{row}"), &item.sku, 5),
-                supply_export_cell(&format!("E{row}"), mark, 5),
+                supply_export_cell(&format!("E{row}"), mark, if special { 4 } else { 5 }),
+                quantity_cell,
+                supply_export_cell(&format!("G{row}"), status, if special { 4 } else { 5 }),
             ]
             .concat();
             body.push_str(&format!(
@@ -12765,7 +12920,7 @@ fn write_supply_cargo_xlsx(
     }
     let last = (output_rows + 3).max(3);
     let sheet = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="2" width="20" customWidth="1"/><col min="3" max="4" width="25" customWidth="1"/><col min="5" max="5" width="34" customWidth="1"/></cols><sheetData>{body}</sheetData><autoFilter ref="A3:E{last}"/><mergeCells count="2"><mergeCell ref="A1:E1"/><mergeCell ref="A2:E2"/></mergeCells><pageMargins left="0.3" right="0.3" top="0.5" bottom="0.5" header="0.2" footer="0.2"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>"#
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="2" width="20" customWidth="1"/><col min="3" max="4" width="25" customWidth="1"/><col min="5" max="5" width="34" customWidth="1"/><col min="6" max="7" width="16" customWidth="1"/></cols><sheetData>{body}</sheetData><autoFilter ref="A3:G{last}"/><mergeCells count="2"><mergeCell ref="A1:G1"/><mergeCell ref="A2:G2"/></mergeCells><pageMargins left="0.3" right="0.3" top="0.5" bottom="0.5" header="0.2" footer="0.2"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/></worksheet>"#
     );
     let styles = r#"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font><sz val="10"/><name val="Microsoft YaHei"/></font><font><b/><sz val="16"/><color rgb="FF102A56"/><name val="Microsoft YaHei"/></font><font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Microsoft YaHei"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF17365D"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF2CC"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEAF2F8"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFD9E2F3"/></left><right style="thin"><color rgb="FFD9E2F3"/></right><top style="thin"><color rgb="FFD9E2F3"/></top><bottom style="thin"><color rgb="FFD9E2F3"/></bottom></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0"/><xf numFmtId="0" fontId="2" fillId="2" borderId="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="0" fillId="4" borderId="0"/><xf numFmtId="0" fontId="0" fillId="3" borderId="1" applyAlignment="1"><alignment vertical="center"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="1" applyAlignment="1"><alignment vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#;
     let mut zip = zip::ZipWriter::new(fs::File::create(path).map_err(|e| e.to_string())?);
@@ -13628,6 +13783,7 @@ mod cross_border_tests {
             reserved_stock: Some(0),
             transit_stock: 3,
             requested_stock: 4,
+            procurement_linked: false,
             domestic_production_stock: 5,
             domestic_warehouse_stock: 6,
             overseas_transit_stock: 7,
@@ -14111,10 +14267,12 @@ pub fn run() {
             product_worker::start(data_dir.clone());
             start_auto_sync_worker(data_dir.clone());
             start_inventory_alert_worker(data_dir.clone());
-            app.manage(AppState {
+            let state = AppState {
                 data_dir,
                 active_shop_id: Mutex::new(registry.active_shop_id),
-            });
+            };
+            wb_pricing::start_daily_monitor(state.clone());
+            app.manage(state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -14166,6 +14324,7 @@ pub fn run() {
             campaign_ai_analysis,
             products,
             inventory,
+            save_inventory_chain_quantity,
             selection_library::selection_categories,
             selection_library::save_selection_category,
             selection_library::delete_selection_category,

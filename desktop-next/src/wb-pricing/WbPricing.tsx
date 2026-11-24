@@ -37,6 +37,19 @@ const priceFields = {
   clubDiscount: "WB Club 会员折扣",
 };
 type PriceField = keyof typeof priceFields;
+const historyFields: Record<string, string> = {
+  ...priceFields,
+  discountedPrice: "折后价",
+  clubDiscountedPrice: "WB Club 会员价",
+};
+type PriceHistory = {
+  rows: {
+    id: number; observedAt: string; nmID: number; sizeID: number; vendorCode: string;
+    sizeName: string; field: string; before: string; after: string; task: number | null;
+  }[];
+  more: boolean;
+  todayStatus: string | null;
+};
 const defaults: Cost = {
   mode: "overseas",
   purchase: "",
@@ -83,6 +96,26 @@ export function WbPricing({ shopId }: { shopId: string }) {
     [task, setTask] = useState<number | null>(null);
   const [edit, setEdit] = useState<number | null>(null),
     [draft, setDraft] = useState<Cost>(defaults);
+  const [historyDay, setHistoryDay] = useState("");
+  const [historyPage, setHistoryPage] = useState(0);
+  const [historyRefresh, setHistoryRefresh] = useState(0);
+  const [history, setHistory] = useState<PriceHistory | null>(null);
+  const [historyError, setHistoryError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      void invoke<PriceHistory>("wb_pricing", {
+        action: "history", payload: { shopId, day: historyDay, page: historyPage, query },
+      }).then((result) => {
+        if (alive) { setHistory(result); setHistoryError(""); }
+      }).catch((error) => {
+        if (alive) setHistoryError(String(error));
+      });
+    };
+    load();
+    const timer = window.setInterval(load, 60_000);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [shopId, historyDay, historyPage, query, historyRefresh]);
   const api = <T,>(action: string, extra: Record<string, unknown> = {}) =>
     invoke<T>("wb_pricing", { action, payload: { shopId, ...extra } });
   useEffect(() => {
@@ -115,6 +148,8 @@ export function WbPricing({ shopId }: { shopId: string }) {
       setGoods(d.goods);
       setUpdated(d.updatedAt);
       setMessage("商品价格已同步");
+      setHistoryPage(0);
+      setHistoryRefresh((value) => value + 1);
     } catch (e) {
       setMessage(String(e));
     } finally {
@@ -167,6 +202,7 @@ export function WbPricing({ shopId }: { shopId: string }) {
     try {
       const current = await api<Goods>("read", { nmID: product.nmID });
       setGoods(rows => rows.map(row => row.nmID === current.nmID ? current : row));
+      setHistoryRefresh((value) => value + 1);
       const size = current.sizes.find(row => row.sizeID === sizeID);
       if (!size) {
         setMessage("当前规格已变更，请在更新后的列表中重新选择。");
@@ -240,7 +276,7 @@ export function WbPricing({ shopId }: { shopId: string }) {
         <input
           placeholder="搜索 WB 商品编号、货号"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => { setQuery(e.target.value); setHistoryPage(0); }}
         />
         <button disabled={busy || !ready} onClick={() => void sync()}>
           读取全店当前价格
@@ -256,6 +292,43 @@ export function WbPricing({ shopId }: { shopId: string }) {
         {updated && ` 全店价格上次同步于 ${new Date(updated).toLocaleString("zh-CN")}`}
       </p>
       {message && <p role="status">{message}</p>}
+      <details open>
+        <summary>每日价格变动记录</summary>
+        <p>程序运行时每天自动读取一次全店价格（北京时间）。首次读取建立基线，后续记录检测到的变化。</p>
+        <p>来源待核实表示未匹配近期 ERP 同字段改价任务，可能是平台活动、其他渠道改价或折扣联动。</p>
+        <div className="wbo-actions">
+          <label>检测日期 <input type="date" value={historyDay}
+            onChange={(event) => { setHistoryDay(event.target.value); setHistoryPage(0); }} /></label>
+          <button type="button" onClick={() => { setHistoryDay(""); setHistoryPage(0); }}>全部日期</button>
+          {history && <span>{history.todayStatus === null ? "今日全店尚未同步"
+            : history.todayStatus ? `今日同步失败：${history.todayStatus}` : "今日全店已同步"}</span>}
+        </div>
+        {historyError && <p role="alert">{historyError}</p>}
+        {history && (history.rows.length ? (
+          <>
+            <div className="wbo-table-wrap">
+              <table>
+                <thead><tr><th>检测时间（北京时间）</th><th>商品 / 货号</th><th>规格</th><th>字段</th><th>变动前</th><th>变动后</th><th>来源线索</th></tr></thead>
+                <tbody>{history.rows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{new Date(row.observedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}</td>
+                    <td>{row.nmID} {row.vendorCode}</td>
+                    <td>{row.sizeName || row.sizeID}</td>
+                    <td>{historyFields[row.field] ?? row.field}</td>
+                    <td>{row.before}</td><td>{row.after}</td>
+                    <td>{row.task ? `匹配 ERP 改价任务 #${row.task}` : "来源待核实"}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <div className="wbo-actions">
+              <button disabled={historyPage === 0} onClick={() => setHistoryPage(historyPage - 1)}>上一页</button>
+              <span>第 {historyPage + 1} 页</span>
+              <button disabled={!history.more} onClick={() => setHistoryPage(historyPage + 1)}>下一页</button>
+            </div>
+          </>
+        ) : <p>当前筛选下暂无价格变动。</p>)}
+      </details>
       <div className="wbo-table-wrap">
         <table>
           <thead>
