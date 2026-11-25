@@ -329,7 +329,8 @@ function Sidebar({
                 ["orders", "订单中心", ShoppingBag],
                 ["returns", "退货中心", Truck],
                 ["pricing", "价格与利润监控", BarChart3],
-                ["inventory", "库存与销量预估", PackageSearch],
+                ["inventory", "库存管理", PackageSearch],
+                ["ad_optimization", "广告优化与评估", Megaphone],
               ] as Array<
                 [WbPageKey, string, typeof LayoutDashboard]
               >

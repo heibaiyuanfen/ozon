@@ -194,6 +194,198 @@ pub(super) fn run(c: &Connection, shop: &str, resource: Option<&str>) -> Result<
     load(c, shop)
 }
 
+fn products(token: &str, search: &str, exact_id: Option<i64>) -> Result<Vec<Value>, String> {
+    let search = search.to_lowercase();
+    let mut products = Vec::new();
+    let mut cursor = json!({"limit":100});
+    loop {
+        let response = request(
+            token,
+            "content-api",
+            "/content/v2/get/cards/list",
+            Some(json!({
+                "settings":{"filter":{"withPhoto":-1},"cursor":cursor}
+            })),
+        )?;
+        let cards = response["cards"].as_array().ok_or("WB 未返回商品列表")?;
+        for card in cards {
+            let Some(nm) = card["nmID"].as_i64() else {
+                continue;
+            };
+            let vendor_code = card["vendorCode"].as_str().unwrap_or("");
+            if exact_id.map_or_else(
+                || {
+                    !nm.to_string().contains(&search)
+                        && !vendor_code.to_lowercase().contains(&search)
+                },
+                |id| nm != id,
+            ) {
+                continue;
+            }
+            for size in card["sizes"].as_array().into_iter().flatten() {
+                if let Some(id) = size["chrtID"].as_i64() {
+                    products.push(json!({"nmId":nm,"sizeId":id,"title":card["title"],
+                        "vendorCode":vendor_code,"size":size["techSize"]}));
+                }
+            }
+        }
+        if cards.len() < 100
+            || products.len() >= 100
+            || (exact_id.is_some() && !products.is_empty())
+        {
+            break;
+        }
+        let next = &response["cursor"];
+        if !next["updatedAt"].is_string() || !next["nmID"].is_i64() {
+            return Err("WB 商品列表缺少分页游标".into());
+        }
+        let next_cursor = json!({"limit":100,"updatedAt":next["updatedAt"],"nmID":next["nmID"]});
+        if next_cursor == cursor {
+            return Err("WB 商品列表无法继续分页".into());
+        }
+        cursor = next_cursor;
+        std::thread::sleep(Duration::from_millis(650));
+    }
+    Ok(products)
+}
+
+fn warehouses(token: &str) -> Result<Value, String> {
+    let result = request(token, "marketplace-api", "/api/v3/warehouses", None)?;
+    if !result.is_array() {
+        return Err("WB 未返回卖家仓列表".into());
+    }
+    Ok(result)
+}
+
+pub(super) fn options(c: &Connection, shop: &str, payload: &Value) -> Result<Value, String> {
+    let (_, token) = wb_shop_center::active_token(c, shop)?;
+    match payload["search"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(search) => Ok(json!(products(&token, search, None)?)),
+        None => warehouses(&token),
+    }
+}
+
+pub(super) fn update(c: &Connection, shop: &str, payload: &Value) -> Result<Value, String> {
+    let id = |key: &str| {
+        payload[key]
+            .as_i64()
+            .filter(|id| *id > 0)
+            .ok_or("仓库或规格编号无效")
+    };
+    let warehouse = id("warehouseId")?;
+    let size = id("sizeId")?;
+    let amount = payload["amount"]
+        .as_u64()
+        .filter(|n| *n <= 999_999)
+        .ok_or("库存必须是 0 至 999999 的整数")?;
+    let mut snapshot = run(c, shop, None)?;
+    let matches = |row: &Value| {
+        row["warehouseId"].as_i64() == Some(warehouse) && row["sizeId"].as_i64() == Some(size)
+    };
+    let exists = snapshot["seller"]["rows"]
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(matches));
+    let adding = payload["add"].as_bool() == Some(true);
+    if exists == adding {
+        return Err(if exists {
+            "此规格已有库存明细，请使用修改库存"
+        } else {
+            "未找到对应卖家仓库存，请重新同步"
+        }
+        .into());
+    }
+    let (_, token) = wb_shop_center::active_token(c, shop)?;
+    let new_row = if adding {
+        let nm = id("nmId")?;
+        let product = products(&token, "", Some(nm))?
+            .into_iter()
+            .find(|row| row["nmId"].as_i64() == Some(nm) && row["sizeId"].as_i64() == Some(size))
+            .ok_or("当前店铺找不到该商品规格")?;
+        let warehouse_info = warehouses(&token)?
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|row| row["id"].as_i64() == Some(warehouse))
+            .cloned()
+            .ok_or("当前店铺找不到该卖家仓")?;
+        if let Some(code) = product["vendorCode"].as_str() {
+            snapshot["vendorCodes"][nm.to_string()] = json!(code);
+        }
+        Some(json!({"nmId":nm,"sizeId":size,"warehouseId":warehouse,
+            "warehouse":warehouse_info["name"],"quantity":amount,"vendorCode":product["vendorCode"]}))
+    } else {
+        None
+    };
+    let path = format!("/api/v3/stocks/{warehouse}");
+    if adding {
+        if amount == 0 {
+            return Err("加入库存的数量必须大于 0".into());
+        }
+        let current = request(
+            &token,
+            "marketplace-api",
+            &path,
+            Some(json!({"chrtIds":[size]})),
+        )?;
+        let stocks = current["stocks"]
+            .as_array()
+            .ok_or("WB 未返回当前仓库库存")?;
+        for stock in stocks {
+            if stock["chrtId"].as_i64() == Some(size) && stock["amount"].as_u64() != Some(0) {
+                return Err("该规格在此仓已有可售库存，请同步卖家仓后使用修改库存".into());
+            }
+        }
+    }
+    super::wb_operations::request_with_method(
+        &token,
+        "marketplace-api",
+        &path,
+        "PUT",
+        Some(json!({"stocks":[{"chrtId":size,"amount":amount}]})),
+    )?;
+
+    let result = request(
+        &token,
+        "marketplace-api",
+        &path,
+        Some(json!({"chrtIds":[size]})),
+    )
+    .map_err(|e| format!("WB 已接受更新，但回读失败，请查询平台库存后再操作：{e}"))?;
+    let confirmed = result["stocks"]
+        .as_array()
+        .and_then(|stocks| {
+            stocks
+                .iter()
+                .find(|stock| stock["chrtId"].as_i64() == Some(size))
+        })
+        .and_then(|stock| stock["amount"].as_u64());
+    if confirmed != Some(amount) {
+        return Err("WB 回读的库存与提交值不一致，请查询平台库存后再操作".into());
+    }
+    if !snapshot["seller"].is_object() {
+        snapshot["seller"] = json!({"rows":[]});
+    }
+    let rows = snapshot["seller"]["rows"]
+        .as_array_mut()
+        .ok_or("卖家仓缓存格式不正确")?;
+    if let Some(row) = new_row {
+        rows.push(row);
+    } else if let Some(row) = rows.iter_mut().find(|row| matches(row)) {
+        row["quantity"] = json!(amount);
+    }
+    c.execute(
+        "INSERT INTO wb_inventory_snapshots (body,shop_id,resource) VALUES(?1,?2,'seller')
+         ON CONFLICT(shop_id,resource) DO UPDATE SET body=excluded.body",
+        params![snapshot["seller"].to_string(), shop],
+    )
+    .map_err(|e| format!("WB 已接受库存更新，本地缓存保存失败，请重新同步卖家仓：{e}"))?;
+    Ok(snapshot)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

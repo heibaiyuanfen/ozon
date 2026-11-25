@@ -2674,3 +2674,44 @@ cargo check --locked、4 项装箱 Rust 测试和前端构建通过。测试核�
 从 Ozon 货位的货品明细读取每个 SKU 在对应箱唛下的实际件数。数量齐全且同 SKU 有过半箱子使用同一件数时，将件数不同的箱唛标为特殊箱。页面及箱唛 Excel 均显示逐箱件数和标记，旧缓存可通过重新读取补全。
 
 cargo check --locked、4 项供应单箱唛 Rust 测试和前端构建通过，验证了 14／10／14 件中特殊箱的 Excel 输出、数量缺失和旧缓存兼容。已使用正式构建脚本覆盖根目录原启动器并校验，修改时间 2026-11-24 17:47:43，大小 36,815,872 字节，SHA-256 为 0B90944DC90AABA05F1FA99810DF6DFBDC174A3F532BA1AD75A20BFDCBD66437。已启动内嵌页面。用户按 Escape 结束桌面操作，真实供应单中的逐箱数量尚未现场验收。
+
+## 2026-11-25 WB 库存管理
+
+WB 菜单中的库存与销量预估入口调整为库存管理，保留库存同步和销量预估。卖家仓明细支持按仓库和商品规格修改可售量，使用 WB Marketplace 库存接口的 chrtId 字段。平台回读确认后更新店铺库存缓存。
+
+cargo check --locked、WB 库存相关 Rust 测试和 pnpm run build 已通过。
+正式脚本构建成功。Release EXE 修改时间 2026-11-25 10:52:52，大小 36814336 字节，SHA-256 为 56789FBA4A539747A333059A4DD595FA85B9A89CA6BA53A719AD4A33CE8F6C1D。旧版运行中并锁定根目录 EXE，自动审批因可能丢失未保存状态而拒绝关闭旧版。根目录覆盖、启动验收和真实库存写入验证待完成。
+
+已使用上述 Release EXE 原位覆盖根目录启动文件，两者 SHA-256 一致。新版已启动并加载内嵌前端，已看到 WB 库存管理页面、卖家仓库存明细及修改库存按钮。未提交真实库存变更。开发要求已明确根目录固定启动文件只做原位覆盖。
+
+## 2026-11-25 WB 选择商品加入库存
+
+库存明细增加加入库存入口。读取当前店铺的卖家仓和 WB 商品卡规格，支持按商品编号或卖家货号搜索。新增前检查目标仓的现有库存，平台确认后将新增行写入本地明细。清理库存面板内误显示的换行标记。
+cargo check --locked、WB 库存相关 Rust 测试、pnpm run build 及正式发布脚本通过。Release 时间 2026-11-25 16:56:27，大小 36729856 字节，SHA-256 为 7E32718087F8933C660186DB33843279469181FB487CBC7E862F0A74E31D43D5。 根目录启动文件替换未完成。The process cannot access the file 'D:\ozon软件\Ozon_analytics_ui_upgrade_source\Ozon_analytics_ui_upgrade_source\ozon-analytics-next.exe' because it is being used by another process.
+已原位覆盖根目录 EXE，SHA-256 与 Release 一致，为 7E32718087F8933C660186DB33843279469181FB487CBC7E862F0A74E31D43D5。
+
+## WB 搜索词效果评估模板初版
+
+经营总览的广告表现增加搜索词效果评估模板，按广告活动编号及 WB 商品编号查询近 30 天的逐日搜索词组。按近 14 天聚合评分、近 7 天观察和近 30 天同活动商品基准计算。用户可编辑五项权重、目标 CPA 和运营阈值，逐词标记相关性，并按店铺保存模板。目标 CPA 使用广告账户币种，初版按单个活动和商品查询。
+cargo check --locked、WB 操作模块测试（8 通过、2 跳过）、前端构建及正式发布脚本通过。Release 时间 2026-11-25 17:28:21，大小 37006336 字节，SHA-256 为 7618760C2106DAEB7454005990D64A33F1A26275BF49F3110EDEE9CFAB2EFD32。 启动文件尚未覆盖。The process cannot access the file 'D:\ozon软件\Ozon_analytics_ui_upgrade_source\Ozon_analytics_ui_upgrade_source\ozon-analytics-next.exe' because it is being used by another process.
+搜索词模板版本已原位覆盖根目录启动文件并核对 SHA-256，值为 7618760C2106DAEB7454005990D64A33F1A26275BF49F3110EDEE9CFAB2EFD32。
+
+## WB 广告优化与评估独立模块
+
+WB 工作台左侧新增广告优化与评估导航。将搜索词模板及结果表移入独立页面，沿用店铺选择和已保存的模板参数。经营总览保留广告汇总指标。
+Rust 检查、WB 操作测试（8 通过、2 跳过）、前端与正式构建通过。Release 时间 2026-11-25 17:34:17，大小 37006336 字节，SHA-256 B3A548B851EC50CE8365693173DFCBCC465552765EF1AA4134EC086D7A23CB2A。 启动文件尚未覆盖。The process cannot access the file 'D:\ozon软件\Ozon_analytics_ui_upgrade_source\Ozon_analytics_ui_upgrade_source\ozon-analytics-next.exe' because it is being used by another process.
+独立广告模块已覆盖根目录原启动文件并校验 SHA-256 B3A548B851EC50CE8365693173DFCBCC465552765EF1AA4134EC086D7A23CB2A。
+
+## WB 逐日广告花费
+
+广告优化与评估增加逐日广告花费，支持选定 1 至 50 个活动和最多 31 天。用活动元数据判定计费方式与币种，按日汇总活动广告统计中的展示、点击和花费。CPM 与 CPC 从累计花费和累计展示或点击计算，缺少指标时显示空值。计费方式和币种各自汇总。
+Rust 检查、WB 操作测试（8 通过、2 跳过）、前端及正式发布构建通过。Release 时间 2026-11-25 17:46:49，大小 36778496 字节，SHA-256 038C3A4A8C3B7EE366086B20C7EF83FE80BA2B0D7E37A94D007B628457E20D8F。 已原位覆盖根目录启动器，SHA-256 一致。
+
+## WB 搜索广告成交商品归因
+
+通过广告活动 V4 统计读取搜索广告位实际成交商品、归因类型、订单量和销售额。活动评分计入直接、关联与同卡跨商品成交，以目标 CPA 达成度和成交规模计分。词组接口缺少成交商品连接字段，词组评分继续基于其原有归因。
+
+## WB 广告活动自动读取
+
+进入广告优化与评估时，自动按分页读取当前店铺可由 WB 广告接口列出的活动。逐日花费按名称多选，搜索词和成交归因共用活动下拉。WB 返回投放商品列表时可直接选择商品。
+cargo check --locked、WB 模块测试（8 通过、2 跳过）、前端与正式构建通过。EXE 已原位覆盖并核对，时间 2026-11-25 18:03:07，大小 36938752 字节，SHA-256 B7B1F6C9778169F18B03A9F8BD534166DD8DA09AE896112F5FF8EFC527448DC4。

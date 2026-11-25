@@ -7,10 +7,13 @@ type StockRow = {
   warehouseId: number;
   warehouse: string;
   quantity: number;
+  vendorCode?: string;
   toCustomer: number | null;
   fromCustomer: number | null;
 };
-type StockSnapshot = { rows: StockRow[]; updatedAt: string };
+type StockSnapshot = { rows: StockRow[]; updatedAt?: string };
+type Product = { nmId: number; sizeId: number; title: string; vendorCode: string; size: string };
+type Warehouse = { id: number; name: string };
 type Snapshot = {
   wb?: StockSnapshot;
   seller?: StockSnapshot;
@@ -25,8 +28,20 @@ const format = (value: number | undefined, digits = 0) =>
 
 export function WbInventory({ shopId }: { shopId: string }) {
   const [data, setData] = useState<Snapshot>({});
-  const [busy, setBusy] = useState<Resource | "load" | null>("load");
+  const [busy, setBusy] = useState<Resource | "load" | "update" | null>("load");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [edit, setEdit] = useState<StockRow | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [sellerWarehouses, setSellerWarehouses] = useState<Warehouse[]>([]);
+  const [productSearch, setProductSearch] = useState("");
+  const [productsFound, setProductsFound] = useState<Product[]>([]);
+  const [selectedSize, setSelectedSize] = useState("");
+  const [selectedWarehouse, setSelectedWarehouse] = useState("");
+  const [optionsBusy, setOptionsBusy] = useState(false);
+  const [searched, setSearched] = useState(false);
+  const [quantity, setQuantity] = useState("");
+  const validQuantity = /^\d+$/.test(quantity) && Number(quantity) <= 999999;
   const [query, setQuery] = useState("");
   const [warehouse, setWarehouse] = useState("");
   const [view, setView] = useState<"stock" | "forecast">("stock");
@@ -58,6 +73,71 @@ export function WbInventory({ shopId }: { shopId: string }) {
     }
   }
 
+  async function openAdd() {
+    setAdding(true);
+    setError("");
+    setNotice("");
+    setQuantity("");
+    setProductSearch("");
+    setProductsFound([]);
+    setSelectedSize("");
+    setSelectedWarehouse("");
+    setSellerWarehouses([]);
+    setSearched(false);
+    setOptionsBusy(true);
+    try {
+      const options = await invoke<Warehouse[]>("wb_operations", {
+        action: "inventory_options", payload: { shopId },
+      });
+      setSellerWarehouses(options);
+      setSelectedWarehouse(String(options.find((item) => `seller:${item.id}` === warehouse)?.id ?? options[0]?.id ?? ""));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setOptionsBusy(false);
+    }
+  }
+
+  async function findProducts() {
+    if (optionsBusy || !productSearch.trim()) return;
+    setError("");
+    setOptionsBusy(true);
+    setProductsFound([]);
+    setSelectedSize("");
+    setSearched(false);
+    try {
+      setProductsFound(await invoke<Product[]>("wb_operations", {
+        action: "inventory_options", payload: { shopId, search: productSearch.trim() },
+      }));
+      setSearched(true);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setOptionsBusy(false);
+    }
+  }
+
+  async function saveStock(row: Pick<StockRow, "nmId" | "warehouseId" | "sizeId">, add = false) {
+    if (busy || !validQuantity) return;
+    setError("");
+    setNotice("");
+    setBusy("update");
+    try {
+      setData(await invoke<Snapshot>("wb_operations", {
+        action: "inventory_update",
+        payload: { shopId, warehouseId: row.warehouseId, sizeId: row.sizeId, nmId: row.nmId, amount: Number(quantity), add },
+      }));
+      setEdit(null);
+      setAdding(false);
+      if (add) { setQuery(String(row.nmId)); setWarehouse(`seller:${row.warehouseId}`); setPage(0); }
+      setNotice(`商品 ${row.nmId} · 规格 ${row.sizeId} 的卖家仓库存已更新为 ${quantity} 件。`);
+    } catch (reason) {
+      setError(`库存更新未完成：${String(reason)}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const stock = useMemo(() => (["wb", "seller"] as const).flatMap((source) =>
     (data[source]?.rows ?? []).map((row) => ({
       ...row, source, key: `${source}:${row.warehouseId}`,
@@ -75,7 +155,8 @@ export function WbInventory({ shopId }: { shopId: string }) {
     .filter(matches).sort((a, b) => (totals?.[b]?.[1] ?? 0) - (totals?.[a]?.[1] ?? 0) || a - b);
   const count = view === "stock" ? filtered.length : products.length;
   const start = page * pageSize;
-  const fullStock = !!data.wb && !!data.seller;
+  const fullStock = !!data.wb?.updatedAt && !!data.seller?.updatedAt;
+  const selectedProduct = productsFound.find((item) => String(item.sizeId) === selectedSize);
 
   return (
     <section className="wbo-panel">
@@ -87,8 +168,9 @@ export function WbInventory({ shopId }: { shopId: string }) {
         ))}
       </div>
       <p>{(["wb", "seller", "sales"] as const).map((source) =>
-        `${sources[source]}：${data[source] ? new Date(data[source].updatedAt).toLocaleString("zh-CN") : "尚未同步"}`).join(" · ")}</p>
-      {error && <p role="alert" className="wbo-error">{error}</p>}
+        `${sources[source]}：${data[source]?.updatedAt ? new Date(data[source].updatedAt!).toLocaleString("zh-CN") : "尚未同步"}`).join(" · ")}</p>
+      {notice && <p role="status">{notice}</p>}
+      {error && !edit && !adding && <p role="alert" className="wbo-error">{error}</p>}
       <div className="wbo-actions">
         <button aria-pressed={view === "stock"} onClick={() => { setView("stock"); setPage(0); }}>库存明细</button>
         <button aria-pressed={view === "forecast"} onClick={() => { setView("forecast"); setPage(0); }}>销量预估</button>
@@ -98,6 +180,7 @@ export function WbInventory({ shopId }: { shopId: string }) {
       {view === "stock" ? (
         <>
           <div className="wbo-actions">
+            <button className="primary" disabled={busy !== null} onClick={() => void openAdd()}>加入库存</button>
             <select aria-label="筛选仓库" value={warehouse} onChange={(event) => { setWarehouse(event.target.value); setPage(0); }}>
               <option value="">全部仓库</option>
               {[...warehouses].map(([id, label]) => <option key={id} value={id}>{label}</option>)}
@@ -106,12 +189,17 @@ export function WbInventory({ shopId }: { shopId: string }) {
           </div>
           <div className="wbo-table-wrap">
             <table>
-              <thead><tr><th>商品编号 / 货号</th><th>规格编号</th><th>仓库</th><th>可售</th><th>发往买家</th><th>买家退回途中</th></tr></thead>
+              <thead><tr><th>商品编号 / 货号</th><th>规格编号</th><th>仓库</th><th>可售</th><th>发往买家</th><th>买家退回途中</th><th>操作</th></tr></thead>
               <tbody>{filtered.slice(start, start + pageSize).map((row) => (
                 <tr key={`${row.key}:${row.nmId}:${row.sizeId}`}>
-                  <td>{row.nmId} {data.vendorCodes?.[row.nmId]}</td>
+                  <td>{row.nmId} {row.vendorCode || data.vendorCodes?.[row.nmId]}</td>
                   <td>{row.sizeId}</td><td>{row.label}</td><td>{format(row.quantity)}</td>
                   <td>{format(row.toCustomer ?? undefined)}</td><td>{format(row.fromCustomer ?? undefined)}</td>
+                  <td>{row.source === "seller" ? (
+                    <button disabled={busy !== null} onClick={() => {
+                      setError(""); setNotice(""); setQuantity(String(row.quantity)); setEdit(row);
+                    }}>修改库存</button>
+                  ) : "—"}</td>
                 </tr>
               ))}</tbody>
             </table>
@@ -150,6 +238,69 @@ export function WbInventory({ shopId }: { shopId: string }) {
           {!count && <p>当前筛选没有商品。</p>}
         </>
       )}
+      {adding && <div className="wbo-overlay">
+        <form className="wbo-dialog" role="dialog" aria-modal="true" aria-labelledby="wb-stock-add"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (selectedProduct && selectedWarehouse) {
+              void saveStock({ ...selectedProduct, warehouseId: Number(selectedWarehouse) }, true);
+            }
+          }}>
+          <h2 id="wb-stock-add">加入卖家仓库存</h2>
+          <fieldset className="wbo-stock-fields" disabled={optionsBusy || busy === "update"}>
+            <label>卖家仓
+              <select required value={selectedWarehouse} onChange={(event) => setSelectedWarehouse(event.target.value)}>
+                <option value="">选择卖家仓</option>
+                {sellerWarehouses.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.id}</option>)}
+              </select>
+            </label>
+            <label>搜索当前店铺商品
+              <input autoFocus placeholder="输入 WB 商品编号或卖家货号" value={productSearch} onChange={(event) => {
+                setProductSearch(event.target.value); setProductsFound([]); setSelectedSize(""); setSearched(false);
+              }} onKeyDown={(event) => {
+                if (event.key === "Enter") { event.preventDefault(); void findProducts(); }
+              }} />
+            </label>
+            <button type="button" disabled={!productSearch.trim()} onClick={() => void findProducts()}>搜索商品</button>
+            {searched && !productsFound.length && <p>没有找到匹配的商品规格。</p>}
+            <label>商品规格
+              <select required value={selectedSize} onChange={(event) => setSelectedSize(event.target.value)}>
+                <option value="">选择商品规格</option>
+                {productsFound.map((item) => <option key={item.sizeId} value={item.sizeId}>
+                  {item.vendorCode || item.nmId} · {item.title} · {item.size || "默认规格"} · {item.sizeId}
+                </option>)}
+              </select>
+            </label>
+            <label>可售库存 <input type="number" min={1} max={999999} step={1} required
+              value={quantity} onChange={(event) => setQuantity(event.target.value)} /></label>
+          </fieldset>
+          {optionsBusy && <p role="status">正在读取 WB 数据…</p>}
+          {error && <p role="alert" className="wbo-error">{error}</p>}
+          <div className="wbo-actions">
+            <button type="button" disabled={optionsBusy || busy === "update"} onClick={() => { setAdding(false); setError(""); }}>取消</button>
+            <button className="primary" disabled={optionsBusy || busy !== null || !selectedWarehouse || !selectedProduct || !validQuantity || Number(quantity) < 1}>
+              {busy === "update" ? "正在提交…" : "确认加入 WB 库存"}
+            </button>
+          </div>
+        </form>
+      </div>}
+      {edit && <div className="wbo-overlay">
+        <form className="wbo-dialog" role="dialog" aria-modal="true" aria-labelledby="wb-stock-edit"
+          onSubmit={(event) => { event.preventDefault(); void saveStock(edit); }}>
+          <h2 id="wb-stock-edit">修改卖家仓库存</h2>
+          <p>仓库 {edit.warehouse || edit.warehouseId} · 商品 {edit.nmId} · 规格 {edit.sizeId}</p>
+          <p>当前表格库存 {edit.quantity} 件。保存将直接设置 WB 平台可售库存，填 0 可清零。</p>
+          <label>新的可售库存 <input type="number" min={0} max={999999} step={1} required autoFocus
+            disabled={busy === "update"} value={quantity} onChange={(event) => setQuantity(event.target.value)} /></label>
+          {error && <p role="alert" className="wbo-error">{error}</p>}
+          <div className="wbo-actions">
+            <button type="button" disabled={busy === "update"} onClick={() => { setEdit(null); setError(""); }}>取消</button>
+            <button className="primary" disabled={busy !== null || !validQuantity}>
+              {busy === "update" ? "正在提交…" : "确认更新到 WB"}
+            </button>
+          </div>
+        </form>
+      </div>}
       {count > pageSize && <div className="wbo-actions">
         <button disabled={page === 0} onClick={() => setPage(page - 1)}>上一页</button>
         <span>第 {page + 1} 页 / 共 {Math.ceil(count / pageSize)} 页</span>

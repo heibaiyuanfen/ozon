@@ -152,14 +152,35 @@ fn snapshot(c: &Connection, shop: &str) -> Result<Value, String> {
         json!({"warehouses":warehouses,"orders":orders,"returns":returns,"sync":sync,"running":running}),
     )
 }
-pub(super) fn request(token: &str, host: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+pub(super) fn request(
+    token: &str,
+    host: &str,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value, String> {
+    request_with_method(
+        token,
+        host,
+        path,
+        if body.is_some() { "POST" } else { "GET" },
+        body,
+    )
+}
+
+pub(super) fn request_with_method(
+    token: &str,
+    host: &str,
+    path: &str,
+    method: &str,
+    body: Option<Value>,
+) -> Result<Value, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(40))
         .build();
     let url = format!("https://{host}.wildberries.ru{path}");
     let response = if let Some(body) = body {
         agent
-            .post(&url)
+            .request(method, &url)
             .set("Authorization", token)
             .set("Content-Type", "application/json")
             .send_string(&body.to_string())
@@ -590,6 +611,153 @@ fn ads_snapshot(c: &Connection, shop: &str) -> Result<Value, String> {
         .map_err(|e| e.to_string())?))
 }
 
+fn ad_campaigns(c: &Connection, shop: &str) -> Result<Value, String> {
+    let (_, token) = wb_shop_center::active_token(c, shop)?;
+    let mut campaigns = std::collections::BTreeMap::new();
+    let mut cursors = std::collections::HashSet::new();
+    let mut path = "/api/advert/v3/adverts?limit=50".to_owned();
+    loop {
+        let result = request(&token, "advert-api", &path, None)?;
+        for row in array(&result, "adverts")? {
+            let id = row["advertId"].as_i64().filter(|id| *id > 0).ok_or("活动编号缺失")?;
+            campaigns.insert(id, json!({"id":id,"name":row["settings"]["name"],
+                "payment":row["settings"]["paymentType"],"status":row["status"],
+                "products":row["nms"].as_array().into_iter().flatten()
+                    .filter_map(|item| item["nmId"].as_i64()).collect::<Vec<_>>()}));
+        }
+        let next = result["next"].as_str().ok_or("WB 未返回活动分页游标")?;
+        if next.is_empty() {
+            return Ok(json!(campaigns.into_values().collect::<Vec<_>>()));
+        }
+        if !next.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.=".contains(&b))
+            || !cursors.insert(next.to_owned()) {
+            return Err("WB 活动分页游标无效或重复".into());
+        }
+        path = format!("/api/advert/v3/adverts?limit=50&next={next}");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn ad_product_attribution(c: &Connection, shop: &str, payload: &Value) -> Result<Value, String> {
+    let campaign = payload["campaignId"].as_i64().filter(|id| *id > 0).ok_or("广告活动编号无效")?;
+    let date = |key: &str| {
+        NaiveDate::parse_from_str(payload[key].as_str().unwrap_or(""), "%Y-%m-%d")
+            .map_err(|_| "请选择有效日期")
+    };
+    let (from, to) = (date("from")?, date("to")?);
+    if !(0..=30).contains(&(to - from).num_days()) {
+        return Err("商品归因单次最多查询 31 天".into());
+    }
+    let (_, token) = wb_shop_center::active_token(c, shop)?;
+    let result = request(&token, "advert-api", &format!(
+        "/api/advert/v4/fullstats?advertIds={campaign}&beginDate={from}&endDate={to}"
+    ), None)?;
+    let mut rows = Vec::new();
+    for row in array(&result, "rows")? {
+        if row["advertId"].as_i64() != Some(campaign) {
+            return Err("归因数据的活动编号与查询不匹配".into());
+        }
+        if row["placement"].as_str() != Some("search") {
+            continue;
+        }
+        let id = row["nmId"].as_i64().filter(|id| *id > 0).ok_or("归因商品编号缺失")?;
+        let kind = row["conversionType"].as_str().ok_or("归因类型缺失")?;
+        let currency = row["currency"].as_str().filter(|s| !s.is_empty()).ok_or("归因币种缺失")?;
+        let number = |key: &str| row[key].as_f64().filter(|n| *n >= 0.0).ok_or("归因金额缺失");
+        rows.push(json!({"nmId":id,"kind":kind,"currency":currency,
+            "orders":row["orders"].as_u64().ok_or("归因订单量缺失")?,
+            "sales":number("sumPrice")?,"spend":number("sum")?}));
+    }
+    Ok(json!(rows))
+}
+
+fn ad_cost_daily(c: &Connection, shop: &str, payload: &Value) -> Result<Value, String> {
+    let date = |key: &str| {
+        NaiveDate::parse_from_str(payload[key].as_str().unwrap_or(""), "%Y-%m-%d")
+            .map_err(|_| "请选择有效日期")
+    };
+    let (from, to) = (date("from")?, date("to")?);
+    if !(0..=30).contains(&(to - from).num_days()) {
+        return Err("广告日明细单次最多查询 31 天".into());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for item in array(payload, "ids")? {
+        ids.insert(item.as_i64().filter(|id| *id > 0).ok_or("活动编号无效")?);
+    }
+    if ids.is_empty() || ids.len() > 50 {
+        return Err("请选择 1 至 50 个广告活动".into());
+    }
+    let ids_joined = ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+    let (_, token) = wb_shop_center::active_token(c, shop)?;
+    let metadata = request(&token, "advert-api", &format!("/api/advert/v3/adverts?advertIds={ids_joined}"), None)?;
+    let mut settings = std::collections::BTreeMap::new();
+    for item in array(&metadata, "adverts")? {
+        let Some(id) = item["advertId"].as_i64().filter(|id| ids.contains(id)) else { continue };
+        let payment = item["settings"]["paymentType"].as_str()
+            .filter(|value| matches!(*value, "cpc" | "cpm")).ok_or("WB 未返回广告活动的计费方式")?;
+        let currency = item["currency"].as_str().filter(|s| !s.is_empty()).ok_or("WB 未返回广告活动币种")?;
+        settings.insert(id, (payment.to_owned(), currency.to_owned()));
+    }
+    if settings.len() != ids.len() {
+        return Err("部分活动无法读取计费方式，请核对活动编号和所属店铺".into());
+    }
+    let stats = request(&token, "advert-api", &format!(
+        "/adv/v3/fullstats?ids={ids_joined}&beginDate={from}&endDate={to}"
+    ), None)?;
+    let mut rows = Vec::new();
+    for item in stats.as_array().ok_or("WB 未返回活动统计")? {
+        let (payment, currency) = item["advertId"].as_i64().and_then(|id| settings.get(&id))
+            .ok_or("活动统计中的编号与查询不匹配")?;
+        for row in array(item, "days")? {
+            let day = row["date"].as_str().and_then(|date| date.get(..10))
+                .and_then(|date| date.parse::<NaiveDate>().ok())
+                .filter(|day| *day >= from && *day <= to).ok_or("WB 返回无效统计日期")?;
+            let spend = row["sum"].as_f64().filter(|n| *n >= 0.0).ok_or("WB 日统计缺少广告花费")?;
+            rows.push(json!({"day":day,"payment":payment,"currency":currency,"spend":spend,
+                "views":row["views"].as_u64(),"clicks":row["clicks"].as_u64()}));
+        }
+    }
+    Ok(json!(rows))
+}
+
+fn search_cluster_stats(c: &Connection, shop: &str, payload: &Value) -> Result<Value, String> {
+    let id = |key: &str| {
+        payload[key].as_i64().filter(|id| *id > 0).ok_or("请输入有效的活动编号和商品编号")
+    };
+    let date = |key: &str| {
+        NaiveDate::parse_from_str(payload[key].as_str().unwrap_or(""), "%Y-%m-%d")
+            .map_err(|_| "请选择有效日期")
+    };
+    let (from, to) = (date("from")?, date("to")?);
+    if !(0..=29).contains(&(to - from).num_days()) {
+        return Err("搜索词统计单次最多查询 30 天".into());
+    }
+    let (campaign, product) = (id("campaignId")?, id("nmId")?);
+    let (_, token) = wb_shop_center::active_token(c, shop)?;
+    let result = request(&token, "advert-api", "/adv/v1/normquery/stats", Some(json!({
+        "from":from, "to":to, "items":[{"advertId":campaign,"nmId":product}]
+    })))?;
+    let mut rows = Vec::new();
+    for item in array(&result, "items")? {
+        if item["advertId"].as_i64() != Some(campaign) || item["nmId"].as_i64() != Some(product) {
+            return Err("搜索词响应的活动或商品编号不匹配".into());
+        }
+        for row in array(&item, "dailyStats")? {
+            let stat = &row["stat"];
+            let query = stat["normQuery"].as_str().ok_or("搜索词组名称缺失")?;
+            let day = row["date"].as_str().and_then(|day| day.parse::<NaiveDate>().ok())
+                .filter(|day| *day >= from && *day <= to).ok_or("搜索词统计日期无效")?;
+            let count = |key: &str| stat[key].as_u64().ok_or("搜索词统计缺少数量字段");
+            let spend = stat["spend"].as_f64().filter(|amount| *amount >= 0.0)
+                .ok_or("搜索词统计缺少广告费")?;
+            rows.push(json!({"query":query, "day":day, "clicks":count("clicks")?,
+                "orders":count("orders")?, "carts":count("atbs")?, "spend":spend,
+                "views":stat["views"].as_u64()}));
+        }
+    }
+    Ok(json!(rows))
+}
+
 fn collect_ad_products(
     day: &Value,
     products: &mut std::collections::BTreeMap<i64, (f64, f64, u64)>,
@@ -708,14 +876,30 @@ pub async fn wb_operations(
         }
         match action.as_str() {
             "list" => snapshot(&c, shop),
+            "ad_campaigns" => ad_campaigns(&c, shop),
+            "ad_cost_daily" => ad_cost_daily(&c, shop, &payload),
+            "ad_product_attribution" => ad_product_attribution(&c, shop, &payload),
+            "ad_keywords" => search_cluster_stats(&c, shop, &payload),
+            "inventory_options" => super::wb_inventory::options(&c, shop, &payload),
             "inventory_list" => super::wb_inventory::run(&c, shop, None),
-            "inventory_sync" => {
-                let resource = payload["resource"].as_str().ok_or("请选择同步来源")?;
+            "inventory_sync" | "inventory_update" => {
+                let resource = payload["resource"].as_str();
+                if action == "inventory_sync" && resource.is_none() {
+                    return Err("请选择同步来源".into());
+                }
                 let lock = SYNCING.get_or_init(Default::default);
-                if !lock.lock().map_err(|e| e.to_string())?.insert(shop.to_owned()) {
+                if !lock
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .insert(shop.to_owned())
+                {
                     return Err("该店铺正在同步，请稍候".into());
                 }
-                let result = super::wb_inventory::run(&c, shop, Some(resource));
+                let result = if action == "inventory_update" {
+                    super::wb_inventory::update(&c, shop, &payload)
+                } else {
+                    super::wb_inventory::run(&c, shop, resource)
+                };
                 lock.lock().map_err(|e| e.to_string())?.remove(shop);
                 result
             }
