@@ -880,6 +880,8 @@ pub async fn wb_operations(
             "ad_cost_daily" => ad_cost_daily(&c, shop, &payload),
             "ad_product_attribution" => ad_product_attribution(&c, shop, &payload),
             "ad_keywords" => search_cluster_stats(&c, shop, &payload),
+            "product_cards" | "product_detail" | "product_update" | "product_media" =>
+                super::wb_product_editor::run(&c, shop, &action, &payload),
             "inventory_options" => super::wb_inventory::options(&c, shop, &payload),
             "inventory_list" => super::wb_inventory::run(&c, shop, None),
             "inventory_sync" | "inventory_update" => {

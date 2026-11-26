@@ -47,6 +47,7 @@ mod wb;
 mod wb_shop_center;
 mod wb_operations;
 mod wb_inventory;
+mod wb_product_editor;
 mod wb_pricing;
 static INVENTORY_SYNC_LOCK: Mutex<()> = Mutex::new(());
 static SELLER_SYNC_LOCK: Mutex<()> = Mutex::new(());

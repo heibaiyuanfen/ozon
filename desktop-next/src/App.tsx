@@ -329,6 +329,10 @@ function Sidebar({
                 ["orders", "订单中心", ShoppingBag],
                 ["returns", "退货中心", Truck],
                 ["pricing", "价格与利润监控", BarChart3],
+                ["promotions", "促销活动", BadgePercent],
+                ["products", "商品中心", Box],
+                ["weekly", "经营周报", CalendarDays],
+                ["monthly", "经营月报", BarChart3],
                 ["inventory", "库存管理", PackageSearch],
                 ["ad_optimization", "广告优化与评估", Megaphone],
               ] as Array<

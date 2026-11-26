@@ -90,6 +90,7 @@ fn request(token: &str, method: &str, url: &str, body: Option<Value>) -> Result<
         _ => ureq::get(url),
     }
     .set("Authorization", token)
+    .timeout(std::time::Duration::from_secs(40))
     .set("Accept", "application/json")
     .set("Content-Type", "application/json");
     let response = if let Some(v) = body {
@@ -177,7 +178,7 @@ fn dashboard(c: &Connection, shop: &str) -> Result<Value> {
     let rows=query(c,"SELECT json_object('listingId',l.id,'skuId',l.sku_id,'sku',k.code,'name',COALESCE(k.name,l.title),'nmId',l.nm_id,'mappingStatus',l.mapping_status,'basePrice',p.base_price,'discountPct',p.discount_pct,'effectivePrice',p.effective_price,'currency',COALESCE(p.currency,'RUB'),'observedAt',p.observed_at,'dataStatus',COALESCE(p.data_status,'missing'),'minimumSafePrice',(SELECT minimum_safe_price FROM price_rules r WHERE r.enabled=1 AND (r.shop_id IS NULL OR r.shop_id=l.shop_id) AND (r.sku_id IS NULL OR r.sku_id=l.sku_id) ORDER BY CASE WHEN r.sku_id=l.sku_id THEN 3 WHEN r.shop_id=l.shop_id THEN 2 ELSE 1 END DESC LIMIT 1)) FROM pm_listings l LEFT JOIN pm_skus k ON k.id=l.sku_id LEFT JOIN price_snapshots p ON p.rowid=(SELECT rowid FROM price_snapshots z WHERE z.shop_id=l.shop_id AND z.listing_id=l.id ORDER BY z.observed_at DESC,z.rowid DESC LIMIT 1) WHERE l.shop_id=?1 AND l.mapping_status!='IGNORED' ORDER BY k.code,l.nm_id",[shop])?;
     let history=query(c,"SELECT json_object('id',id,'listingId',listing_id,'basePrice',base_price,'discountPct',discount_pct,'effectivePrice',effective_price,'source',source,'changeType',change_type,'observedAt',observed_at) FROM price_snapshots WHERE shop_id=?1 ORDER BY observed_at DESC,rowid DESC LIMIT 300",[shop])?;
     let jobs=query(c,"SELECT json_object('id',j.id,'changeId',j.price_change_id,'status',j.status,'progress',j.progress,'successCount',j.success_count,'failedCount',j.failed_count,'blockedCount',j.blocked_count,'externalJobId',j.external_job_id,'createdAt',j.created_at,'reason',c.reason) FROM price_write_jobs j JOIN price_changes c ON c.id=j.price_change_id WHERE c.shop_id=?1 ORDER BY j.created_at DESC LIMIT 100",[shop])?;
-    let promotions=query(c,"SELECT json_object('id',id,'externalPromotionId',external_promotion_id,'name',name,'startsAt',starts_at,'endsAt',ends_at,'status',status,'dataStatus',data_status,'lastSyncedAt',last_synced_at) FROM promotions WHERE shop_id=?1 ORDER BY starts_at DESC",[shop])?;
+    let promotions = list_promotions(c, shop)?;
     Ok(json!({"rows":rows,"history":history,"jobs":jobs,"promotions":promotions}))
 }
 fn query<P: rusqlite::Params>(c: &Connection, sql: &str, p: P) -> Result<Vec<Value>> {
@@ -368,6 +369,64 @@ fn execute(c: &Connection, p: &Value, retry_only: bool) -> Result<Value> {
         }
     }
 }
+fn promotion_products(c: &Connection, p: &Value, submit: bool) -> Result<Value> {
+    let shop = field(p, "shopId")?;
+    let id = p["promotionId"].as_u64().filter(|id| *id > 0).ok_or("活动 ID 无效")?;
+    let (_, token) = wb_shop_center::active_token(c, shop)?;
+    let base = "https://dp-calendar-api.wildberries.ru/api/v1/calendar/promotions";
+    if submit {
+        role(&["admin", "operator"])?;
+        let raw: String = c.query_row(
+            "SELECT raw_rules FROM promotions WHERE shop_id=?1 AND external_promotion_id=?2",
+            params![shop, id.to_string()], |r| r.get(0)
+        ).map_err(|_| "请先同步当前店铺的活动")?;
+        let promo: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let end = promo["endDateTime"].as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+        if promo["type"] != "regular" || end.is_none_or(|end| end <= Utc::now()) {
+            return Err("仅可报名尚未结束的普通促销".into());
+        }
+        let ids = p["productIds"].as_array().filter(|ids| !ids.is_empty() && ids.len() <= 100)
+            .ok_or("请选择 1 至 100 件商品")?;
+        let mut unique = std::collections::HashSet::new();
+        if !ids.iter().all(|id| id.as_u64().is_some_and(|id| id > 0 && unique.insert(id))) {
+            return Err("商品 ID 无效或重复".into());
+        }
+        let upload_now = p["uploadNow"].as_bool().ok_or("请选择生效时间")?;
+        let candidates = promotion_products(c, &json!({
+            "shopId": shop, "promotionId": id, "offset": p["offset"]
+        }), false)?;
+        let prices = p["planPrices"].as_object().ok_or("请重新预览报名价格")?;
+        let candidates = candidates.as_array().ok_or("WB 商品列表响应格式异常")?;
+        for product in unique {
+            let expected = prices.get(&product.to_string()).and_then(Value::as_f64);
+            let actual = candidates.iter().find(|row| row["id"].as_u64() == Some(product))
+                .and_then(|row| row["planPrice"].as_f64()).filter(|price| *price > 0.0);
+            if actual.is_none() || expected != actual {
+                return Err(format!("商品 {product} 已不可报名或活动价已变化，请刷新后重新预览"));
+            }
+        }
+        let result = request(&token, "POST", &format!("{base}/upload"), Some(json!({
+            "data": {"promotionID": id, "uploadNow": upload_now, "nomenclatures": ids}
+        })))?;
+        let upload = result.pointer("/data/uploadID").and_then(Value::as_u64)
+            .ok_or("WB 未返回任务号，请先核对上传历史再重试")?;
+        return Ok(json!({"uploadId": upload, "alreadyExists": result["data"]["alreadyExists"]}));
+    }
+    let participating = p["participating"].as_bool().unwrap_or(false);
+    let offset = p["offset"].as_u64().unwrap_or(0);
+    let result = request(&token, "GET", &format!(
+        "{base}/nomenclatures?promotionID={id}&inAction={participating}&limit=100&offset={offset}"
+    ), None)?;
+    let rows = result.pointer("/data/nomenclatures").and_then(Value::as_array)
+        .ok_or("WB 商品列表响应格式异常")?;
+    Ok(json!(rows))
+}
+
+fn list_promotions(c: &Connection, shop: &str) -> Result<Vec<Value>> {
+    query(c,"SELECT json_object('id',id,'externalPromotionId',external_promotion_id,'name',name,'kind',json_extract(raw_rules,'$.type'),'startsAt',starts_at,'endsAt',ends_at,'status',status,'dataStatus',data_status,'lastSyncedAt',last_synced_at) FROM promotions WHERE shop_id=?1 ORDER BY starts_at DESC",[shop])
+}
+
 fn sync_promotions(c: &Connection, shop: &str) -> Result<Value> {
     role(&["admin", "operator"])?;
     let (_, token) = wb_shop_center::active_token(c, shop)?;
@@ -377,10 +436,9 @@ fn sync_promotions(c: &Connection, shop: &str) -> Result<Value> {
     let list = v
         .pointer("/data/promotions")
         .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+        .ok_or("Wildberries 促销接口返回了无法识别的数据")?;
     let current = now();
-    for x in &list {
+    for x in list {
         let external = x["id"].as_i64().map(|n| n.to_string()).unwrap_or_default();
         let start = x["startDateTime"].as_str();
         let end = x["endDateTime"].as_str();
@@ -435,6 +493,9 @@ pub fn price_center(
         }
         "execute" => execute(&c, &p, false),
         "sync_prices" => sync_prices(&c, field(&p, "shopId")?),
+        "promotion_products" => promotion_products(&c, &p, false),
+        "promotion_submit" => promotion_products(&c, &p, true),
+        "list_promotions" => Ok(json!(list_promotions(&c, field(&p, "shopId")?)?)),
         "sync_promotions" => sync_promotions(&c, field(&p, "shopId")?),
         _ => Err("未知价格中心操作".into()),
     }
