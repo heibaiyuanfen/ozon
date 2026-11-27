@@ -3,6 +3,7 @@ setlocal
 set "NODE_BIN=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin"
 set "PNPM_BIN=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback"
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "%NODE_BIN%\node.exe" for /f "delims=" %%I in ('where node.exe') do if not exist "%NODE_BIN%\node.exe" call :resolve_node "%%~dpI"
 if not exist "%NODE_BIN%\node.exe" goto node_missing
 if not exist "%VSWHERE%" goto vswhere_missing
 for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
@@ -30,3 +31,7 @@ exit /b 1
 :vs_missing
 echo Visual Studio C++ build tools were not found.
 exit /b 1
+
+:resolve_node
+set "NODE_BIN=%~1"
+exit /b 0

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { WbCampaignFinance } from "./WbCampaignFinance";
 import { WbAdDailyCosts } from "./WbAdDailyCosts";
 import { WbKeywordTemplate } from "./WbKeywordTemplate";
 
@@ -33,6 +34,7 @@ export function WbAdOptimization({ shopId, defaultFrom, defaultTo, maxDate }: {
       {error && <p role="alert" className="wbo-error">{error}</p>}
       {!loading && !error && !campaigns.length && <p>当前店铺暂无广告活动。</p>}
     </section>
+    <WbCampaignFinance shopId={shopId} campaigns={campaigns} defaultFrom={defaultFrom} defaultTo={defaultTo} maxDate={maxDate} />
     <WbAdDailyCosts shopId={shopId} campaigns={campaigns} defaultFrom={defaultFrom} defaultTo={defaultTo} maxDate={maxDate} />
     <WbKeywordTemplate shopId={shopId} campaigns={campaigns} defaultEnd={defaultTo} />
   </>;

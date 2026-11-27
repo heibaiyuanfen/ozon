@@ -611,6 +611,110 @@ fn ads_snapshot(c: &Connection, shop: &str) -> Result<Value, String> {
         .map_err(|e| e.to_string())?))
 }
 
+fn ad_bid_configuration(advert: &Value) -> (Option<&str>, Value) {
+    let raw = &advert["settings"]["placements"];
+    if let Some(values) = raw.as_array() {
+        let has = |name: &str| values.iter().any(|value| value.as_str() == Some(name));
+        if has("combined") {
+            return (Some("unified"), json!({"search":true,"recommendations":true}));
+        }
+        let search = has("search");
+        let recommendations = has("recommendations") || has("recommendation");
+        let strategy = (search || recommendations).then_some("manual");
+        return (strategy, json!({"search":search,"recommendations":recommendations}));
+    }
+    let strategy = advert["bidType"].as_str().or_else(|| advert["bid_type"].as_str());
+    (strategy, raw.clone())
+}
+
+fn ad_product_bids(item: &Value, strategy: Option<&str>, placements: &Value) -> serde_json::Map<String, Value> {
+    let legacy = item.get("bidsKopecks").or_else(|| item.get("bids_kopecks")).unwrap_or(&Value::Null);
+    let value = |key: &str| {
+        if let Some(entries) = item["bids"].as_array() {
+            let mut matching = entries.iter().filter(|entry| {
+                let kind = entry["type"].as_str();
+                kind == Some(key) || (key == "recommendations" && kind == Some("recommendation"))
+            });
+            let first = matching.next()?;
+            return if matching.next().is_none() { first["value"].as_u64() } else { None };
+        }
+        legacy[key].as_u64()
+    };
+    let search = value("search");
+    let recommendations = value("recommendations");
+    let mut fields = serde_json::Map::new();
+    match strategy {
+        Some("manual") => {
+            for (placement, bid) in [("search", search), ("recommendations", recommendations)] {
+                if placements[placement] == true {
+                    if let Some(bid) = bid {
+                        fields.insert(placement.into(), json!(bid));
+                    }
+                }
+            }
+        }
+        Some("unified" | "standard") => {
+            let combined = value("combined").or_else(|| match (search, recommendations) {
+                (Some(a), Some(b)) if a == b => Some(a),
+                (Some(a), None | Some(0)) | (None | Some(0), Some(a)) if a > 0 => Some(a),
+                _ => None,
+            });
+            if let Some(bid) = combined {
+                fields.insert("combined".into(), json!(bid));
+            }
+        }
+        _ => {}
+    }
+    fields
+}
+
+fn ad_bid_details(c: &Connection, shop: &str, payload: &Value, save: bool) -> Result<Value, String> {
+    let id = payload["id"].as_u64().filter(|id| *id > 0).ok_or("活动编号无效")?;
+    let (_, token) = wb_shop_center::active_token(c, shop)?;
+    let result = request(&token, "advert-api", &format!("/api/advert/v3/adverts?advertIds={id}"), None)?;
+    let advert = array(&result, "adverts")?.into_iter().find(|row|
+        row["advertId"].as_u64().or_else(|| row["id"].as_u64()) == Some(id))
+        .ok_or("当前店铺未返回该广告活动")?;
+    let currency = advert["currency"].as_str().filter(|s| !s.is_empty()).ok_or("活动币种未知")?;
+    let (strategy, placements) = ad_bid_configuration(&advert);
+    let editable = matches!(advert["status"].as_i64(), Some(4 | 9 | 11));
+    let items = advert["nms"].as_array().or_else(|| advert["nm_settings"].as_array())
+        .ok_or("WB 未返回活动商品")?;
+    let catalog: Option<String> = c.query_row("SELECT body FROM wb_product_catalog WHERE shop_id=?1",
+        [shop], |row| row.get(0)).optional().ok().flatten();
+    let catalog: Value = catalog.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or(Value::Null);
+    let mut products = Vec::new();
+    for item in items {
+        let Some(nm) = item["nmId"].as_u64().or_else(|| item["nm_id"].as_u64()) else { continue };
+        let fields = ad_product_bids(item, strategy, &placements);
+        let card = catalog["cards"].as_array().and_then(|cards| cards.iter().find(|card| card["nmID"].as_u64() == Some(nm)));
+        products.push(json!({"nmId":nm,"bids":fields,"name":card.and_then(|c|c["title"].as_str()),
+            "code":card.and_then(|c|c["vendorCode"].as_str()),"image":card.and_then(|c|c["photos"][0]["big"].as_str())}));
+    }
+    if !save {
+        return Ok(json!({"currency":currency,"strategy":strategy,"placements":placements,"editable":editable,"products":products}));
+    }
+    if !editable { return Err("当前活动状态不支持修改竞价".into()); }
+    let nm = payload["nmId"].as_u64().filter(|nm| *nm > 0).ok_or("商品编号无效")?;
+    let placement = payload["placement"].as_str().filter(|p| matches!(*p,"search"|"recommendations"|"combined")).ok_or("竞价位置无效")?;
+    let expected = payload["previous"].as_u64().ok_or("缺少当前竞价")?;
+    let bid = payload["bid"].as_u64().filter(|bid| *bid > 0 && *bid <= i32::MAX as u64).ok_or("竞价值无效")?;
+    if payload["currency"].as_str() != Some(currency) ||
+        products.iter().find(|p| p["nmId"].as_u64() == Some(nm))
+            .and_then(|p|p["bids"][placement].as_u64()) != Some(expected) {
+        return Err("活动币种、商品或当前竞价已变化，请刷新详情后再提交".into());
+    }
+    let updated = request_with_method(&token,"advert-api","/api/advert/v1/bids","PATCH",
+        Some(json!({"bids":[{"advert_id":id,"nm_bids":[{"nm_id":nm,"bid_kopecks":bid,"placement":placement}]}]})))?;
+    let confirmed = updated["bids"].as_array().into_iter().flatten()
+        .filter(|row|row["advert_id"].as_u64()==Some(id))
+        .flat_map(|row|row["nm_bids"].as_array().into_iter().flatten())
+        .any(|row|row["nm_id"].as_u64()==Some(nm) && row["placement"].as_str()==Some(placement)
+            && row["bid_kopecks"].as_u64()==Some(bid));
+    if updated["currency"].as_str() != Some(currency) || !confirmed { return Err("WB 未确认新竞价，请刷新详情并核对后再操作".into()); }
+    Ok(json!({"bid":bid}))
+}
+
 fn ad_campaigns(c: &Connection, shop: &str) -> Result<Value, String> {
     let (_, token) = wb_shop_center::active_token(c, shop)?;
     let mut campaigns = std::collections::BTreeMap::new();
@@ -713,7 +817,7 @@ fn ad_cost_daily(c: &Connection, shop: &str, payload: &Value) -> Result<Value, S
                 .and_then(|date| date.parse::<NaiveDate>().ok())
                 .filter(|day| *day >= from && *day <= to).ok_or("WB 返回无效统计日期")?;
             let spend = row["sum"].as_f64().filter(|n| *n >= 0.0).ok_or("WB 日统计缺少广告花费")?;
-            rows.push(json!({"day":day,"payment":payment,"currency":currency,"spend":spend,
+            rows.push(json!({"advertId":item["advertId"],"day":day,"payment":payment,"currency":currency,"spend":spend,"orders":row["orders"],
                 "views":row["views"].as_u64(),"clicks":row["clicks"].as_u64()}));
         }
     }
@@ -850,6 +954,95 @@ fn sync_ads(c: &mut Connection, shop: &str, token: &str, payload: &Value) -> Res
     ads_snapshot(c, shop)
 }
 
+fn weekly_api_report(c: &Connection, shop: &str, payload: &Value) -> Result<Value, String> {
+    use chrono::Datelike;
+    let from = payload["from"].as_str().and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+        .ok_or("请选择有效的周一")?;
+    let to = from.checked_add_signed(chrono::Duration::days(6)).ok_or("日期超出范围")?;
+    let today = (Utc::now() + chrono::Duration::hours(3)).date_naive();
+    if from.weekday() != chrono::Weekday::Mon || to >= today {
+        return Err("请选择已经结束的完整周".into());
+    }
+    let key = from.to_string();
+    if payload["refresh"] != true {
+        let cached: Option<String> = c.query_row(
+            "SELECT raw FROM wb_ops_rows WHERE shop_id=?1 AND kind='weekly_api_report' AND id=?2",
+            params![shop, key], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        if let Some(raw) = cached {
+            return serde_json::from_str(&raw).map_err(|e| e.to_string());
+        }
+    }
+
+    let (_, token) = wb_shop_center::active_token(c, shop)?;
+    let mut cursor = 0;
+    let mut records = Vec::new();
+    const LIMIT: usize = 100_000;
+    loop {
+        let value = request(&token, "finance-api", "/api/finance/v1/sales-reports/detailed", Some(json!({
+            "dateFrom":key,"dateTo":format!("{to}T23:59:59"),"period":"weekly","limit":LIMIT,"rrdId":cursor
+        })))?;
+        if value == json!({}) { break; }
+        let batch = value.as_array().or_else(|| value.pointer("/data/items").and_then(Value::as_array))
+            .ok_or("WB 财务接口没有返回报告明细")?;
+        if batch.iter().any(|row| !row.is_object()) { return Err("WB 报告明细格式无效".into()); }
+        records.extend(batch.iter().cloned());
+        if batch.len() < LIMIT { break; }
+        let next = batch.last().and_then(|row| row["rrdId"].as_u64()
+            .or_else(|| row["rrdId"].as_str().and_then(|value| value.parse().ok())))
+            .filter(|next| *next > cursor).ok_or("WB 没有返回有效的分页游标")?;
+        cursor = next;
+        std::thread::sleep(std::time::Duration::from_secs(61));
+    }
+
+    let core = ["reportId","dateFrom","dateTo","currency","rrdId","nmId","vendorCode","docTypeName",
+        "sellerOperName","orderDt","saleDt","quantity","retailAmount","forPay","deliveryService","storageFee","deduction"];
+    let names: std::collections::BTreeSet<_> = records.iter()
+        .flat_map(|row| row.as_object().into_iter().flat_map(|row| row.keys().map(String::as_str))).collect();
+    let headers: Vec<_> = core.iter().copied().filter(|field| names.contains(field))
+        .chain(names.iter().copied().filter(|field| !core.contains(field))).collect();
+    let mut rows = vec![headers.iter().map(|field| field.to_string()).collect::<Vec<_>>()];
+    rows.extend(records.iter().map(|row| headers.iter().map(|field| match &row[*field] {
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        value => value.to_string(),
+    }).collect()));
+    let result = json!({"name":format!("WB 官方销售报告 · {from} 至 {to}"),
+        "source":"api","sheets":[{"name":"销售报告明细","firstRow":1,"firstColumn":1,"width":headers.len(),"rows":rows}]});
+    if !records.is_empty() { put(c, shop, "weekly_api_report", &key, &result)?; }
+    Ok(result)
+}
+
+fn weekly_workbook(c: &Connection, shop: &str, action: &str, payload: &Value) -> Result<Value, String> {
+    use calamine::{Reader, Xlsx};
+    if action == "weekly_report_load" {
+        return c.query_row(
+            "SELECT raw FROM wb_ops_rows WHERE shop_id=?1 AND kind='weekly_workbook' AND id='latest'",
+            [shop], |row| row.get::<_, String>(0),
+        ).optional().map_err(|e| e.to_string())?
+          .map(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string())).unwrap_or(Ok(Value::Null));
+    }
+    let name = payload["name"].as_str().filter(|name| name.to_lowercase().ends_with(".xlsx"))
+        .ok_or("请选择 WB 周报 XLSX 文件")?;
+    let bytes = payload["bytes"].as_array().filter(|bytes| !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024)
+        .ok_or("文件为空或超过 16 MB")?.iter().map(|value| value.as_u64().and_then(|n| u8::try_from(n).ok())
+        .ok_or("文件数据无效")).collect::<Result<Vec<_>, _>>()?;
+    let mut workbook = Xlsx::new(std::io::Cursor::new(bytes)).map_err(|e| format!("无法打开 Excel：{e}"))?;
+    let mut sheets = Vec::new();
+    for sheet in workbook.sheet_names().to_vec() {
+        let range = workbook.worksheet_range(&sheet).map_err(|e| format!("{sheet}：{e}"))?;
+        let start = range.start().map(|(row, col)| (row + 1, col + 1)).unwrap_or((1, 1));
+        let rows: Vec<Vec<String>> = range.rows().map(|row| row.iter().map(ToString::to_string).collect()).collect();
+        sheets.push(json!({"name":sheet,"firstRow":start.0,"firstColumn":start.1,"width":range.width(),"rows":rows}));
+    }
+    if sheets.is_empty() {
+        return Err("工作簿没有工作表".into());
+    }
+    let result = json!({"name":name,"sheets":sheets});
+    put(c, shop, "weekly_workbook", "latest", &result)?;
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn wb_operations(
     action: String,
@@ -875,12 +1068,72 @@ pub async fn wb_operations(
             return Err("店铺不存在".into());
         }
         match action.as_str() {
+            "weekly_report_summary" => {
+                let from = payload["from"].as_str().and_then(|s| NaiveDate::parse_from_str(s,"%Y-%m-%d").ok()).ok_or("周报日期无效")?;
+                let to = from.checked_add_signed(chrono::Duration::days(6)).ok_or("日期超出范围")?;
+                let key = from.to_string();
+                let cached: Option<Value> = c.query_row(
+                    "SELECT raw FROM wb_ops_rows WHERE shop_id=?1 AND kind='weekly_summary' AND id=?2",
+                    params![shop, key], |row| row.get::<_, String>(0),
+                ).optional().map_err(|e| e.to_string())?
+                  .map(|raw| serde_json::from_str(&raw)).transpose().map_err(|e| e.to_string())?;
+                if payload["refresh"] != true {
+                    if let Some(cached) = &cached { return Ok(cached.clone()); }
+                }
+                let (_, token) = wb_shop_center::active_token(&c, shop)?;
+                let result = request(&token,"finance-api","/api/finance/v1/sales-reports/list",
+                    Some(json!({"dateFrom":key,"dateTo":to.to_string(),"period":"weekly","limit":100,"offset":0})))?;
+                let mut reports = if result == json!({}) { Vec::new() }
+                    else { result.as_array().filter(|rows| rows.len() < 100)
+                        .cloned().ok_or("WB 周报汇总格式异常或超过单周读取上限")? };
+                let mut ids = std::collections::HashSet::new();
+                if reports.iter().any(|row| {
+                    let id = text(&row["reportId"]);
+                    id.is_empty() || !ids.insert(id)
+                }) { return Err("WB 汇总缺少报告编号或报告编号重复".into()); }
+                if reports.is_empty() {
+                    if let Some(cached) = &cached {
+                        if cached["reports"].as_array().is_some_and(|rows| !rows.is_empty()) {
+                            return Err("WB 本次未返回汇总，已保留上次成功的缓存".into());
+                        }
+                    }
+                }
+                reports.sort_by_key(|row| text(&row["reportId"]));
+                let snapshot = json!({"reports":reports,
+                    "previous":cached.as_ref().map(|value| &value["reports"]),
+                    "updatedAt":Utc::now().to_rfc3339()});
+                if !reports.is_empty() { put(&c, shop, "weekly_summary", &key, &snapshot)?; }
+                Ok(snapshot)
+            }
+            "weekly_report_api" => weekly_api_report(&c, shop, &payload),
+            "weekly_report_load" | "weekly_report_import" => weekly_workbook(&c, shop, &action, &payload),
             "list" => snapshot(&c, shop),
+            "ad_balance" | "ad_budgets" | "ad_deposit" => {
+                let (_, token) = wb_shop_center::active_token(&c, shop)?;
+                match action.as_str() {
+                    "ad_balance" => request(&token, "advert-api", "/adv/v1/balance", None),
+                    "ad_budgets" => {
+                        let ids = array(&payload, "ids")?;
+                        if ids.is_empty() || ids.len() > 50 || !ids.iter().all(|id| id.as_u64().is_some_and(|id| id > 0)) {
+                            return Err("请选择 1–50 个有效活动".into());
+                        }
+                        request(&token, "advert-api", "/api/advert/v2/budget", Some(json!({"advertIds": ids})))
+                    }
+                    _ => {
+                        let id = payload["id"].as_u64().filter(|id| *id > 0).ok_or("活动编号无效")?;
+                        let sum = payload["sum"].as_u64().filter(|sum| *sum > 0).ok_or("充值金额必须为正整数")?;
+                        let source = payload["source"].as_u64().filter(|source| matches!(source, 0 | 1 | 3)).ok_or("充值来源无效")?;
+                        request(&token, "advert-api", &format!("/adv/v1/budget/deposit?id={id}"),
+                            Some(json!({"sum":sum,"type":source,"return":true})))
+                    }
+                }
+            }
+            "ad_bid_details" | "ad_bid_save" => ad_bid_details(&c, shop, &payload, action == "ad_bid_save"),
             "ad_campaigns" => ad_campaigns(&c, shop),
             "ad_cost_daily" => ad_cost_daily(&c, shop, &payload),
             "ad_product_attribution" => ad_product_attribution(&c, shop, &payload),
             "ad_keywords" => search_cluster_stats(&c, shop, &payload),
-            "product_cards" | "product_detail" | "product_update" | "product_media" =>
+            "product_catalog" | "product_catalog_refresh" | "product_cards" | "product_detail" | "product_update" | "product_media" =>
                 super::wb_product_editor::run(&c, shop, &action, &payload),
             "inventory_options" => super::wb_inventory::options(&c, shop, &payload),
             "inventory_list" => super::wb_inventory::run(&c, shop, None),
@@ -1009,6 +1262,21 @@ pub async fn wb_operations(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn v3_ad_bids_match_search_recommendations_and_standard_placements() {
+        let advert = json!({"settings":{"paymentType":"cpc","placements":["search","recommendations"]}});
+        let item = json!({"nmId":498090473,"bids":[{"type":"search","value":60},{"type":"recommendations","value":65}]});
+        let (strategy, placements) = ad_bid_configuration(&advert);
+        assert_eq!(strategy, Some("manual"));
+        assert_eq!(Value::Object(ad_product_bids(&item, strategy, &placements)), json!({"search":60,"recommendations":65}));
+
+        let advert = json!({"settings":{"placements":["combined"]}});
+        let item = json!({"bids":[{"type":"search","value":65000}]});
+        let (strategy, placements) = ad_bid_configuration(&advert);
+        assert_eq!(placements, json!({"search":true,"recommendations":true}));
+        assert_eq!(Value::Object(ad_product_bids(&item, strategy, &placements)), json!({"combined":65000}));
+    }
+
     use super::*;
     #[test]
     fn platform_status_has_priority() {

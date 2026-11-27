@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { readWbData, wbCostFields, wbProductCostKey, type WbProductCost } from "./wbProductCosts";
 import { invoke } from "@tauri-apps/api/core";
 
 type Card = {
@@ -9,15 +10,24 @@ type Card = {
   brand?: string;
   photos?: { big: string }[];
   updatedAt: string;
+  sizes?: { skus?: string[] }[];
 };
-type Cursor = { nmID: number; updatedAt: string };
-type Page = { cards: Card[]; cursor?: Cursor };
+type Catalog = { cards: Card[]; updatedAt: string };
 const imageLink = (url: string) => /^https:\/\/[^\s]+\.(jpe?g|png|webp|gif|bmp)([?#][^\s]*)?$/i.test(url);
 
 export function WbProductEditor({ shopId }: { shopId: string }) {
   const [query, setQuery] = useState("");
   const [pageQuery, setPageQuery] = useState("");
-  const [page, setPage] = useState<Page>({ cards: [] });
+  const [catalog,setCatalog] = useState<Catalog>({cards:[],updatedAt:""});
+  const [page,setPage] = useState(0);
+  const [cost,setCost] = useState<WbProductCost>({});
+  const [prefix,setPrefix] = useState("");
+  const [showMatches,setShowMatches] = useState(false);
+  const costKey=wbProductCostKey(shopId);
+  const results=catalog.cards.filter(item=>[item.nmID,item.vendorCode,item.title,...(item.sizes?.flatMap(size=>size.skus ?? []) ?? [])].join(" ").toLowerCase().includes(pageQuery.toLowerCase()));
+  const cards=results.slice(page*50,page*50+50);
+  const normalizedPrefix=prefix.trim().toLowerCase();
+  const matches=normalizedPrefix ? catalog.cards.filter(item=>item.vendorCode?.trim().toLowerCase().startsWith(normalizedPrefix)) : [];
   const [card, setCard] = useState<Card | null>(null);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -31,13 +41,13 @@ export function WbProductEditor({ shopId }: { shopId: string }) {
   const call = <T,>(action: string, payload?: object) =>
     invoke<T>("wb_operations", { action, payload: { shopId, ...payload } });
 
-  async function load(search: string, cursor?: Cursor) {
+  async function load(refresh = false) {
     setBusy(true);
     setError("");
     try {
-      const result = await call<Page>("product_cards", { query: search, cursor });
-      setPage(result);
-      setPageQuery(search);
+      const result = await call<Catalog>(refresh ? "product_catalog_refresh" : "product_catalog");
+      setCatalog(result);
+      setPage(0);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -45,10 +55,13 @@ export function WbProductEditor({ shopId }: { shopId: string }) {
     }
   }
 
-  useEffect(() => { void load(""); }, [shopId]);
+  useEffect(() => { void load(); }, [shopId]);
 
   function setDraft(result: Card) {
     setCard(result);
+    setPrefix(result.vendorCode?.split("-")[0] ?? "");
+    setShowMatches(false);
+    setCost(readWbData<WbProductCost>(costKey)[String(result.nmID)] ?? {});
     setTitle(result.title ?? "");
     setDescription(result.description ?? "");
     setPhotos(result.photos?.map(photo => photo.big) ?? []);
@@ -66,6 +79,27 @@ export function WbProductEditor({ shopId }: { shopId: string }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  const seriesValues = wbCostFields.flatMap(([field,label,unit])=>{
+    const value=cost[field]?.trim();
+    return value ? [{field,label,unit,value}] : [];
+  });
+  const validSeriesValues=seriesValues.length>0 && seriesValues.every(({value})=>Number.isFinite(Number(value)) && Number(value)>=0);
+  function copySeriesCost() {
+    if (!validSeriesValues || !matches.length || !showMatches) return;
+    const details=seriesValues.map(({label,unit,value})=>label+" "+value+" "+unit).join("、");
+    if (!window.confirm("向 "+matches.length+" 个货号以「"+prefix.trim()+"」开头的商品同步："+details+"。确认覆盖这些字段？")) return;
+    const patch=Object.fromEntries(seriesValues.map(({field,value})=>[field,value]));
+    setError("");
+    setNotice("");
+    try {
+      const current=readWbData<WbProductCost>(costKey);
+      for (const item of matches) current[item.nmID]={...current[item.nmID],...patch};
+      localStorage.setItem(costKey,JSON.stringify(current));
+      setNotice("已同步 " + matches.length + " 个商品的成本与规格。");
+      setShowMatches(false);
+    } catch {setError("无法保存系列成本");}
   }
 
   const originalPhotos = card?.photos?.map(photo => photo.big) ?? [];
@@ -108,24 +142,24 @@ export function WbProductEditor({ shopId }: { shopId: string }) {
     {error && <p className="wbo-error" role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
     {!card ? <section className="wbo-panel">
-      <div className="wbo-heading"><h2>商品列表</h2><small>需要具有内容权限的 WB Token</small></div>
-      <form className="wbo-actions" onSubmit={event => { event.preventDefault(); void load(query.trim()); }}>
+      <div className="wbo-heading"><h2>商品列表</h2><div className="wbo-actions"><small>{catalog.updatedAt ? "缓存更新 " + new Date(catalog.updatedAt).toLocaleString("zh-CN") : "首次读取需内容权限"}</small><button disabled={busy} onClick={()=>void load(true)}>更新商品</button></div></div>
+      <form className="wbo-actions" onSubmit={event => { event.preventDefault(); setPageQuery(query.trim());setPage(0); }}>
         <input aria-label="搜索商品" placeholder="输入 WB 商品 ID、货号或条码" value={query} onChange={event => setQuery(event.target.value)}/>
         <button disabled={busy}>搜索</button>
       </form>
       {busy && <p role="status">正在读取商品…</p>}
       <div className="wbo-table-wrap"><table>
         <thead><tr><th>商品</th><th>WB 商品 ID</th><th>货号</th><th>品牌</th><th>操作</th></tr></thead>
-        <tbody>{page.cards.map(row => <tr key={row.nmID}>
+        <tbody>{cards.map(row => <tr key={row.nmID}>
           <td><div className="wbo-product-cell">{row.photos?.[0]?.big && <img src={row.photos[0].big} alt="" loading="lazy" referrerPolicy="no-referrer"/>}<b>{row.title || row.vendorCode}</b></div></td><td>{row.nmID}</td><td>{row.vendorCode}</td><td>{row.brand || "—"}</td>
-          <td><button disabled={busy} onClick={() => void open(row.nmID)}>编辑商品</button></td>
+          <td><button disabled={busy} onClick={() => {setNotice("");setError("");setDraft(row);}}>编辑商品</button></td>
         </tr>)}</tbody>
       </table></div>
-      {!busy && !page.cards.length && <p>没有匹配的商品。</p>}
+      {!busy && !cards.length && <p>没有匹配的商品。</p>}
       <div className="wbo-actions">
-        <button disabled={busy} onClick={() => void load(pageQuery)}>返回首页</button>
-        <button disabled={busy || !page.cursor?.updatedAt || page.cards.length < 50}
-          onClick={() => void load(pageQuery, page.cursor)}>下一页</button>
+        <button onClick={() => setPage(Math.max(0,page-1))} disabled={busy || page===0}>上一页</button>
+        <button disabled={busy || (page+1)*50>=results.length}
+          onClick={() => setPage(page+1)}>下一页</button>
       </div>
     </section> : <>
       <section className="wbo-panel">
@@ -140,6 +174,27 @@ export function WbProductEditor({ shopId }: { shopId: string }) {
           <label>商品描述<textarea disabled={busy} value={description} onChange={e => setDescription(e.target.value)}/></label>
           <div className="wbo-actions"><button disabled={busy || !changedText || !title.trim()} onClick={() => void save(false)}>提交商品资料</button></div>
         </div>
+      </section>
+      <section className="wbo-panel">
+        <div className="wbo-heading"><h2>经营成本与包装规格</h2></div>
+        <form className="wbo-toolbar" onSubmit={event=>{
+          event.preventDefault();
+          try {
+            const current=readWbData<WbProductCost>(costKey);
+            localStorage.setItem(costKey,JSON.stringify({...current,[card.nmID]:cost}));
+            setNotice("成本与规格已保存，经营周报会读取该商品成本。");
+          } catch {setError("无法保存本地成本");}
+        }}>
+          {wbCostFields.map(([field,label,unit])=><label key={field}>{label}（{unit}）<input type="number" min="0" step="any"
+            value={cost[field] ?? ""} onChange={event=>setCost({...cost,[field]:event.target.value})}/></label>)}
+          <button className="primary">保存成本与规格</button>
+        </form>
+        <div className="wbo-toolbar">
+          <label>系列货号前缀<input placeholder="例如 F5067" value={prefix} onChange={event=>{setPrefix(event.target.value);setShowMatches(false);}}/></label>
+          <button type="button" disabled={!matches.length} onClick={()=>setShowMatches(value=>!value)}>{showMatches?"收起匹配":"查看匹配"}（{matches.length}）</button>
+          <button type="button" className="primary" disabled={!showMatches || !matches.length || !validSeriesValues} onClick={copySeriesCost}>同步系列成本与规格</button>
+        </div>
+        {showMatches&&<ul className="wbo-series-cost-matches">{matches.map(item=><li key={item.nmID}>{item.vendorCode} · WB {item.nmID}</li>)}</ul>}
       </section>
       <section className="wbo-panel">
         <div className="wbo-heading"><h2>商品图片</h2><small>{photos.length} / 30</small></div>

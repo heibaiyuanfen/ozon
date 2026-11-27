@@ -1,3 +1,4 @@
+import { OzonBidObservations } from "./OzonBidObservations";
 import {
   startTransition,
   useDeferredValue,
@@ -172,6 +173,7 @@ const emptyAds: AdvertisingData = {
   maxCpa: null,
   knownCostMargin: null,
   marginCoveragePercent: 0,
+  campaignTrend: {},
   campaigns: [],
   products: [],
   trend: [],
@@ -404,6 +406,7 @@ function RangeTabs({
   setMonthOffset,
   customRange,
   setCustomRange,
+  dateLabel = "趋势",
 }: {
   days: number;
   setDays: (days: number) => void;
@@ -411,6 +414,7 @@ function RangeTabs({
   setMonthOffset?: (offset: number | null) => void;
   customRange?: DateRange | null;
   setCustomRange?: (range: DateRange | null) => void;
+  dateLabel?: string;
 }) {
   return (
     <div className="range-row">
@@ -444,8 +448,8 @@ function RangeTabs({
           ))}
       </div>
       {setCustomRange && <div className="dashboard-custom-range">
-        <label>开始<input aria-label="趋势开始日期" type="date" value={customRange?.from || ""} onChange={event => setCustomRange({from:event.target.value,to:customRange?.to || event.target.value})}/></label>
-        <label>结束<input aria-label="趋势结束日期" type="date" value={customRange?.to || ""} min={customRange?.from || undefined} onChange={event => setCustomRange({from:customRange?.from || event.target.value,to:event.target.value})}/></label>
+        <label>开始<input aria-label={dateLabel + "开始日期"} type="date" value={customRange?.from || ""} onChange={event => setCustomRange({from:event.target.value,to:customRange?.to && customRange.to >= event.target.value ? customRange.to : event.target.value})}/></label>
+        <label>结束<input aria-label={dateLabel + "结束日期"} type="date" value={customRange?.to || ""} min={customRange?.from || undefined} onChange={event => setCustomRange({from:customRange?.from || event.target.value,to:event.target.value})}/></label>
       </div>}
       <div className="date-pill">
         <CalendarDays size={16} />
@@ -1101,6 +1105,70 @@ function AdvertisingTrend({ data }: { data: AdvertisingData["trend"] }) {
   return <div id="advertising-trend" className="chart" />;
 }
 
+
+function SelectedCampaignTrend({daily, selected, range, currency}: {
+  daily: AdvertisingData["campaignTrend"]; selected: Set<string>; range: DateRange; currency: string;
+}) {
+  const container = useRef<HTMLDivElement>(null);
+  const {from, to} = range;
+  const byDay = useMemo(()=>{
+    const sums = new Map<string, AdvertisingData["trend"][number]>();
+    for (const id of selected) {
+      for (const row of daily[id] ?? []) {
+        const total = sums.get(row.day);
+        if (!total) sums.set(row.day, {...row});
+        else {
+          total.impressions += row.impressions;
+          total.clicks += row.clicks;
+          total.orders += row.orders;
+          total.spend += row.spend;
+          total.revenue += row.revenue;
+        }
+      }
+    }
+    return sums;
+  },[daily,selected]);
+
+  useEffect(()=>{
+    if (!container.current) return;
+    const chart = echarts.init(container.current);
+    const days: string[] = [];
+    for (let time=Date.parse(from); time<=Date.parse(to); time+=86_400_000) {
+      days.push(new Date(time).toISOString().slice(0,10));
+    }
+    const symbol = currency==="CNY"?"¥":"₽";
+    const metrics = [
+      {key:"impressions",name:"曝光",axis:0,color:"#2869f5"},
+      {key:"spend",name:"广告花费",axis:1,color:"#e57a20"},
+      {key:"clicks",name:"点击",axis:0,color:"#0c9b79"},
+      {key:"orders",name:"广告订单",axis:0,color:"#8257cf"},
+      {key:"revenue",name:"归因销售额",axis:1,color:"#cf4770"},
+    ] as const;
+    chart.setOption({
+      tooltip:{trigger:"axis",confine:true},
+      legend:{top:0,selected:{"点击":false,"广告订单":false,"归因销售额":false}},
+      grid:{left:88,right:96,top:58,bottom:38},
+      xAxis:{type:"category",boundaryGap:false,data:days,axisLabel:{hideOverlap:true}},
+      yAxis:[
+        {type:"value",name:"数量",minInterval:1,axisLabel:{formatter:(value:number)=>value.toLocaleString("zh-CN")}},
+        {type:"value",name:"金额 / "+symbol,splitLine:{show:false},axisLabel:{formatter:(value:number)=>value.toLocaleString("zh-CN")}},
+      ],
+      series:metrics.map(metric=>({
+        name:metric.name,type:"line",yAxisIndex:metric.axis,showSymbol:days.length<=31,
+        symbolSize:5,connectNulls:false,lineStyle:{width:2,color:metric.color},itemStyle:{color:metric.color},
+        tooltip:{valueFormatter:(value:unknown)=>typeof value==="number" ?
+          metric.axis===1 ? money(value,currency) : value.toLocaleString("zh-CN") : "—"},
+        data:days.map(day=>byDay.get(day)?.[metric.key] ?? null),
+      })),
+    });
+    const resize=new ResizeObserver(()=>chart.resize());
+    resize.observe(container.current);
+    return ()=>{resize.disconnect();chart.dispose();};
+  },[byDay,from,to,currency]);
+  return byDay.size ? <div ref={container} className="ozon-selection-chart" role="img" aria-label="所选广告活动每日投放趋势"/> :
+    <p className="ozon-selection-coverage">所选活动在此区间暂无每日投放数据。</p>;
+}
+
 function Advertising({
   data,
   currency,
@@ -1110,6 +1178,10 @@ function Advertising({
   refresh,
   shopId,
   crossBorder,
+  reportingRange,
+  statsCurrent,
+  customRange,
+  setCustomRange,
 }: {
   data: AdvertisingData;
   currency: string;
@@ -1119,13 +1191,25 @@ function Advertising({
   refresh: () => void;
   shopId: string;
   crossBorder: boolean;
+  reportingRange: DateRange;
+  statsCurrent: boolean;
+  customRange: DateRange | null;
+  setCustomRange: (range: DateRange | null) => void;
 }) {
+  const modules = [
+    ["campaigns", "活动与预算"],
+    ["overview", "投放概览"],
+    ["series", "产品系列"],
+    ["products", "单品分析"],
+  ] as const;
+  const [module, setModule] = useState<(typeof modules)[number][0]>("campaigns");
   const [campaignQuery, setCampaignQuery] = useState("");
   const [productQuery, setProductQuery] = useState("");
   const [monitorId, setMonitorId] = useState<string | null>(null);
   const [monitorCache, setMonitorCache] = useState<Record<string, { data: CampaignMonitorData; at: number }>>({});
   const [seriesSelection, setSeriesSelection] = useState<Set<string>>(new Set());
   const [inventoryRows, setInventoryRows] = useState<CampaignInventoryRow[]>([]);
+  const [performanceSelection, setPerformanceSelection] = useState<Set<string>>(new Set());
   const [selectedCampaigns, setSelectedCampaigns] = useState<Set<string>>(new Set());
   const [inventoryBusy, setInventoryBusy] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
@@ -1137,7 +1221,7 @@ function Advertising({
     catch (error) { setBatchMessage(`读取活动清单失败：${String(error)}`); }
     finally { setInventoryBusy(false); }
   };
-  useEffect(() => { if (crossBorder) void loadCampaignInventory(); }, [crossBorder, shopId]);
+  useEffect(() => { void loadCampaignInventory(); }, [shopId]);
   const runCampaignBatch = async (action: "activate" | "deactivate", scope: "all" | "selected") => {
     if (batchBusy) return;
     setBatchBusy(true);
@@ -1166,11 +1250,32 @@ function Advertising({
     } catch (error) { setBatchMessage(`批量操作失败：${String(error)}`); }
     finally { setBatchProgress(""); setBatchBusy(false); }
   };
-  const visibleCampaigns = data.campaigns.filter((x) =>
-      `${x.name} ${x.id}`
-        .toLowerCase()
-        .includes(campaignQuery.trim().toLowerCase()),
-    );
+  const inventoryById = new Map(inventoryRows.map(row => [row.id,row]));
+  const statsById = new Map((statsCurrent ? data.campaigns : []).map(row => [row.id,row]));
+  const activityRows = [...new Set([...statsById.keys(),...inventoryById.keys()])].map(id=>{
+    const stats=statsById.get(id), item=inventoryById.get(id);
+    return {id,stats,name:item?.name || stats?.name,state:item?.state || stats?.state,budget:item?.budget};
+  }).filter(row=>((row.name ?? "")+" "+row.id).toLowerCase().includes(campaignQuery.trim().toLowerCase()));
+  const matchedStats = [...performanceSelection].flatMap(id => {
+    const stats = statsById.get(id);
+    return stats ? [stats] : [];
+  });
+  const totals = matchedStats.length ? matchedStats.reduce((sum, row) => ({
+    impressions: sum.impressions + row.impressions, clicks: sum.clicks + row.clicks,
+    orders: sum.orders + row.orders, spend: sum.spend + row.spend, revenue: sum.revenue + row.revenue,
+  }), {impressions:0,clicks:0,orders:0,spend:0,revenue:0}) : null;
+  const allVisibleSelected = activityRows.length > 0 && activityRows.every(row=>performanceSelection.has(row.id));
+  const hiddenSelection = performanceSelection.size - activityRows.filter(row=>performanceSelection.has(row.id)).length;
+  function selectPerformance(ids: string[], checked: boolean) {
+    setPerformanceSelection(current=>{
+      const next = new Set(current);
+      for (const id of ids) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  }
   const visibleProducts = data.products.filter((x) =>
     `${x.sku} ${x.offerId} ${x.name}`.toLowerCase().includes(productQuery.trim().toLowerCase()),
   );
@@ -1188,7 +1293,66 @@ function Advertising({
         refreshing={refreshing}
         refresh={refresh}
       />
-      <RangeTabs days={days} setDays={setDays} />
+      <nav className="ozon-ad-modules" aria-label="广告运营功能">
+        {modules.map(([id, label]) => (
+          <button key={id} type="button" aria-pressed={module === id}
+            onClick={() => setModule(id)}>{label}</button>
+        ))}
+      </nav>
+      {module !== "series" && <RangeTabs days={days} setDays={setDays} customRange={customRange} setCustomRange={setCustomRange} dateLabel="广告统计" />}
+      {module === "campaigns" && <>
+      <section className="card ozon-selection-board">
+        <div className="section-heading">
+          <div><h2>所选活动看板</h2><p>{performanceSelection.size
+            ? "已选 " + performanceSelection.size + " 个活动 · " + reportingRange.from + " 至 " + reportingRange.to
+            : "勾选下方活动，查看合计投放表现。"}</p></div>
+          <button className="ozon-ad-button" disabled={!performanceSelection.size} onClick={()=>setPerformanceSelection(new Set())}>清空选择</button>
+        </div>
+        {performanceSelection.size>0 && <>
+          <p className="ozon-selection-coverage" role="status">{!statsCurrent
+            ? refreshing ? "正在读取所选日期的数据…" : "所选日期的数据尚未加载，可刷新数据。"
+            : matchedStats.length < performanceSelection.size
+              ? "当前有 " + matchedStats.length + " 个所选活动返回统计。其余活动暂无此区间的数据，合计仅涵盖已返回的活动。"
+              : "全部所选活动均有区间统计。"}
+            {hiddenSelection>0 && " 当前搜索隐藏了 "+hiddenSelection+" 个已选活动。"}
+          </p>
+          {statsCurrent && <SelectedCampaignTrend daily={data.campaignTrend} selected={performanceSelection} range={reportingRange} currency={currency}/>}
+          <dl className="ozon-selection-metrics">{[
+            ["总曝光", totals?.impressions.toLocaleString("zh-CN")],
+            ["广告花费", totals && money(totals.spend,currency)],
+            ["总点击", totals?.clicks.toLocaleString("zh-CN")],
+            ["广告订单", totals?.orders.toLocaleString("zh-CN")],
+            ["归因销售额", totals && money(totals.revenue,currency)],
+            ["CTR", totals?.impressions ? pct(100*totals.clicks/totals.impressions) : null],
+            ["平均 CPC", totals?.clicks ? money(totals.spend/totals.clicks,currency) : null],
+            ["ROAS", totals?.spend ? (totals.revenue/totals.spend).toFixed(2) : null],
+            ["ACOS", totals?.revenue ? pct(100*totals.spend/totals.revenue) : null],
+          ].map(([label,value])=><div key={label}><dt>{label}</dt><dd>{value ?? "—"}</dd></div>)}</dl>
+        </>}
+      </section>
+      <section className="card campaigns ozon-campaign-list">
+        <div className="card-title">
+          广告活动
+          <label className="search"><Search size={15}/><input value={campaignQuery} onChange={e=>setCampaignQuery(e.target.value)} placeholder="搜索活动名称或 ID"/></label>
+          <button className="ozon-ad-button" disabled={inventoryBusy || batchBusy} onClick={()=>void loadCampaignInventory()}>刷新活动清单</button>
+        </div>
+        {!crossBorder && batchMessage && <p role="status">{batchMessage}</p>}
+        <div className="ozon-ad-table"><table>
+          <thead><tr><th><input type="checkbox" aria-label="选择当前搜索结果" title="选择当前搜索结果" disabled={!activityRows.length} checked={allVisibleSelected} onChange={e=>selectPerformance(activityRows.map(row=>row.id),e.target.checked)}/></th><th>ID</th><th>活动名称</th><th>状态</th><th>计费</th><th>周预算</th><th>曝光</th><th>点击</th><th>订单</th><th>消耗</th><th>归因销售额</th><th>ROAS</th><th>CTR / CPC</th><th>转化 / CPA</th><th>诊断与建议</th></tr></thead>
+          <tbody>{activityRows.map(({id,name,state,budget,stats})=><tr key={id} data-selected={performanceSelection.has(id)} onDoubleClick={()=>setMonitorId(id)}>
+            <td onDoubleClick={e=>e.stopPropagation()}><input type="checkbox" aria-label={"选择活动 "+(name || id)} checked={performanceSelection.has(id)} onChange={e=>selectPerformance([id],e.target.checked)}/></td>
+            <td>{id}</td><td><button className="ozon-ad-link" onClick={()=>setMonitorId(id)}>{name || id}</button></td>
+            <td>{state ? ({"CAMPAIGN_STATE_RUNNING":"投放中","CAMPAIGN_STATE_STOPPED":"已暂停","CAMPAIGN_STATE_ARCHIVED":"已归档"} as Record<string,string>)[state] ?? state : "—"}</td>
+            <td>{stats?.paymentType || "—"}</td><td>{budget == null ? "—" : money(budget,"RUB")}</td>
+            <td>{stats?.impressions ?? "—"}</td><td>{stats?.clicks ?? "—"}</td><td>{stats?.orders ?? "—"}</td>
+            <td>{stats ? money(stats.spend,currency) : "—"}</td><td>{stats ? money(stats.revenue,currency) : "—"}</td>
+            <td>{stats?.roas?.toFixed(2) ?? "—"}</td><td>{pct(stats?.ctr ?? null)}<small>{stats?.cpc == null ? "—" : money(stats.cpc,currency)}</small></td>
+            <td>{pct(stats?.conversionRate ?? null)}<small>{stats?.cpa == null ? "—" : money(stats.cpa,currency)}</small></td>
+            <td>{stats ? <div className={`ad-diagnosis ${stats.diagnosisLevel}`}><b>{stats.diagnosisText}</b><small>{stats.recommendedAction}</small></div> : "—"}</td>
+          </tr>)}</tbody>
+        </table></div>
+        {!activityRows.length && <p className="empty">没有匹配的广告活动。</p>}
+      </section>
       {crossBorder && <section className="card campaign-batch-panel">
         <div className="card-title">跨境店广告活动控制 <span>{inventoryRows.length} 个活动（账户完整清单）</span></div>
         <p>选择活动后批量暂停或重启；“暂停全部”会读取当前店铺最新活动清单，不受页面日期和搜索条件限制。每个活动单独记录操作结果。</p>
@@ -1201,7 +1365,11 @@ function Advertising({
         <div className="campaign-batch-list"><label><input type="checkbox" checked={inventoryRows.length > 0 && inventoryRows.every((item) => selectedCampaigns.has(item.id))} onChange={(event) => setSelectedCampaigns(event.target.checked ? new Set(inventoryRows.map((item) => item.id)) : new Set())}/>选择全部</label>{inventoryRows.map((item) => <label key={item.id}><input type="checkbox" checked={selectedCampaigns.has(item.id)} onChange={(event) => setSelectedCampaigns((old) => { const next = new Set(old); event.target.checked ? next.add(item.id) : next.delete(item.id); return next; })}/><span>{item.name || item.id}<small>{item.id} · {item.state || "状态未知"}</small></span></label>)}</div>
         {(batchProgress || batchMessage) && <div className="sync-message" role="status">{batchProgress || batchMessage}</div>}
       </section>}
-      <AdvertisingSeriesPanel shopId={shopId} selection={seriesSelection} setSelection={setSeriesSelection} />
+      </>}
+      <div hidden={module !== "series"}>
+        <AdvertisingSeriesPanel shopId={shopId} selection={seriesSelection} setSelection={setSeriesSelection} />
+      </div>
+      {module === "overview" && <>
       <section className="card trend-card">
         <div className="section-heading">
           <div>
@@ -1304,7 +1472,8 @@ function Advertising({
           </div>
         </section>
       </div>
-      <section className="card campaigns product-ad-metrics">
+      </>}
+      {module === "products" && <section className="card campaigns product-ad-metrics">
         <div className="card-title">
           单品 ACOS 与 TACOS
           <label className="search"><Search size={15} /><input value={productQuery} onChange={(e) => setProductQuery(e.target.value)} placeholder="搜索 SKU、货号或商品名" /></label>
@@ -1321,83 +1490,43 @@ function Advertising({
             <td><b className={x.tacos != null && x.tacos > 15 ? "metric-risk" : ""}>{pct(x.tacos)}</b></td><td>{x.roas?.toFixed(2) ?? "—"}</td>
           </tr>)}</tbody>
         </table>:<div className="empty">当前周期没有可归属到 SKU 的广告明细。请同步商品级广告统计；店铺级广告汇总无法可靠计算单品 ACOS/TACOS。</div>}
-      </section>
-      <section className="card campaigns">
-        <div className="card-title">
-          广告计划表现
-          <label className="search">
-            <Search size={15} />
-            <input
-              value={campaignQuery}
-              onChange={(e) => setCampaignQuery(e.target.value)}
-              placeholder="按广告名称或计划 ID 筛选"
-            />
-          </label>
-          <span>{visibleCampaigns.length} 个计划</span>
-        </div>
-        {visibleCampaigns.length ? (
-          <table>
-            <thead>
-              <tr>
-                <th>计划</th>
-                <th>状态</th>
-                <th>计费</th>
-                <th>曝光</th>
-                <th>点击</th>
-                <th>订单</th>
-                <th>消耗</th>
-                <th>销售额</th>
-                <th>ROAS</th>
-                <th>CTR / CPC</th>
-                <th>转化 / CPA</th>
-                <th>诊断与建议</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleCampaigns.map((x) => (
-                <tr key={x.id} onDoubleClick={() => setMonitorId(x.id)} title="双击打开活动监控">
-                  <td>
-                    <b>{x.name || x.id}</b>
-                    <small>{x.id}</small>
-                  </td>
-                  <td>{x.state || "—"}</td>
-                  <td>{x.paymentType || "未分类"}</td>
-                  <td>{x.impressions}</td>
-                  <td>{x.clicks}</td>
-                  <td>{x.orders}</td>
-                  <td>{money(x.spend, currency)}</td>
-                  <td>{money(x.revenue, currency)}</td>
-                  <td>{x.roas?.toFixed(2) ?? "—"}</td>
-                  <td>{pct(x.ctr)}<small>{x.cpc == null ? "—" : money(x.cpc, currency)}</small></td>
-                  <td>{pct(x.conversionRate)}<small>{x.cpa == null ? "—" : money(x.cpa, currency)}</small></td>
-                  <td><div className={`ad-diagnosis ${x.diagnosisLevel}`}><b>{x.diagnosisText}</b><small>{x.recommendedAction}</small></div></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <div className="empty">
-            当前真实范围没有计划明细，系统不会用演示计划替代真实数据。
-          </div>
-        )}
-      </section>
+      </section>}
       {monitorId && (
         <CampaignMonitorModal
+          shopId={shopId}
           campaignId={monitorId}
           currency={currency}
           initialData={monitorCache[monitorId]?.data ?? null}
           cacheFresh={Date.now() - (monitorCache[monitorId]?.at ?? 0) < 15 * 60 * 1000}
           onLoaded={(next) => setMonitorCache((old) => ({ ...old, [monitorId]: { data: next, at: Date.now() } }))}
           close={() => setMonitorId(null)}
-          refreshParent={refresh}
+          refreshParent={() => {refresh(); void loadCampaignInventory();}}
         />
       )}
     </>
   );
 }
 
-function CampaignMonitorModal({ campaignId, currency, initialData, cacheFresh, onLoaded, close, refreshParent }: {
-  campaignId: string; currency: string; initialData: CampaignMonitorData | null; cacheFresh: boolean;
+function CampaignProductPreview({data}: {data: CampaignMonitorData | null}) {
+  const [search,setSearch]=useState("");
+  const [image,setImage]=useState("");
+  const rows=(data?.products ?? []).filter(row=>[row.sku,row.offerId,row.name].join(" ").toLowerCase().includes(search.trim().toLowerCase()));
+  return <section className="ozon-campaign-products">
+    <div className="section-heading"><div><h3>活动商品</h3><p>{data ? [data.productSource,data.productFrom+" 至 "+data.productTo].join(" · ") : "正在读取活动商品…"}</p></div>
+      <input aria-label="筛选活动商品" placeholder="搜索 SKU、货号或名称" value={search} onChange={e=>setSearch(e.target.value)}/></div>
+    <div className="ozon-ad-table"><table><thead><tr><th>SKU / 货号</th><th>商品</th><th>平均 CPC</th><th>广告订单</th><th>归因销售额</th><th>消耗</th><th>ACOS</th><th>曝光</th><th>点击</th></tr></thead>
+      <tbody>{rows.map(row=><tr key={row.sku}><td>{row.sku}<small>{row.offerId}</small></td>
+        <td><div className="ozon-ad-product">{row.imageUrl?.startsWith("https://") && <button className="ozon-ad-thumb" onClick={()=>setImage(row.imageUrl!)} aria-label="预览商品图片"><img src={row.imageUrl} alt="" loading="lazy"/></button>}<b>{row.name || row.offerId || "—"}</b></div></td>
+        <td>{row.clicks && row.spend != null ? money(row.spend/row.clicks,"RUB") : "—"}</td><td>{row.orders ?? "—"}</td>
+        <td>{row.revenue == null ? "—" : money(row.revenue,"RUB")}</td><td>{row.spend == null ? "—" : money(row.spend,"RUB")}</td>
+        <td>{row.revenue && row.spend != null ? pct(row.spend / row.revenue * 100) : "—"}</td><td>{row.impressions ?? "—"}</td><td>{row.clicks ?? "—"}</td></tr>)}</tbody>
+    </table></div>
+    {data && !rows.length && <p>暂无匹配商品。</p>}
+    {image && <div className="ozon-ad-image-preview" role="dialog" aria-label="商品图片"><button type="button" onClick={()=>setImage("")}>关闭</button><img src={image} alt="商品图片"/></div>}
+  </section>;
+}
+function CampaignMonitorModal({ shopId, campaignId, currency, initialData, cacheFresh, onLoaded, close, refreshParent }: {
+  shopId: string; campaignId: string; currency: string; initialData: CampaignMonitorData | null; cacheFresh: boolean;
   onLoaded: (data: CampaignMonitorData) => void; close: () => void; refreshParent: () => void;
 }) {
   const [data, setData] = useState<CampaignMonitorData | null>(initialData);
@@ -1414,14 +1543,14 @@ function CampaignMonitorModal({ campaignId, currency, initialData, cacheFresh, o
   };
   useEffect(() => { if (!cacheFresh) void load(); }, [campaignId, cacheFresh]);
   const series = useMemo(() => {
-    const grouped = new Map<string, { label: string; spend: number; revenue: number; orders: number }>();
+    const grouped = new Map<string, { label: string; spend: number; revenue: number; orders: number; clicks: number; impressions: number }>();
     for (const row of data?.daily ?? []) {
       const d = new Date(`${row.day}T00:00:00`);
       const key = scale === "day" ? row.day : scale === "month"
         ? row.day.slice(0, 7)
         : `${d.getFullYear()}-W${String(Math.ceil((((d.getTime() - new Date(d.getFullYear(), 0, 1).getTime()) / 86400000) + new Date(d.getFullYear(), 0, 1).getDay() + 1) / 7)).padStart(2, "0")}`;
-      const old = grouped.get(key) ?? { label: key, spend: 0, revenue: 0, orders: 0 };
-      old.spend += row.spend; old.revenue += row.revenue; old.orders += row.orders; grouped.set(key, old);
+      const old = grouped.get(key) ?? { label: key, spend: 0, revenue: 0, orders: 0, clicks: 0, impressions: 0 };
+      old.spend += row.spend; old.revenue += row.revenue; old.orders += row.orders; old.clicks += row.clicks; old.impressions += row.impressions; grouped.set(key, old);
     }
     return [...grouped.values()];
   }, [data, scale]);
@@ -1439,6 +1568,8 @@ function CampaignMonitorModal({ campaignId, currency, initialData, cacheFresh, o
     <div className="campaign-monitor">
       <button className="monitor-close" onClick={close}>×</button>
       <h2>{data?.name || campaignId}</h2><p>活动 ID {campaignId} · {data?.state || "读取中"}</p>
+      <CampaignProductPreview data={data} />
+      <OzonBidObservations products={data?.products} key={shopId+":"+campaignId} shopId={shopId} campaignId={campaignId} cpcDay={data?.cpcDay} skuCpc={data?.skuCpc} />
       <div className="monitor-kpis">
         <div><span>当前周预算</span><strong>{data ? (data.budgetKnown ? money(data.budget, currency) : "—") : "读取中"}</strong><small>{data?.budgetSource || "正在读取本地缓存与 Performance API"}</small></div>
         <div><span>区间花费</span><strong>{money(total.spend, currency)}</strong><small>{scale === "day" ? "日级" : scale === "week" ? "周级" : "月级"}汇总</small></div>
@@ -1446,7 +1577,7 @@ function CampaignMonitorModal({ campaignId, currency, initialData, cacheFresh, o
         <div><span>区间 ROAS</span><strong>{total.spend ? (total.revenue / total.spend).toFixed(2) : "—"}</strong><small>销售额 / 花费</small></div>
       </div>
       <div className="monitor-tabs">{(["day", "week", "month"] as const).map((x) => <button className={scale === x ? "active" : ""} onClick={() => setScale(x)} key={x}>{x === "day" ? "每日" : x === "week" ? "每周" : "每月"}</button>)}</div>
-      <section className="monitor-chart"><CampaignEffectChart data={series} />{!series.length && <div className="empty">近两个月暂无日级缓存。</div>}</section>
+      <section className="monitor-chart"><CampaignEffectChart data={series} /><p className="metric-definition">平均 CPC = 所选期间广告花费 ÷ 点击量，无点击时留空。</p>{!series.length && <div className="empty">近两个月暂无日级缓存。</div>}</section>
       <section className="monitor-controls">
         <b>广告账户控制</b><input type="number" min="0" value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="周预算" />
         <input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder="输入：确认执行" />
@@ -1458,24 +1589,33 @@ function CampaignMonitorModal({ campaignId, currency, initialData, cacheFresh, o
   </div>;
 }
 
-function CampaignEffectChart({ data }: { data: Array<{ label: string; spend: number; revenue: number; orders: number }> }) {
+function CampaignEffectChart({ data }: { data: Array<{ label: string; spend: number; revenue: number; orders: number; clicks: number; impressions: number }> }) {
   useEffect(() => {
     const el = document.getElementById("campaign-effect-chart");
     if (!el || !data.length) return;
     const chart = echarts.init(el);
     chart.setOption({
-      grid: { left: 22, right: 62, top: 52, bottom: 34, containLabel: true },
+      grid: { left: 78, right: 110, top: 54, bottom: 34, containLabel: true },
       tooltip: { trigger: "axis" },
-      legend: { top: 8, data: ["广告花费", "归因销售额", "ROAS"] },
+      legend: { top: 8, data: ["广告花费", "归因销售额", "ROAS", "平均 CPC", "曝光数"] },
       xAxis: { type: "category", boundaryGap: false, data: data.map((x) => x.label), axisLabel: { hideOverlap: true } },
       yAxis: [
         { type: "value", splitLine: { lineStyle: { color: "#edf1f7" } }, axisLabel: { color: "#8b98aa" } },
-        { type: "value", name: "ROAS", splitLine: { show: false }, axisLabel: { color: "#8b98aa" } },
+        { type: "value", name: "ROAS", position: "right", splitLine: { show: false }, axisLabel: { color: "#668343" } },
+        { type: "value", name: "CPC / ₽", position: "right", offset: 55, min: 0, splitLine: { show: false }, axisLabel: { color: "#754cc1" } },
+        { type: "value", name: "曝光 / 次", position: "left", offset: 62, min: 0, minInterval: 1, splitLine: { show: false }, axisLabel: { color: "#087e85" } },
       ],
       series: [
         { name: "广告花费", type: "line", smooth: true, symbol: "circle", symbolSize: 5, data: data.map((x) => x.spend), lineStyle: { color: "#3478f6", width: 3 }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: "rgba(52,120,246,.28)" }, { offset: 1, color: "rgba(52,120,246,0)" }]) } },
         { name: "归因销售额", type: "line", smooth: true, symbol: "none", data: data.map((x) => x.revenue), lineStyle: { color: "#f39a32", width: 2 } },
         { name: "ROAS", type: "line", smooth: true, symbol: "none", yAxisIndex: 1, data: data.map((x) => x.spend ? Number((x.revenue / x.spend).toFixed(2)) : null), lineStyle: { color: "#69b83e", width: 2, type: "dashed" } },
+        { name: "平均 CPC", type: "line", yAxisIndex: 2, connectNulls: false,
+          symbol: "circle", symbolSize: 5, itemStyle: { color: "#8054ce" }, lineStyle: { width: 2 },
+          data: data.map(row => row.clicks > 0 ? Number((Math.abs(row.spend) / row.clicks).toFixed(4)) : null),
+          tooltip: { valueFormatter: (value: unknown) => typeof value === "number" ? ("₽" + value.toFixed(4)) : "—" } },
+        { name: "曝光数", type: "line", yAxisIndex: 3, symbol: "none",
+          itemStyle: { color: "#10969d" }, lineStyle: { width: 2 }, data: data.map(row => row.impressions),
+          tooltip: { valueFormatter: (value: unknown) => typeof value === "number" ? value.toLocaleString("zh-CN") + " 次" : "—" } },
       ],
     });
     const resize = () => chart.resize(); window.addEventListener("resize", resize);
@@ -1499,12 +1639,14 @@ export function App() {
     [shops, setShops] = useState<Shop[]>([]),
     [days, setDays] = useState(7),
     [dashboardMonthOffset, setDashboardMonthOffset] = useState<number | null>(null),
+    [advertisingCustomRange, setAdvertisingCustomRange] = useState<DateRange | null>(null),
     [dashboardCustomRange, setDashboardCustomRange] = useState<DateRange | null>(null),
     [dash, setDash] = useState(emptyDashboard),
     [orderRows, setOrderRows] = useState<OrderRow[]>([]),
     [pickupOnly, setPickupOnly] = useState(false),
     [orderRevision, setOrderRevision] = useState(0),
     [ads, setAds] = useState(emptyAds),
+    [adsScope, setAdsScope] = useState(""),
     [refreshing, setRefreshing] = useState(false),
     [query, setQuery] = useState(""),
     [productRows, setProductRows] = useState<ProductRow[]>([]),
@@ -1516,12 +1658,13 @@ export function App() {
   const activeShop = shops.find((s) => s.active) ?? shops[0],
     currency = activeShop?.kind === "cross_border" ? "CNY" : "RUB",
     range = useMemo(
-      () => page === "dashboard" && dashboardCustomRange?.from && dashboardCustomRange?.to && dashboardCustomRange.from <= dashboardCustomRange.to ? dashboardCustomRange : page === "dashboard" && dashboardMonthOffset != null ? calendarMonthRange(dashboardMonthOffset) : rangeFor(days),
-      [page, days, dashboardMonthOffset, dashboardCustomRange],
+      () => page === "advertising" && advertisingCustomRange?.from && advertisingCustomRange?.to && advertisingCustomRange.from <= advertisingCustomRange.to ? advertisingCustomRange : page === "dashboard" && dashboardCustomRange?.from && dashboardCustomRange?.to && dashboardCustomRange.from <= dashboardCustomRange.to ? dashboardCustomRange : page === "dashboard" && dashboardMonthOffset != null ? calendarMonthRange(dashboardMonthOffset) : rangeFor(days),
+      [page, days, dashboardMonthOffset, dashboardCustomRange, advertisingCustomRange],
     ),
     monthRange = useMemo(currentMonthRange, []),
     deferredQuery = useDeferredValue(query);
   useEffect(()=>{setExperimentSeed(undefined);},[activeShop?.id]);
+  const currentAdsScope = JSON.stringify([activeShop?.id, range.from, range.to]);
   const loadVersion = useRef(0);
   const load = async () => {
     const version = ++loadVersion.current;
@@ -1540,7 +1683,13 @@ export function App() {
         const result = await orderCache.get(key)!;
         if (version === loadVersion.current) setOrderRows(result);
       }
-      if (page === "advertising") setAds(await advertising(range));
+      if (page === "advertising") {
+        const result = await advertising(range);
+        if (version === loadVersion.current) {
+          setAds(result);
+          setAdsScope(currentAdsScope);
+        }
+      }
       if (page === "products")
         setProductRows(await products(range, deferredQuery));
       if (page === "inventory") {
@@ -1627,7 +1776,7 @@ export function App() {
         collapsed={sidebarCollapsed}
         setCollapsed={setSidebarCollapsed}
       />
-      <main>
+      <main className={workspace !== "wb" && page === "advertising" ? "ozon-ad-main" : undefined}>
         {workspace === "product_library" && <ProductMasterPage />}
         {workspace === "wb" && <WbWorkspace section={wbPage} onSection={setWbPage} />}
         {workspace === "mercadolibre" && <MercadoLibrePage />}
@@ -1693,6 +1842,10 @@ export function App() {
                 shopId={activeShop?.id || ""}
                 crossBorder={activeShop?.kind === "cross_border"}
                 data={ads}
+                reportingRange={range}
+                statsCurrent={adsScope === currentAdsScope}
+                customRange={advertisingCustomRange}
+                setCustomRange={setAdvertisingCustomRange}
                 currency={currency}
                 days={days}
                 setDays={setDays}

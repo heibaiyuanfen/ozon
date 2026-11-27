@@ -1,205 +1,175 @@
+import { WbWeeklyFinance } from "./WbWeeklyFinance";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-type Order = { id: string; day: string; status: string; raw: Record<string, unknown>; warehouseId?: string | number | null };
-type Warehouse = { id: string; raw: Record<string, unknown> };
-type Ads = {day: string; spend: number; attributedSales: number; detail?: { orders?: number | null } | null};
-type Cost = { purchase: string; first: string; last: string };
-type Rule = { kind: "domestic" | "overseas"; base: string; rate: string; handling: string; outbound: string };
-type Receipt = { amount: string; reference: string; weight: string };
-type Config = { rules: Record<string, Rule>; receipts: Record<string, Receipt> };
-type Currency = "CNY" | "RUB";
+type Sheet = { name: string; firstRow: number; firstColumn: number; width: number; rows: string[][] };
+type Workbook = { name: string; source?: "api"; sheets: Sheet[] };
+const apiLabels: Record<string, string> = { reportId:"报告编号",dateFrom:"报告开始日期",dateTo:"报告结束日期",currency:"币种",rrdId:"明细行 ID",nmId:"WB商品编号",vendorCode:"卖家商品编号",docTypeName:"文档类型",sellerOperName:"付款依据",orderDt:"买家下单日期",saleDt:"销售日期",quantity:"数量",retailAmount:"WB销售商品",forPay:"支付给卖家的已售商品金额",deliveryService:"向买家交付货物的服务",storageFee:"仓储",deduction:"扣款" };
+const pageSize = 50;
 
-const emptyRule: Rule = {kind: "domestic", base: "", rate: "", handling: "", outbound: ""};
-const emptyReceipt: Receipt = { amount: "", reference: "", weight: "" };
-const number = (text?: string) => text?.trim() && Number.isFinite(Number(text)) && Number(text) >= 0 ? Number(text) : null;
-const warehouseKey = (order: Order) => String(order.raw.warehouseId || order.warehouseId || "");
-const cancelled = (order: Order) => order.status === "cancelled" || order.status === "returning";
+const definitions: Record<string, string> = {
+  "供货编号": "从 WB 仓库销售时显示供货编号。卖家仓库销售或盘点时显示 0。",
+  "商品品类": "商品所属的类目或分类。",
+  "WB商品编号": "Wildberries 商品详情页上的编号。",
+  "卖家商品编号": "卖家在商品详情中设置的货号。",
+  "文档类型": "商品操作类型，例如销售或退货。",
+  "付款依据": "对应交易或扣费的类型，例如销售、退货、配送、罚款或补款。",
+  "买家下单日期": "买家下单的日期。",
+  "销售日期": "商品签收日期。",
+  "数量": "报告期间内商品的销售或退货数量。",
+  "零售价": "卖家设定的未折扣价格。",
+  "WB销售商品": "报告中的销售金额，含商品适用的折扣。",
+  "零售价格（包含最终折扣）": "包含卖家设定的最终折扣后的零售价。",
+  "平台折扣（%）": "由 Wildberries 提供的常客折扣。",
+  "支付给卖家的已售商品金额": "WB 报告列示的应付卖家商品金额。",
+  "交付数量": "交付给买家的数量。",
+  "退货数量": "买家退回仓库的数量。",
+  "向买家交付货物的服务": "WB 在该列记录的配送及相关服务金额。",
+  "配送类型、罚款及Wildberries佣金调整类型": "配送、罚款或佣金调整的原因或类型。",
+  "FBS标签": "卖家仓库履约时的单位商品唯一代码。",
+  "仓库标签": "贴在仓库商品上的单位商品识别码。",
+  "Srid": "买家订单中商品的唯一标识。",
+  "Rid": "买家订单中商品的唯一标识。",
+  "仓储": "在 WB 仓库储存商品产生的费用。",
+  "扣款": "WB 的营销服务费、罚款或其他扣付项目。",
+  "商品处理服务": "在 WB 仓库处理商品的费用。",
+};
 
-export function WbWeeklyReport({shopId, currency, today, orderRub, exchange}: {
-  shopId: string; currency: Currency; today: string; orderRub: (order: Order) => number; exchange: number;
-}) {
-  const storageKey = `wb-weekly-report-v1:${shopId}:${currency}`;
-  const [data, setData] = useState<{orders: Order[]; warehouses: Warehouse[]}>({orders: [], warehouses: []});
-  const [ads, setAds] = useState<Ads[]>([]);
-  const [costs, setCosts] = useState<Record<string, Cost>>({});
-  const [config, setConfig] = useState<Config>(() => {
-    try { return JSON.parse(localStorage.getItem(storageKey) || "null") ?? {rules: {}, receipts: {}}; }
-    catch { return {rules: {}, receipts: {}}; }
-  });
+function columnName(index: number) {
+  let name = "";
+  for (let value = index; value > 0; value = Math.floor((value - 1) / 26)) {
+    name = String.fromCharCode(65 + (value - 1) % 26) + name;
+  }
+  return name;
+}
+
+export function WbWeeklyReport({ shopId, currency }: { shopId: string; currency: "RUB" | "CNY" }) {
+  const [local, setLocal] = useState(false);
+  const [apiReport, setApiReport] = useState<Workbook | null>(null);
+  const [localReport, setLocalReport] = useState<Workbook | null>(null);
+  const report = local ? localReport : apiReport;
   const [offset, setOffset] = useState(0);
-  const [warehouse, setWarehouse] = useState("");
-  const [orderId, setOrderId] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const [force, setForce] = useState(false);
+  const date = new Date(new Intl.DateTimeFormat("sv-SE",{timeZone:"Europe/Moscow",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date()) + "T12:00:00Z");
+  date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7 - 7 * (offset + 1));
+  const from = date.toISOString().slice(0,10);
+  date.setUTCDate(date.getUTCDate() + 6);
+  const to = date.toISOString().slice(0,10);
+  const [sheetIndex, setSheetIndex] = useState(0);
+  const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(true);
-  const [errors, setErrors] = useState<string[]>([]);
+  const [error, setError] = useState("");
 
-  const date = new Date(`${today}T12:00:00Z`);
-  date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7 - offset * 7);
-  const days = Array.from({length: 7}, (_, index) => {
-    const day = new Date(date);
-    day.setUTCDate(day.getUTCDate() + index);
-    return day.toISOString().slice(0, 10);
-  }).filter(day => day <= today);
-  const from = days[0], to = days[days.length - 1];
-  const ops = <T,>(action: string, payload?: object) =>
-    invoke<T>("wb_operations", {action, payload: {shopId, ...payload}});
-
-  async function load(syncAds = false) {
+  useEffect(() => {
+    let active = true;
     setBusy(true);
-    setErrors([]);
-    const result = await Promise.allSettled([
-      ops<typeof data>("list"),
-      ops<Ads[]>(syncAds ? "ads_sync" : "ads_list", syncAds ? {from, to} : undefined),
-      invoke<{costs?: Record<string, Cost>}>("wb_pricing", {action: "load", payload: {shopId}}),
-    ]);
-    if (result[0].status === "fulfilled") setData(result[0].value);
-    else setData({orders: [], warehouses: []});
-    if (result[1].status === "fulfilled") setAds(result[1].value);
-    else setAds([]);
-    if (result[2].status === "fulfilled") setCosts(result[2].value.costs ?? {});
-    else setCosts({});
-    setErrors(result.flatMap((item, index) => item.status === "rejected" ?
-      [`${["订单", "广告", "商品成本"][index]}：${String(item.reason)}`] : []));
-    setBusy(false);
+    setError("");
+    const action = local ? "weekly_report_load" : "weekly_report_api";
+    invoke<Workbook | null>("wb_operations", {action, payload:{shopId,from,refresh:force}})
+      .then(result => { if (active) (local ? setLocalReport : setApiReport)(result); })
+      .catch(reason => { if (active) setError(String(reason)); })
+      .finally(() => { if (active) setBusy(false); });
+    return () => { active = false; };
+  }, [shopId,local,from,attempt]);
+
+  function showSource(value: boolean) {
+    setForce(false);
+    setLocal(value);
+    setPage(0);
+    setSheetIndex(0);
   }
 
-  useEffect(() => { void load(); }, [shopId]);
-
-  const orders = data.orders.filter(row => row.day >= from && row.day <= to);
-  const signed = orders.filter(row => row.status === "received");
-  const warehouses = new Map(data.warehouses.map(row => [
-    String(row.raw.id ?? row.id), String(row.raw.name ?? row.id),
-  ]));
-  for (const row of orders) {
-    const key = warehouseKey(row);
-    if (key && !warehouses.has(key)) warehouses.set(key, `仓库 ${key}`);
+  function changeWeek(value: number) {
+    setForce(false);
+    setApiReport(null);
+    setOffset(value);
+    setPage(0);
+    setSheetIndex(0);
   }
-  const byDay = new Map(ads.map(row => [row.day, row]));
-  const covered = days.filter(day => byDay.has(day));
-  const adDays = covered.map(day => byDay.get(day)!);
-  const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
-  const adSpend = covered.length === days.length ? sum(adDays.map(row => row.spend)) : null;
-  const adSales = covered.length === days.length ? sum(adDays.map(row => row.attributedSales)) : null;
-  const adOrders = covered.length === days.length && adDays.every(row => row.detail?.orders != null)
-    ? sum(adDays.map(row => row.detail!.orders!)) : null;
-  const saleValues = orders.filter(row => !cancelled(row)).map(orderRub);
-  const sales = saleValues.every(value => value > 0) ? sum(saleValues) / (currency === "CNY" ? exchange : 1) : null;
-  const money = (value: number | null) => value === null ? "待确认" :
-    `${currency === "CNY" ? "¥" : "₽"}${value.toLocaleString("zh-CN", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-  const ratio = (numerator: number | null, denominator: number | null) =>
-    numerator === null || denominator === null || denominator <= 0 ? "—" : `${(numerator / denominator * 100).toFixed(2)}%`;
 
-  const paid = signed.filter(row => config.receipts[row.id]);
-  const cnyFactor = currency === "CNY" ? 1 : exchange;
-  const lines = paid.map(row => {
-    const receipt = config.receipts[row.id];
-    const rule = config.rules[warehouseKey(row)];
-    const nmId = row.raw.nmId ?? row.raw.nm_id ?? row.raw.nmID;
-    const cost = costs[`${rule?.kind}:${nmId}`];
-    const purchase = number(cost?.purchase);
-    const freight = rule?.kind === "domestic"
-      ? [number(rule.base), number(rule.rate), number(receipt.weight)]
-      : [number(cost?.first), number(rule?.handling), number(rule?.outbound), number(cost?.last)];
-    const shipping = !rule || freight.some(value => value === null) ? null : rule.kind === "domestic"
-      ? freight[0]! + freight[1]! * freight[2]! : sum(freight as number[]);
-    return {row, receipt, rule, purchase: purchase === null ? null : purchase * cnyFactor,
-      shipping: shipping === null ? null : shipping * cnyFactor};
-  });
-  const complete = lines.length > 0 && lines.every(line => line.purchase !== null && line.shipping !== null);
-  const net = sum(lines.map(line => Number(line.receipt.amount)));
-  const purchase = complete ? sum(lines.map(line => line.purchase!)) : null;
-  const shipping = complete ? sum(lines.map(line => line.shipping!)) : null;
-  const profit = purchase !== null && shipping !== null && adSpend !== null ? net - purchase - shipping - adSpend : null;
-
-  const rule = config.rules[warehouse] ?? emptyRule;
-  const receipt = config.receipts[orderId] ?? emptyReceipt;
-  function save(configNext: Config) {
+  async function importFile(file: File) {
+    setError("");
+    setBusy(true);
     try {
-      localStorage.setItem(storageKey, JSON.stringify(configNext));
-      setConfig(configNext);
-    } catch {
-      setErrors(["无法写入本机周报设置"]);
+      if (file.size > 16 * 1024 * 1024) throw Error("文件超过 16 MB");
+      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+      const result = await invoke<Workbook>("wb_operations", {
+        action: "weekly_report_import", payload: {shopId, name: file.name, bytes},
+      });
+      setLocalReport(result);
+      setSheetIndex(0);
+      setPage(0);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
     }
   }
-  function updateRule(field: keyof Rule, value: string) {
-    save({...config, rules: {...config.rules, [warehouse]: {...rule, [field]: value}}});
-  }
-  const receiptRule = config.rules[warehouseKey(signed.find(row => row.id === orderId) ?? {id:"", day:"", status:"", raw:{}})];
+
+  const sheet = report?.sheets[sheetIndex];
+  const first = sheet?.rows[0] ?? [];
+  const reportHeader = report?.source === "api" || (first.includes("付款依据") && first.includes("WB商品编号"));
+  const rows = sheet?.rows.slice(reportHeader ? 1 : 0) ?? [];
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const columns = Array.from({length: sheet?.width ?? 0}, (_, i) => i);
+  const reportNumber = report?.name.match(/№\s*(\d+)/)?.[1];
 
   return <>
     <section className="wbo-panel">
-      <div className="wbo-heading"><div><h2>周度经营汇总</h2><span>{from} 至 {to} · 莫斯科日期 · {currency}</span></div>
-        <div className="wbo-actions">
-          <button onClick={() => {setOffset(offset + 1); setOrderId("");}}>上一周</button>
-          <button disabled={!offset} onClick={() => {setOffset(offset - 1); setOrderId("");}}>下一周</button>
-          <button disabled={busy} onClick={() => void load()}>刷新缓存</button>
-          <button disabled={busy} onClick={() => void load(true)}>同步本周广告</button>
-        </div>
+    <div className="wbo-heading">
+      <div><h2>官方周度销售报告</h2>{report && <p>{report.name}</p>}</div>
+      {local && <label><span>导入本地工作簿</span> <input type="file" accept=".xlsx" disabled={busy} onChange={event => {
+        const file = event.currentTarget.files?.[0];
+        event.currentTarget.value = "";
+        if (file) void importFile(file);
+      }}/></label>}
+    </div>
+    <div className="wbo-actions">
+      <button type="button" disabled={busy || !local} onClick={() => showSource(false)}>官方 API 报告</button>
+      <button type="button" disabled={busy || local} onClick={() => showSource(true)}>本地工作簿</button>
+    </div>
+    {!local && <div className="wbo-toolbar">
+      <button disabled={busy} onClick={() => changeWeek(offset + 1)}>上一周</button>
+      <span>{from} 至 {to} · 莫斯科时间</span>
+      <button disabled={busy || offset === 0} onClick={() => changeWeek(offset - 1)}>下一周</button>
+      <button className="primary" disabled={busy} onClick={() => {setForce(true);setAttempt(value => value + 1);setPage(0);}}>从 WB 刷新</button>
+    </div>}
+    {!local && <p className="wbo-muted">通过当前店铺的 Finance（财务）Token 读取完整周销售明细。</p>}
+    {busy && <p role="status">{local ? "正在读取工作簿…" : "正在读取 WB 官方销售报告…"}</p>}
+    {error && <p className="wbo-error" role="alert">{error}</p>}
+    {!busy && !report && !error && local && <p>选择本地 XLSX，查看整理表或原始明细。</p>}
+    {!local && <WbWeeklyFinance key={shopId+":"+from} shopId={shopId} adCurrency={currency} from={from} to={to} headers={first} rows={apiReport?.sheets[0]?.rows.slice(1) ?? []}/>}
+    {report && sheet && <>
+      <p className="wbo-muted">{reportNumber ? `报告编号 ${reportNumber} · ` : ""}{report.sheets.length} 张工作表{local ? " · 导入新文件将替换当前本地工作簿" : " · 来源为 WB 财务接口"}</p>
+      <div className="wbo-actions" aria-label="工作表">{report.sheets.map((item, index) =>
+        <button key={item.name} aria-pressed={index === sheetIndex} className={index === sheetIndex ? "primary" : ""}
+          onClick={() => {setSheetIndex(index);setPage(0);}}>{item.name}</button>)}</div>
+      {reportHeader && <details className="wbo-weekly-definitions">
+        <summary>字段说明</summary>
+        <dl>{first.map(title => report?.source === "api" ? apiLabels[title] || title : title).filter(title => definitions[title]).map((title, i) =>
+          <div key={i}><dt>{title}</dt><dd>{definitions[title]}</dd></div>)}</dl>
+      </details>}
+      <div className="wbo-table-wrap wbo-weekly-grid" tabIndex={0} aria-label={sheet.name + "完整明细"}>
+        <table>
+          <thead><tr><th scope="col">原表行号</th>{columns.map(index => {
+            const label = columnName(sheet.firstColumn + index);
+            const field = reportHeader ? first[index] : "";
+            const title = (report.source === "api" && apiLabels[field]) || field;
+            return <th scope="col" key={index} title={definitions[title]}>{title || label}<small>{title ? (report.source === "api" && title !== field ? field : label) : ""}</small></th>;
+          })}</tr></thead>
+          <tbody>{rows.slice(page * pageSize, (page + 1) * pageSize).map((row, index) => {
+            const rowNumber = sheet.firstRow + (reportHeader ? 1 : 0) + page * pageSize + index;
+            return <tr key={rowNumber}><th scope="row">{rowNumber}</th>{columns.map(col => <td key={col}>{row[col]}</td>)}</tr>;
+          })}</tbody>
+        </table>
       </div>
-      {busy && <p role="status">正在读取周报数据…</p>}
-      {errors.map(error => <p key={error} className="wbo-error" role="alert">{error}</p>)}
-      <dl className="wbo-metric-row">{([
-        ["广告费", money(adSpend)], ["广告订单", adOrders ?? "待确认"], ["总订单", orders.length],
-        ["ACOS", ratio(adSpend, adSales)], ["TACOS", ratio(adSpend, sales)], ["已回款周利润", money(profit)],
-      ] as const).map(([label, value]) => <div key={label}><dt>{label}</dt><dd title={String(value)}>{value}</dd></div>)}</dl>
-      <p className="wbo-muted">广告覆盖 {covered.length}/{days.length} 天。ACOS 按广告归因销售额计算，TACOS 按扣除取消与拒收后的下单销售额计算。金额换算使用 ¥1 = ₽{exchange}。</p>
-    </section>
-    <section className="wbo-panel">
-      <div className="wbo-heading"><h2>仓库成本规则</h2><span>费用按件填报，币种 CNY</span></div>
-      <div className="wbo-toolbar">
-        <label>仓库<select value={warehouse} onChange={event => setWarehouse(event.target.value)}>
-          <option value="">选择仓库</option>{[...warehouses].map(([id, name]) => <option key={id} value={id}>{name}</option>)}
-        </select></label>
-        {warehouse && <>
-          <label>发货类型<select value={rule.kind} onChange={event => updateRule("kind", event.target.value)}>
-            <option value="domestic">国内仓</option><option value="overseas">海外仓</option>
-          </select></label>
-          {(rule.kind === "domestic" ? [["base", "公式固定费"], ["rate", "公式每公斤费率"]] :
-            [["handling", "操作费"], ["outbound", "出仓费"]]).map(([field, label]) =>
-            <label key={field}>{label}<input type="number" min="0" step="0.01"
-              onFocus={() => {if (!config.rules[warehouse]) updateRule("kind", rule.kind);}}
-              value={rule[field as keyof Rule]} onChange={event => updateRule(field as keyof Rule, event.target.value)}/></label>)}
-        </>}
+      {!rows.length && <p>{local ? "此工作表没有明细行。" : "WB 尚未返回这一周的报告明细。"}</p>}
+      <div className="wbo-actions">
+        <button disabled={page === 0} onClick={() => setPage(page - 1)}>上一页</button>
+        <span>{rows.length} 行 · {sheet.width} 列 · 第 {page + 1} / {pageCount} 页</span>
+        <button disabled={page + 1 >= pageCount} onClick={() => setPage(page + 1)}>下一页</button>
       </div>
-      <p className="wbo-muted">采购成本、海外仓头程和后段读取「价格与利润监控」的对应商品成本。国内仓全程运费 = 固定费 + 每公斤费率 × 计费重量，无需再扣头程费用。</p>
-    </section>
-    <section className="wbo-panel">
-      <div className="wbo-heading"><h2>回款确认与利润明细</h2><span>已签收 {signed.length} 单 · 已确认回款 {paid.length} 单</span></div>
-      <form className="wbo-toolbar" key={orderId} onSubmit={event => {
-        event.preventDefault();
-        const data = new FormData(event.currentTarget);
-        const entry = {amount: String(data.get("amount")), reference: String(data.get("reference")).trim(), weight: String(data.get("weight") ?? "")};
-        if (!orderId || !entry.reference || !(Number(entry.amount) > 0) || !Number.isFinite(Number(entry.amount))) return;
-        save({...config, receipts: {...config.receipts, [orderId]: entry}});
-      }}>
-        <label>已签收订单<select value={orderId} onChange={event => setOrderId(event.target.value)}>
-          <option value="">选择订单</option>{signed.map(row => <option key={row.id} value={row.id}>
-            {row.id} · {warehouses.get(warehouseKey(row)) ?? "仓库未关联"}
-          </option>)}
-        </select></label>
-        {orderId && <>
-          <label>实收净额 {currency}<input required name="amount" type="number" min="0.01" step="0.01" defaultValue={receipt.amount}/></label>
-          <label>回款凭证编号<input required name="reference" defaultValue={receipt.reference}/></label>
-          {receiptRule?.kind !== "overseas" && <label>计费重量 kg<input name="weight" type="number" min="0" step="0.001" defaultValue={receipt.weight}/></label>}
-          <button className="primary">保存回款确认</button>
-          {config.receipts[orderId] && <button type="button" onClick={() => {
-            const remaining = {...config.receipts};
-            delete remaining[orderId];
-            save({...config, receipts: remaining});
-            setOrderId("");
-          }}>撤销确认</button>}
-        </>}
-      </form>
-      <p className="wbo-muted">按订单创建周归属。实收净额填写已到账、扣除平台扣款后且尚未扣除这里填报成本及周广告费的金额。利润 = 实收净额 − 采购成本 − 仓配运费 − 全周广告费。</p>
-      <div className="wbo-table-wrap"><table>
-        <thead><tr><th>订单</th><th>仓库</th><th>凭证</th><th>实收净额</th><th>采购成本</th><th>仓配运费</th></tr></thead>
-        <tbody>{lines.map(({row, receipt, purchase, shipping}) => <tr key={row.id}>
-          <td>{row.id}</td><td>{warehouses.get(warehouseKey(row)) ?? "待关联"}</td><td>{receipt.reference}</td>
-          <td>{money(Number(receipt.amount))}</td><td>{money(purchase)}</td><td>{money(shipping)}</td>
-        </tr>)}</tbody>
-        {lines.length > 0 && <tfoot><tr><th colSpan={3}>已确认合计</th><td>{money(net)}</td><td>{money(purchase)}</td><td>{money(shipping)}</td></tr></tfoot>}
-      </table></div>
-      {!paid.length && <p>本周暂无已签收且已确认回款的订单。</p>}
-    </section>
-  </>;
+    </>}
+  </section></>;
 }

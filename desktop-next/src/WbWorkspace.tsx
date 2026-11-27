@@ -42,7 +42,7 @@ export function WbWorkspace({section,onSection}:{section:WbSection;onSection:(s:
   return <div className="wb-workspace">
     <header className="wbo-header"><div><span className="wbo-eyebrow">WILDBERRIES · 跨境经营工作台</span><h1>{section==="weekly"?"经营周报":section==="monthly"?"经营月报":section==="products"?"商品中心":section==="promotions"?"促销活动":section==="ad_optimization"?"广告优化与评估":section==="inventory"?"库存管理":section==="pricing"?"价格与利润监控":section==="daily"?"经营总览":section==="orders"?"订单中心":"退货中心"}</h1><p>{section==="weekly"||section==="monthly"?"按莫斯科日期汇总已同步的 WB 订单。":section==="products"?"查看当前店铺的商品与图片资料。":section==="promotions"?"查看当前店铺的 Wildberries 促销日历。":section==="ad_optimization"?"评估搜索词组的转化与成本，筛选放量和止损候选。":"每日经营、履约进度与海外仓协同"}</p></div><div className="wbo-actions"><select aria-label="WB 店铺" value={shop} onChange={e=>setShop(e.target.value)}>{!shops.length&&<option value="">请接入 WB 店铺</option>}{shops.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select><button onClick={()=>setSettings(true)}><Settings2 size={16}/>店铺连接</button></div></header>
     {error&&<div role="alert" className="wbo-error">{error}</div>}
-    {shop?section==="ad_optimization"?<WbAdOptimization key={shop} shopId={shop} defaultFrom={before(7)} defaultTo={before(1)} maxDate={today()}/>:section==="inventory"?<WbInventory key={shop} shopId={shop}/>:section==="weekly"?<WbWeeklyReport key={shop+currency} shopId={shop} currency={currency} today={today()} orderRub={wbOrderAmount} exchange={wbRubPerCny}/>:section==="monthly"?<WbPeriodReport key={shop+section} shopId={shop} period={section} currency={currency}/>:section==="products"?<WbProductEditor key={shop} shopId={shop}/>:section==="promotions"?<WbPromotions key={shop} shopId={shop}/>:section==="pricing"?<WbPricing key={shop} shopId={shop}/>:<Operations key={shop} shopId={shop} currency={currency} section={section} onSection={onSection}/>:<section className="wbo-panel wbo-empty"><Boxes size={40}/><h2>连接店铺，开始管理多个海外仓</h2><p>同步 FBS、DBS 订单和平台退货记录，按仓库安排备货与取件。</p><button className="primary" onClick={()=>setSettings(true)}>接入 WB 店铺</button></section>}
+    {shop?section==="ad_optimization"?<WbAdOptimization key={shop} shopId={shop} defaultFrom={before(7)} defaultTo={before(1)} maxDate={today()}/>:section==="inventory"?<WbInventory key={shop} shopId={shop}/>:section==="weekly"?<WbWeeklyReport key={shop} shopId={shop} currency={currency}/>:section==="monthly"?<WbPeriodReport key={shop+section} shopId={shop} period={section} currency={currency}/>:section==="products"?<WbProductEditor key={shop} shopId={shop}/>:section==="promotions"?<WbPromotions key={shop} shopId={shop}/>:section==="pricing"?<WbPricing key={shop} shopId={shop}/>:<Operations key={shop} shopId={shop} currency={currency} section={section} onSection={onSection}/>:<section className="wbo-panel wbo-empty"><Boxes size={40}/><h2>连接店铺，开始管理多个海外仓</h2><p>同步 FBS、DBS 订单和平台退货记录，按仓库安排备货与取件。</p><button className="primary" onClick={()=>setSettings(true)}>接入 WB 店铺</button></section>}
     {settings&&<div className="wbo-overlay"><form className="wbo-dialog" onSubmit={e=>{e.preventDefault();void saveConnection()}}><div className="wbo-heading"><h2>店铺连接</h2><button type="button" aria-label="关闭" onClick={()=>setSettings(false)}><X size={18}/></button></div><p>已有店铺选择后更新 Token；新增店铺填写名称。凭据沿用本机加密保存。</p><label>当前店铺<select value={shop} onChange={e=>setShop(e.target.value)}><option value="">新增店铺</option>{shops.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label><label>新增店铺名称（更新现有连接时留空）<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label><label>API Token<input required type="password" autoComplete="new-password" value={form.token} onChange={e=>setForm({...form,token:e.target.value})}/></label><p>订单与仓库需要 Marketplace 权限；退货件需要 Analytics 权限；退货申请需要 Buyers returns 权限。仅执行数据读取。</p>{error&&<p className="wbo-error">{error}</p>}<button className="primary" disabled={saving}>{saving?"保存中…":"保存连接"}</button></form></div>}
   </div>
 }
@@ -66,7 +66,7 @@ type AdDay = {day:string; spend:number; attributedSales:number; detail?: {orders
 
 type WbDaily = [string, { total: number; cancelled: number; amount: number; missing: number }][];
 
-function WbAdvertising({currency,shopId,from,to,orders,busy,salesKeys,daily,onDay,onRange,activeSeries}:{shopId:string;from:string;to:string;orders:Row[];busy:boolean;salesKeys:string[];daily:WbDaily;onDay:(day:string)=>void;onRange:(days:number)=>void;activeSeries:string;currency:Currency}) {
+function WbAdvertising({revision,currency,shopId,from,to,orders,busy,salesKeys,daily,onDay,onRange,activeSeries}:{shopId:string;from:string;to:string;orders:Row[];busy:boolean;salesKeys:string[];daily:WbDaily;onDay:(day:string)=>void;onRange:(days:number)=>void;activeSeries:string;revision:number;currency:Currency}) {
   const [ads,setAds]=useState<AdDay[]>([]);
   const [pending,setPending]=useState(false);
   const [error,setError]=useState("");
@@ -76,7 +76,7 @@ function WbAdvertising({currency,shopId,from,to,orders,busy,salesKeys,daily,onDa
       .then(rows=>{if(active)setAds(rows)})
       .catch(e=>{if(active)setError(String(e))});
     return ()=>{active=false};
-  },[shopId]);
+  },[shopId,revision]);
   async function sync(start:string,end:string) {
     setPending(true);
     setError("");
@@ -259,8 +259,30 @@ function Operations({shopId,currency,section,onSection}:{shopId:string;currency:
   async function refresh(){const v=++version.current;try{const d=await api("list",{shopId});if(alive.current&&v===version.current)setData(d)}catch(e){if(alive.current)setError(String(e))}finally{if(alive.current)setLoading(false)}}
   useEffect(()=>{alive.current=true;void refresh();return()=>{alive.current=false}},[shopId]);
   useEffect(()=>{if(!running)return;const timer=setInterval(()=>void refresh(),2500);return()=>clearInterval(timer)},[running,shopId]);
-  async function sync(automatic=false){if(syncing.current||data.running)return;syncing.current=true;setBusy(true);setError("");try{await api("sync",{shopId,from:automatic?before(6):from,to:automatic?today():to});await refresh()}catch(e){if(alive.current)setError(String(e))}finally{syncing.current=false;if(alive.current)setBusy(false)}}
-  useEffect(()=>{localStorage.setItem(`wb-auto-${shopId}`,String(auto));if(!auto)return;const timer=setInterval(()=>void sync(true),60*60*1000);return()=>clearInterval(timer)},[auto,from,to,shopId,data.running]);
+  const [adRevision, setAdRevision] = useState(0);
+  async function sync(automatic = false) {
+    if (syncing.current || data.running) return;
+    syncing.current = true;
+    setBusy(true);
+    setError("");
+    const range = {shopId, from: automatic ? before(6) : from, to: automatic ? today() : to};
+    const errors: string[] = [];
+    try {
+      try { await api("sync", range); } catch (reason) { errors.push("订单与退货：" + String(reason)); }
+      if (section === "daily" || automatic) {
+        try {
+          await invoke("wb_operations", {action:"ads_sync", payload:range});
+          if (alive.current) setAdRevision(value => value + 1);
+        } catch (reason) { errors.push("广告：" + String(reason)); }
+      }
+      await refresh();
+      if (alive.current && errors.length) setError(errors.join("；"));
+    } finally {
+      syncing.current = false;
+      if (alive.current) setBusy(false);
+    }
+  }
+  useEffect(()=>{localStorage.setItem(`wb-auto-${shopId}`,String(auto));if(!auto)return;const timer=setInterval(()=>void sync(true),60*60*1000);return()=>clearInterval(timer)},[auto,from,to,shopId,data.running,section]);
   useEffect(()=>{setPage(0)},[warehouse,model,status,query,from,to,section,allReturns,returnSource,salesKeys]);
   useEffect(()=>{setStatus(s=>!s||(section==="returns"?returnStages:stages)[s]?s:"");setQuery("")},[section]);
   const whName=(id:unknown)=>{const s=value(id);return data.warehouses.find(w=>value(w.raw.id)===s)?.raw.name||(s?`仓库 ${s}`:"待关联仓库")};
@@ -290,8 +312,8 @@ function Operations({shopId,currency,section,onSection}:{shopId:string;currency:
     onSection("orders");
   }, [onSection]);
   return <>
-    <section className="wbo-toolbar wbo-panel"><label>开始日期<input type="date" value={from} max={to} onChange={e=>setFrom(e.target.value)}/></label><label>结束日期<input type="date" value={to} min={from} max={today()} onChange={e=>setTo(e.target.value)}/></label><label>海外仓<select value={warehouse} onChange={e=>setWarehouse(e.target.value)}><option value="">全部仓库</option>{data.warehouses.map(w=><option key={w.id} value={value(w.raw.id)}>{w.raw.name} · {w.raw.id}</option>)}<option value="unknown">待关联仓库</option></select></label><label>配送模式<select value={model} disabled={section==="returns"} onChange={e=>setModel(e.target.value)}><option value="">FBS + DBS</option><option value="fbs">FBS</option><option value="dbs">DBS</option></select></label><button className="primary" disabled={running||!from||!to||to<from||(Date.parse(to)-Date.parse(from))/86400000>29} onClick={()=>void sync()}><RefreshCw size={16} className={running?"spin":""}/>{running?"正在同步…":"同步订单与退货"}</button><label className="wbo-check"><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/>每小时自动同步</label><small>莫斯科日期 · 订单单次最多 30 天 · 退货独立回补近 90 天 · 自动同步在 WB 工作台打开时运行</small></section>
-    {section === "daily" && <WbAdvertising currency={currency} shopId={shopId} from={from} to={to} orders={data.orders} busy={running} salesKeys={salesKeys} daily={daily} onDay={openOrderDay} onRange={days => { setFrom(before(days - 1)); setTo(today()); }} activeSeries={activeSeries}/>}
+    <section className="wbo-toolbar wbo-panel"><label>开始日期<input type="date" value={from} max={to} onChange={e=>setFrom(e.target.value)}/></label><label>结束日期<input type="date" value={to} min={from} max={today()} onChange={e=>setTo(e.target.value)}/></label><label>海外仓<select value={warehouse} onChange={e=>setWarehouse(e.target.value)}><option value="">全部仓库</option>{data.warehouses.map(w=><option key={w.id} value={value(w.raw.id)}>{w.raw.name} · {w.raw.id}</option>)}<option value="unknown">待关联仓库</option></select></label><label>配送模式<select value={model} disabled={section==="returns"} onChange={e=>setModel(e.target.value)}><option value="">FBS + DBS</option><option value="fbs">FBS</option><option value="dbs">DBS</option></select></label><button className="primary" disabled={running||!from||!to||to<from||(Date.parse(to)-Date.parse(from))/86400000>29} onClick={()=>void sync()}><RefreshCw size={16} className={running?"spin":""}/>{running?"正在同步…":section==="daily"?"同步订单、退货与广告":"同步订单与退货"}</button><label className="wbo-check"><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/>每小时自动同步（含广告）</label><small>莫斯科日期 · 订单单次最多 30 天 · 退货独立回补近 90 天 · 自动同步在 WB 工作台打开时运行</small></section>
+    {section === "daily" && <WbAdvertising revision={adRevision} currency={currency} shopId={shopId} from={from} to={to} orders={data.orders} busy={running} salesKeys={salesKeys} daily={daily} onDay={openOrderDay} onRange={days => { setFrom(before(days - 1)); setTo(today()); }} activeSeries={activeSeries}/>}
     {(section === "daily" || (section === "orders" && salesKeys.length > 0)) &&
       <section className="wbo-panel" id="wb-sales-filter">
         <div className="wbo-heading"><h2>商品销售筛选</h2><button disabled={!salesKeys.length}

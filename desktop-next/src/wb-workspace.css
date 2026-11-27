@@ -34,3 +34,32 @@
 
 .wbo-product-cell { display: flex; align-items: center; gap: 12px; }
 .wbo-product-cell img { width: 42px; height: 52px; object-fit: contain; border-radius: 6px; background: #f3f6fb; }
+
+.wbo-weekly-grid { margin: 14px 0; overflow: auto; max-height: 65vh; }
+.wbo-weekly-grid table { width: max-content; min-width: 100%; }
+.wbo-weekly-grid td, .wbo-weekly-grid th { white-space: pre-wrap; min-width: 95px; max-width: 290px; }
+.wbo-weekly-grid thead th { position: sticky; top: 0; z-index: 1; background: #f1f6fc; }
+.wbo-weekly-grid tbody th { background: #f7faff; }
+.wbo-weekly-definitions { margin-top: 12px; }
+.wbo-weekly-definitions dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.wbo-weekly-definitions dt { font-weight: 650; }
+.wbo-weekly-definitions dd { margin: 3px 0 0; color: #62738b; }
+
+.wb-finance-report { display:grid; gap:16px; }
+.wb-finance-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px; margin:14px 0; }
+.wb-finance-kpis dt { color:#657a96; font-size:12px; }
+.wb-finance-kpis dd { margin:5px 0 0; font-weight:650; overflow-wrap:anywhere; }
+.wb-finance-report td input { width:105px; }
+
+.wbo-series-cost-matches { max-height: 180px; overflow: auto; margin: 8px 0 0; }
+
+.wbo-ad-detail{width:min(1200px,100%);background:#f5f8fd;padding:24px;max-height:90vh}
+.wbo-ad-detail .wbo-panel{box-shadow:none;padding:18px}
+.wbo-ad-detail .wbo-toolbar,.wbo-ad-placements{margin-top:12px}
+.wbo-ad-detail .wb-finance-kpis{margin-bottom:0}
+.wbo-ad-placements{display:flex;gap:12px;flex-wrap:wrap}
+.wbo-ad-placements>div{display:flex;flex:1;gap:16px;justify-content:space-between;border:1px solid #e1e9f3;border-radius:10px;padding:12px;min-width:125px}
+.wbo-ad-product,.wbo-ad-bid{display:flex;align-items:center;gap:8px}
+.wbo-ad-product img{width:40px;height:52px;object-fit:contain;border-radius:5px}
+.wbo-ad-bid input{width:88px}
+.wbo-ad-bid button{white-space:nowrap}

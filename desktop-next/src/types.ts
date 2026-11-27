@@ -175,6 +175,7 @@ export interface OrderRow {
 }
 
 export interface AdvertisingData {
+  campaignTrend: Record<string, AdvertisingData["trend"]>;
   impressions: number;
   clicks: number;
   cartAdds: number;
@@ -284,6 +285,8 @@ export interface CampaignActionLog {
   afterRevenue: number;
 }
 
+export interface CampaignPreviewProduct { sku: string; offerId?: string; name?: string; imageUrl?: string; impressions?: number; clicks?: number; orders?: number; spend?: number; revenue?: number; }
+
 export interface CampaignMonitorData {
   id: string;
   name: string;
@@ -291,6 +294,12 @@ export interface CampaignMonitorData {
   budget: number;
   budgetSource: string;
   budgetKnown: boolean;
+  cpcDay: string;
+  skuCpc: Record<string, number>;
+  products: CampaignPreviewProduct[];
+  productSource: string;
+  productFrom: string;
+  productTo: string;
   daily: AdvertisingData["trend"];
   logs: CampaignActionLog[];
 }
@@ -302,7 +311,7 @@ export interface CampaignControlInput {
   confirmation: string;
   expectedShopId?: string;
 }
-export interface CampaignInventoryRow { id: string; name: string; state: string; }
+export interface CampaignInventoryRow { id: string; name: string; state: string; budget?: number | null; }
 
 export interface ProductRow {
   sku: string;

@@ -1,5 +1,5 @@
 use super::{wb_operations::request, wb_shop_center};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 fn cards(token: &str, query: &str, cursor: &Value) -> Result<Value, String> {
@@ -38,6 +38,39 @@ fn media_urls(card: &Value) -> Result<Vec<Value>, String> {
 }
 
 pub(super) fn run(c: &Connection, shop: &str, action: &str, p: &Value) -> Result<Value, String> {
+    if action == "product_catalog" || action == "product_catalog_refresh" {
+        c.execute_batch("CREATE TABLE IF NOT EXISTS wb_product_catalog(shop_id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            .map_err(|e| e.to_string())?;
+        if action == "product_catalog" {
+            let raw: Option<String> = c.query_row("SELECT body FROM wb_product_catalog WHERE shop_id=?1",
+                [shop], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+            if let Some(raw) = raw { return serde_json::from_str(&raw).map_err(|e| e.to_string()); }
+        }
+        let (_, token) = wb_shop_center::active_token(c, shop)?;
+        let mut cursor = Value::Null;
+        let mut catalog = Vec::new();
+        let mut ids = std::collections::HashSet::new();
+        loop {
+            let result = cards(&token, "", &cursor)?;
+            let rows = result["cards"].as_array().ok_or("WB 未返回商品列表")?;
+            for card in rows {
+                let id = card["nmID"].as_u64().ok_or("WB 返回的商品缺少编号")?;
+                if !ids.insert(id) { return Err("WB 商品分页重复，请重试更新".into()); }
+                catalog.push(card.clone());
+            }
+            if rows.len() < 50 { break; }
+            let next = &result["cursor"];
+            if !next["updatedAt"].is_string() || !next["nmID"].is_number() || *next == cursor {
+                return Err("WB 未返回有效商品分页游标".into());
+            }
+            cursor = next.clone();
+            std::thread::sleep(std::time::Duration::from_millis(650));
+        }
+        let data = json!({"cards":catalog,"updatedAt":chrono::Utc::now().to_rfc3339()});
+        c.execute("INSERT INTO wb_product_catalog VALUES(?1,?2) ON CONFLICT(shop_id) DO UPDATE SET body=excluded.body",
+            rusqlite::params![shop,data.to_string()]).map_err(|e| e.to_string())?;
+        return Ok(data);
+    }
     let (_, token) = wb_shop_center::active_token(c, shop)?;
     if action == "product_cards" {
         let data = cards(&token, p["query"].as_str().unwrap_or(""), &p["cursor"])?;

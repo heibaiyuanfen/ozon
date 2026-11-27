@@ -46,3 +46,67 @@
 @media (max-width: 1200px) { .ad-financial-grid { grid-template-columns: repeat(2, 1fr); } }
 .app.sidebar-is-collapsed{grid-template-columns:74px 1fr}.sidebar{transition:width .2s ease}.sidebar.collapsed{width:74px;padding-left:10px;padding-right:10px}.sidebar-collapse{position:absolute;right:10px;top:10px;border:0;background:#eef4fc;color:#4b6d9f;width:28px;height:28px;border-radius:8px;display:grid;place-items:center;cursor:pointer}.sidebar.collapsed .brand{justify-content:center;padding:34px 0 18px}.sidebar.collapsed .brand>div:last-child,.sidebar.collapsed .shop-picker select,.sidebar.collapsed .shop-picker small,.sidebar.collapsed .shop-picker .lucide-chevron-down,.sidebar.collapsed .nav-label,.sidebar.collapsed .nav-group-toggle span,.sidebar.collapsed .nav-chevron,.sidebar.collapsed .nav-group-items,.sidebar.collapsed .sidebar-foot>div:last-child{display:none}.sidebar.collapsed .shop-picker{display:grid;grid-template-columns:1fr;place-items:center;padding:11px}.sidebar.collapsed .sidebar-foot{justify-content:center;padding:10px 0}.grouped-nav{gap:7px!important}.nav-group{display:grid;gap:3px}.sidebar nav .nav-group-toggle{width:100%;font-weight:700;color:#526179;background:#f8fafc}.sidebar nav .nav-group-toggle.current{color:#1d69df;background:#edf4ff}.nav-group-toggle span{flex:1}.nav-chevron{margin-left:auto}.nav-group-items{display:grid;gap:2px;padding-left:8px}.sidebar nav .nav-group-items button{padding:8px 10px;font-size:12px}.sidebar.collapsed .nav-group-toggle{justify-content:center;padding:11px}.sidebar.collapsed+main{padding-left:max(38px,calc((100vw - 74px - 1230px)/2))}
 .campaign-batch-panel{padding:18px;margin:14px 0}.campaign-batch-panel p{color:#6a7890;font-size:12px}.campaign-batch-actions{display:flex;gap:9px;flex-wrap:wrap;margin:12px 0}.campaign-batch-actions button{padding:9px 12px;border:1px solid #cfdbec;border-radius:9px;background:#fff;color:#175ec4;font-weight:700;cursor:pointer}.campaign-batch-actions button.danger{background:#fff0f1;border-color:#f5c3ca;color:#c32943}.campaign-batch-actions button:disabled{opacity:.48;cursor:not-allowed}.campaign-batch-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;max-height:230px;overflow:auto}.campaign-batch-list label{display:flex;gap:8px;align-items:flex-start;padding:8px;border:1px solid #e2e9f4;border-radius:8px;font-size:12px}.campaign-batch-list small{display:block;margin-top:3px;color:#8290a5}
+
+.ozon-ad-modules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 16px;
+  padding: 6px;
+  border: 1px solid #dce6f4;
+  border-radius: 12px;
+  background: #f7faff;
+}
+.ozon-ad-modules button {
+  padding: 9px 16px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #465b78;
+  font: inherit;
+  cursor: pointer;
+}
+.ozon-ad-modules button:hover { background: #edf3ff; }
+.ozon-ad-modules button[aria-pressed="true"] {
+  border-color: #cbdcff;
+  background: #e7efff;
+  color: #174db2;
+  font-weight: 700;
+}
+.ozon-ad-modules button:focus-visible { outline: 2px solid #2469ff; outline-offset: 2px; }
+
+.app main.ozon-ad-main { width: 100%; max-width: none; min-width: 0; padding-inline: clamp(18px, 2vw, 38px); }
+.ozon-campaign-list { min-width: 0; }
+.ozon-ad-table { max-width: 100%; overflow-x: auto; }
+.ozon-ad-table table { width: 100%; min-width: max-content; border-collapse: collapse; }
+.ozon-ad-table th, .ozon-ad-table td { padding: 9px 10px; height: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ozon-ad-table .ad-diagnosis { max-width: 185px; min-width: 130px; white-space: normal; padding: 5px 8px; }
+.ozon-ad-table td small { margin-top: 2px; }
+.ozon-ad-link { background: transparent; border: 0; color: #205fce; cursor: pointer; padding: 2px; text-align: left; font: inherit; font-weight: 650; }
+.campaign-monitor .ozon-campaign-products { margin: 14px 0; padding: 16px; background: #fff; border: 1px solid #e1e9f3; border-radius: 14px; }
+.ozon-campaign-products h3 { margin: 0 0 6px; }
+.ozon-campaign-products p { color: #667995; }
+.ozon-campaign-products input, .ozon-campaign-products select, .ozon-ad-button {
+  padding: 8px 12px; border: 1px solid #d4e0ef; border-radius: 8px;
+  color: #213752; background: #f8faff; font: inherit;
+}
+.ozon-bid-card select { max-width: min(420px, 100%); }
+.ozon-ad-product { display: flex; align-items: center; gap: 10px; white-space: normal; width: 230px; }
+.ozon-ad-thumb { flex: 0 0 44px; padding: 0; cursor: zoom-in; border: 0; background: #f4f7fb; }
+.ozon-ad-thumb img { display: block; width: 44px; height: 52px; object-fit: contain; }
+.campaign-monitor .ozon-ad-image-preview { position: fixed; inset: 0; z-index: 1010; display: grid; place-content: center; justify-items: end; gap: 8px; background: #0c1a34c4; }
+.ozon-ad-image-preview img { max-width: 82vw; max-height: 78vh; object-fit: contain; }
+.campaign-monitor-backdrop .campaign-monitor { width: min(1660px, calc(100vw - 48px)); }
+
+.ozon-selection-board { padding: 18px 20px; }
+.ozon-selection-board .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0; }
+.ozon-selection-board .section-heading h2 { margin: 0; font-size: 16px; }
+.ozon-selection-board .section-heading p, .ozon-selection-coverage { margin: 5px 0; color: #647794; font-size: 12px; }
+.ozon-selection-metrics { display: grid; grid-template-columns: repeat(auto-fit,minmax(125px,1fr)); gap: 8px; margin: 12px 0 0; }
+.ozon-selection-metrics > div { border: 1px solid #e0e8f5; border-radius: 10px; background: #f5f8fd; padding: 10px; }
+.ozon-selection-metrics dt { color: #586e8c; font-size: 12px; }
+.ozon-selection-metrics dd { margin: 5px 0 0; font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.ozon-ad-table input[type="checkbox"] { width: 15px; height: 15px; margin: 0; vertical-align: middle; accent-color: #2563eb; }
+.ozon-ad-table tr[data-selected="true"] td { background: #edf4ff; }
+
+.ozon-selection-chart { width: 100%; height: 340px; margin-top: 16px; }

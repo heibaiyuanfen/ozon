@@ -178,6 +178,7 @@ export async function advertising(range: DateRange): Promise<AdvertisingData> {
     maxCpa: null,
     knownCostMargin: null,
     marginCoveragePercent: 0,
+    campaignTrend: {},
     campaigns: [],
     products: [],
     trend: [],

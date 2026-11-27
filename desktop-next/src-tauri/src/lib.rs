@@ -326,6 +326,7 @@ struct AdvertisingData {
     max_cpa: Option<f64>,
     known_cost_margin: Option<f64>,
     margin_coverage_percent: f64,
+    campaign_trend: std::collections::BTreeMap<String, Vec<AdvertisingTrendRow>>,
     campaigns: Vec<CampaignRow>,
     products: Vec<AdvertisingProductRow>,
     trend: Vec<AdvertisingTrendRow>,
@@ -357,6 +358,12 @@ struct CampaignMonitorData {
     budget: f64,
     budget_source: String,
     budget_known: bool,
+    cpc_day: String,
+    sku_cpc: std::collections::BTreeMap<String, f64>,
+    products: Vec<serde_json::Value>,
+    product_source: String,
+    product_from: String,
+    product_to: String,
     daily: Vec<AdvertisingTrendRow>,
     logs: Vec<CampaignActionLogRow>,
 }
@@ -371,7 +378,7 @@ struct CampaignControlInput {
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CampaignInventoryRow { id: String, name: String, state: String }
+struct CampaignInventoryRow { id: String, name: String, state: String, budget: Option<f64> }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProductRow {
@@ -3012,7 +3019,28 @@ fn advertising(range: DateRange, state: State<AppState>) -> Result<AdvertisingDa
             row.revenue = display_amount(row.revenue, true, rate);
         }
     }
+    let mut campaign_trend_stmt = c.prepare(
+        "WITH x AS (SELECT * FROM ad_daily WHERE day BETWEEN ?1 AND ?2),
+              m AS (SELECT EXISTS(SELECT 1 FROM x WHERE sku='') store)
+         SELECT a.campaign_id, a.day, SUM(a.impressions), SUM(a.clicks), SUM(a.orders), SUM(a.spend), SUM(a.revenue)
+         FROM x a CROSS JOIN m WHERE (m.store=1 AND a.sku='') OR (m.store=0 AND a.sku<>'')
+         GROUP BY a.campaign_id, a.day ORDER BY a.day"
+    ).map_err(|e| e.to_string())?;
+    let mut campaign_trend: std::collections::BTreeMap<String, Vec<AdvertisingTrendRow>> =
+        std::collections::BTreeMap::new();
+    let campaign_days = campaign_trend_stmt.query_map(params![range.from, range.to], |r| {
+        Ok((r.get::<_, String>(0)?, AdvertisingTrendRow {
+            day: r.get(1)?, impressions: r.get(2)?, clicks: r.get(3)?, orders: r.get(4)?,
+            spend: display_amount(r.get(5)?, cross_border, rate),
+            revenue: display_amount(r.get(6)?, cross_border, rate),
+        }))
+    }).map_err(|e| e.to_string())?;
+    for row in campaign_days {
+        let (id, day) = row.map_err(|e| e.to_string())?;
+        campaign_trend.entry(id).or_default().push(day);
+    }
     Ok(AdvertisingData {
+        campaign_trend,
         impressions,
         clicks,
         cart_adds,
@@ -3313,6 +3341,75 @@ fn campaign_monitor_data(
             after_revenue,
         });
     }
+    let cpc_day = (chrono::Utc::now() + chrono::Duration::hours(3))
+        .date_naive().pred_opt().ok_or("无法确定昨日日期")?.to_string();
+    let mut cpc_query = c.prepare(
+        "SELECT a.sku, a.spend / CAST(a.clicks AS REAL)
+         FROM ad_daily a LEFT JOIN campaigns c ON c.campaign_id=a.campaign_id
+         WHERE a.campaign_id=?1 AND a.day=?2 AND a.sku<>'' AND a.clicks>0 AND a.spend>=0
+           AND (lower(COALESCE(c.payment_type,'')) LIKE '%click%'
+             OR lower(COALESCE(c.payment_type,''))='cpc'
+             OR (COALESCE(c.payment_type,'')='' AND a.source='api_product_sku'))"
+    ).map_err(|e| e.to_string())?;
+    let sku_cpc = cpc_query.query_map(params![campaign_id, cpc_day], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| e.to_string())?.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+    let mut product_rows = std::collections::BTreeMap::new();
+    let mut product_query = c.prepare(
+        "SELECT sku,SUM(impressions),SUM(clicks),SUM(orders),SUM(spend),SUM(revenue)
+         FROM ad_daily WHERE campaign_id=?1 AND day BETWEEN ?2 AND ?3 AND sku<>''
+         GROUP BY sku"
+    ).map_err(|e| e.to_string())?;
+    for row in product_query.query_map(params![campaign_id, from, to], |r| {
+        let sku: String = r.get(0)?;
+        Ok((sku.clone(), serde_json::json!({"sku":sku,"impressions":r.get::<_,i64>(1)?,
+            "clicks":r.get::<_,i64>(2)?,"orders":r.get::<_,i64>(3)?,
+            "spend":r.get::<_,f64>(4)?,"revenue":r.get::<_,f64>(5)?})))
+    }).map_err(|e| e.to_string())? {
+        let (sku, data) = row.map_err(|e| e.to_string())?;
+        product_rows.insert(sku, data);
+    }
+    let api_products = (|| -> Result<Vec<serde_json::Value>, String> {
+        if campaign_id.is_empty() || !campaign_id.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("活动编号无效".into());
+        }
+        let token = performance_token(&c)?;
+        let mut products = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for page in 1..=50 {
+            let response = performance_get(&format!("/api/client/campaign/{campaign_id}/v2/products?page={page}&pageSize=100"), &token)?;
+            let items = response["products"].as_array().ok_or("Performance API 未返回活动商品")?;
+            for item in items {
+                let sku = json_text(item.get("sku"));
+                if sku.is_empty() || !seen.insert(sku) {
+                    return Err("活动商品分页包含重复或无效 SKU".into());
+                }
+                products.push(item.clone());
+            }
+            if items.len() < 100 { return Ok(products); }
+        }
+        Err("活动商品超过读取上限".into())
+    })();
+    let product_source = match api_products {
+        Ok(items) => {
+            for item in items {
+                let sku = json_text(item.get("sku"));
+                let row = product_rows.entry(sku.clone()).or_insert_with(|| serde_json::json!({"sku":sku}));
+                row["inCampaign"] = serde_json::json!(true);
+                row["name"] = item.get("title").or_else(|| item.get("name")).cloned().unwrap_or_default();
+            }
+            "Performance API 活动商品 · 已同步 SKU 统计"
+        }
+        Err(_) => "活动商品 API 暂不可用 · 显示已同步的 SKU",
+    }.to_string();
+    let mut metadata = c.prepare("SELECT offer_id,name,image_url FROM products WHERE sku=?1").map_err(|e| e.to_string())?;
+    for (sku, row) in &mut product_rows {
+        if let Some((offer, name, image)) = metadata.query_row([sku], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))
+            .optional().map_err(|e| e.to_string())? {
+            row["offerId"] = serde_json::json!(offer);
+            if !name.is_empty() { row["name"] = serde_json::json!(name); }
+            row["imageUrl"] = serde_json::json!(image);
+        }
+    }
     Ok(CampaignMonitorData {
         id: campaign_id,
         name,
@@ -3320,6 +3417,12 @@ fn campaign_monitor_data(
         budget,
         budget_source,
         budget_known,
+        cpc_day,
+        sku_cpc,
+        products: product_rows.into_values().collect(),
+        product_source,
+        product_from: from,
+        product_to: to,
         daily,
         logs,
     })
@@ -3464,7 +3567,6 @@ async fn campaign_control(
 async fn campaign_inventory(state: State<'_, AppState>) -> Result<Vec<CampaignInventoryRow>, String> {
     let owned = background_state(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if active_shop_kind(&owned)? != "cross_border" { return Err("批量广告控制仅供跨境店使用".into()); }
         let c = db(&owned)?;
         let token = performance_token(&c)?;
         let payload = performance_get("/api/client/campaign", &token)?;
@@ -3476,7 +3578,8 @@ async fn campaign_inventory(state: State<'_, AppState>) -> Result<Vec<CampaignIn
             let name = json_text(item.get("title"));
             let campaign_state = json_text(item.get("state"));
             c.execute("INSERT INTO campaigns(campaign_id,name,state,source)VALUES(?1,?2,?3,'api') ON CONFLICT(campaign_id) DO UPDATE SET name=excluded.name,state=excluded.state,source='api',updated_at=CURRENT_TIMESTAMP",params![id,name,campaign_state]).map_err(|e| e.to_string())?;
-            rows.push(CampaignInventoryRow { id, name, state: campaign_state });
+            let budget = performance_budget_rub(item.get("weeklyBudget").or_else(|| item.get("budget")));
+            rows.push(CampaignInventoryRow { id, name, state: campaign_state, budget });
         }
         rows.sort_by(|a,b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
         Ok(rows)
